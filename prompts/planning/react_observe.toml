@@ -17,6 +17,11 @@ text = """
 - 如果工具输出包含了目标所需的关键信息，但需要进一步处理，判断为 false 并说明需要什么处理
 - 如果工具输出与目标无关或失败，判断为 false
 
+{% if has_intent_hint %}
+【{{ intent_label }}专属提示】
+{{ intent_hint }}
+{% endif %}
+
 返回JSON格式（只返回JSON，不要其他内容）：
 {
   "is_complete": true或false,

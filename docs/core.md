@@ -1,28 +1,42 @@
 # 核心抽象层 (`crates/core`)
 
-定义与具体实现无关的 trait 和类型，确保可扩展性。
+定义与具体实现无关的 trait、数据类型和错误边界，为 AI、MCP、提示管理、工具注册和计划执行组件提供稳定的跨 crate 契约。核心层不负责调用外部服务，也不包含具体的模型或工具实现。
 
 ## 目录结构
 
-```
+```text
 crates/core/
 ├── Cargo.toml
 └── src/
-    ├── lib.rs         # 核心 trait 定义
-    ├── ai/            # AI SDK 抽象
+    ├── lib.rs
+    ├── types.rs             # AI、消息、工具和计划上下文等通用类型
+    ├── ai/
     │   ├── mod.rs
-    │   ├── traits.rs  # AI 客户端 trait (支持流式/直接输出)
-    │   └── types.rs   # 通用类型定义
-    ├── factory/       # 客户端工厂
+    │   └── traits.rs        # AiClient 与流式响应抽象
+    ├── errors/
     │   ├── mod.rs
-    │   └── ai_factory.rs  # AI 客户端工厂
-    ├── mcp/           # MCP 集成抽象
+    │   └── error_types.rs   # 核心错误类型
+    ├── events/
     │   ├── mod.rs
-    │   └── traits.rs  # MCP 客户端 trait
-    └── planner/       # 计划引擎
+    │   └── event_types.rs   # 事件类型
+    ├── mcp/
+    │   ├── mod.rs
+    │   └── traits.rs        # MCP 管理器抽象
+    ├── planner/
+    │   ├── coarse/         # 粗粒度计划接口和类型
+    │   ├── react/           # ReAct 接口和类型
+    │   ├── replanner/      # 重规划类型
+    │   └── validation/     # 计划验证类型
+    ├── prompt/
+    │   ├── mod.rs
+    │   └── traits.rs        # PromptManager 抽象
+    └── tool_registry/
         ├── mod.rs
-        └── traits.rs  # 计划器 trait (占位)
+        ├── traits.rs        # 工具执行和提供者抽象
+        └── types.rs         # 工具分类及相关类型
 ```
+
+`factory/` 目录仍作为扩展预留，但当前主流程直接通过 `AiClient` 和 `AiManager` 注入客户端。
 
 ## AI 客户端 trait (`ai/traits.rs`)
 
@@ -95,23 +109,21 @@ pub enum MessageContent {
 
 ## 统一消息结构
 
-所有消息都使用统一的 `Message` 结构（符合 OpenAI 标准）：
+所有消息都使用统一的 `Message` 结构，并兼容普通文本、图片、工具调用和模型思考字段：
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    /// 消息角色
     pub role: MessageRole,
-    /// 消息内容（支持多种类型）
     pub content: Option<MessageContent>,
-    /// 工具调用列表（仅 assistant 角色）
     pub tool_calls: Option<Vec<ToolCall>>,
-    /// 工具调用 ID（仅 tool 角色）
     pub tool_call_id: Option<String>,
-    /// 名称（可选）
     pub name: Option<String>,
+    pub reasoning_content: Option<String>,
 }
 ```
+
+`reasoning_content` 用于兼容支持思考模式的模型；不同适配器可以根据服务商能力选择填充或忽略该字段。
 
 ## 请求和响应格式
 
@@ -213,147 +225,98 @@ pub trait McpClient: Send + Sync {
 }
 ```
 
-## 计划器 trait (`planner/traits.rs`)
+## 计划引擎抽象 (`planner/`)
+
+计划引擎采用分层接口：粗粒度计划器负责定义步骤目标，ReAct Agent 负责执行单个步骤。重规划和验证目前主要提供数据类型，具体协调器尚未在 `planned-agent` crate 中实现。
+
+### 粗粒度计划器接口
+
+实现：[CoarsePlanner](../crates/core/src/planner/coarse/coarse_planner.rs)
 
 ```rust
 #[async_trait]
-pub trait Planner: Send + Sync {
-    /// 分析用户输入，生成计划步骤
-    async fn create_plan(&self, input: &str, context: &PlanContext) -> Result<Plan>;
-    
-    /// 执行计划步骤
-    async fn execute_plan(&self, plan: &Plan) -> Result<PlanExecution>;
+pub trait CoarsePlanner: Send + Sync {
+    async fn generate_coarse_plan(
+        &self,
+        input: &str,
+        context: &PlanContext,
+    ) -> Result<CoarseGrainedPlan>;
+
+    async fn validate_coarse_plan(
+        &self,
+        plan: &CoarseGrainedPlan,
+    ) -> Result<CoarsePlanValidationResult>;
+
+    fn name(&self) -> &str;
 }
 ```
 
-## 详细计划类型 (`planner/detailed/detailed_types.rs`)
+相关类型位于 `planner/coarse/coarse_types.rs`：
 
-### 工具探索上下文
+- `CoarseGrainedPlan`：计划整体信息、步骤列表、复杂度和风险等级。
+- `CoarseGrainedStep`：步骤意图、预期输出、结果引用、依赖和数据需求。
+- `DataRequirement`：步骤所需输入数据。
+- `CoarsePlanValidationResult`：计划验证的错误和警告。
 
-```rust
-/// 依赖步骤信息
-#[derive(Debug, Clone)]
-pub struct DependencyStepInfo {
-    /// 步骤ID
-    pub step_id: String,
-    /// 步骤意图
-    pub intent: String,
-    /// 使用的工具名称（如果有）
-    pub tool_name: Option<String>,
-}
+### ReAct Agent 接口
 
-/// 工具探索上下文
-#[derive(Debug, Clone)]
-pub struct ToolExplorationContext {
-    /// 当前步骤的依赖步骤信息（上一步的意图和使用的工具）
-    pub dependency_steps: Vec<DependencyStepInfo>,
-    /// 整体计划描述
-    pub plan_description: String,
-}
-```
-
-**用途**：在工具探索阶段传递上下文信息，帮助LLM理解步骤间关系，避免误解步骤意图。
-
-## 通用类型定义 (`ai/types.rs`)
-
-该模块包含 AI 请求和响应等通用类型定义，用于在 trait 和实现之间传递数据。具体类型定义请参考实际代码实现。
-
-## 工厂模式 (`factory/`)
-
-工厂模块提供 AI 客户端的创建逻辑，支持根据配置动态实例化不同的 AI 客户端实现。
-# 核心抽象层 (`crates/core`)
-
-定义与具体实现无关的 trait 和类型，确保可扩展性。
-
-## 目录结构
-
-```
-crates/core/
-├── Cargo.toml
-└── src/
-    ├── lib.rs         # 核心 trait 定义
-    ├── ai/            # AI SDK 抽象
-    │   ├── mod.rs
-    │   ├── traits.rs  # AI 客户端 trait (支持流式/直接输出)
-    │   └── types.rs   # 通用类型定义
-    ├── factory/       # 客户端工厂
-    │   ├── mod.rs
-    │   └── ai_factory.rs  # AI 客户端工厂
-    ├── mcp/           # MCP 集成抽象
-    │   ├── mod.rs
-    │   └── traits.rs  # MCP 客户端 trait
-    └── planner/       # 计划引擎
-        ├── mod.rs
-        └── traits.rs  # 计划器 trait (占位)
-```
-
-## AI 客户端 trait (`ai/traits.rs`)
+实现：[ReActAgent](../crates/core/src/planner/react/react_trait.rs)
 
 ```rust
 #[async_trait]
-pub trait AiClient: Send + Sync {
-    /// 直接输出模式：发送请求，返回完整响应
-    async fn complete(&self, request: AiRequest) -> Result<AiResponse>;
-    
-    /// 流式输出模式：发送请求，返回流式响应
-    async fn complete_stream(&self, request: AiRequest) -> Result<AiStreamResponse>;
-    
-    /// 获取提供商名称
-    fn provider_name(&self) -> &str;
-    
-    /// 获取模型名称
-    fn model_name(&self) -> &str;
+pub trait ReActAgent: Send + Sync {
+    async fn execute_coarse_step(
+        &self,
+        coarse_step: &CoarseGrainedStep,
+        context: &PlanContext,
+    ) -> Result<ReActExecutionResult>;
+
+    async fn think(
+        &self,
+        coarse_step: &CoarseGrainedStep,
+        history: &[ReActStep],
+        context: &PlanContext,
+        remaining_steps: Option<&[CoarseGrainedStep]>,
+    ) -> Result<Thought>;
+
+    async fn act(&self, thought: &Thought, context: &PlanContext) -> Result<Action>;
+    async fn execute_tool(&self, action: &Action) -> Result<Observation>;
+    async fn observe(&self, coarse_step: &CoarseGrainedStep, observation: &Observation) -> Result<ObserveResult>;
+    fn is_complete(&self, observation: &Observation) -> bool;
+    fn name(&self) -> &str;
 }
 ```
+
+ReAct 类型位于 `planner/react/react_types.rs`：
+
+- `Thought`：思考结果和下一步计划。
+- `Action`：工具名称、参数和选择理由。
+- `Observation`：工具输出、错误和耗时。
+- `ReActStep`：一轮思考、行动、观察历史。
+- `ReActExecutionResult`：单个粗粒度步骤的最终执行结果。
+- `ReActAgentConfig`：迭代、超时和重试相关配置。
+
+### 重规划与验证类型
+
+- `planner/replanner/replanner_types.rs` 定义重规划请求、响应和重规划动作。
+- `planner/validation/validation_types.rs` 定义计划验证错误、警告和验证结果。
+- 当前没有对应的完整实现组件，调用方不能将这些类型误认为已经存在的协调器。
 
 ## MCP 客户端 trait (`mcp/traits.rs`)
 
-```rust
-#[async_trait]
-pub trait McpClient: Send + Sync {
-    /// 连接到 MCP 服务器
-    async fn connect(&mut self, config: McpConfig) -> Result<()>;
-    
-    /// 列出可用工具
-    async fn list_tools(&self) -> Result<Vec<Tool>>;
-    
-    /// 调用工具
-    async fn call_tool(&self, name: &str, arguments: Value) -> Result<ToolResult>;
-    
-    /// 断开连接
-    async fn disconnect(&mut self) -> Result<()>;
-    
-    /// 检查连接是否健康
-    async fn is_connected(&self) -> bool;
-    
-    /// 获取连接状态信息
-    async fn connection_status(&self) -> ConnectionStatus;
-    
-    /// 心跳检测（如果服务器支持）
-    async fn ping(&self) -> Result<()>;
-    
-    /// 重新连接
-    async fn reconnect(&mut self) -> Result<()>;
-}
-```
+MCP 抽象负责连接管理、工具发现、工具调用、健康检查和重连。具体的 `McpManager` 实现在 `mcp-rmcp` crate 中。
 
-## 计划器 trait (`planner/traits.rs`)
+## Prompt 管理 trait (`prompt/traits.rs`)
 
-```rust
-#[async_trait]
-pub trait Planner: Send + Sync {
-    /// 分析用户输入，生成计划步骤
-    async fn create_plan(&self, input: &str, context: &PlanContext) -> Result<Plan>;
-    
-    /// 执行计划步骤
-    async fn execute_plan(&self, plan: &Plan) -> Result<PlanExecution>;
-}
-```
+Prompt 抽象负责模板加载、渲染、响应解析和响应验证。具体实现位于 `prompt-manager` crate。
 
-## 通用类型定义 (`ai/types.rs`)
+## 工具注册抽象 (`tool_registry/`)
 
-该模块包含 AI 请求和响应等通用类型定义，用于在 trait 和实现之间传递数据。具体类型定义请参考实际代码实现。
+工具注册抽象定义工具执行器、内置工具提供者、工具分类和工具调用相关类型。具体注册、路由和参数验证逻辑位于 `tool-manager` crate。
 
-## 工厂模式 (`factory/`)
+## 设计约束
 
-工厂模块提供 AI 客户端的创建逻辑，支持根据配置动态实例化不同的 AI 客户端实现。
+1. 核心接口保持与具体 AI SDK、MCP SDK 和工具实现无关。
+2. 异步 trait 对象需要满足 `Send + Sync`，便于在 Tokio 任务间共享。
+3. 跨层传递的数据使用 `serde` 和 `serde_json`，方便 Prompt、工具和 API 适配。
+4. 组件实现应依赖核心 trait，而不是依赖另一个具体实现 crate。

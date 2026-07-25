@@ -4,9 +4,9 @@ use anyhow::Result;
 use serde_json::Value;
 use tracing::info;
 
-use planned_agent_core::types::{Tool, ToolResult};
+use planned_agent_core::types::Tool;
 use planned_agent_core::tool_registry::{ToolSource, ToolCategory, ToolExecutor};
-use crate::types::{ToolMetadata, ToolRegistryStats};
+use crate::types::{ToolMetadata, ToolRegistryStats, ToolOutcome};
 use crate::mcp_adapter::McpManagerTrait;
 use crate::validator::ToolValidator;
 
@@ -436,36 +436,38 @@ impl ToolRegistry {
     // ========== 执行方法 ==========
     
     /// 调用工具（自动路由，带参数验证）
-    pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<ToolResult> {
+    /// 返回 `ToolOutcome`，可在不再次查询注册表的情况下取得工具分类。
+    pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<ToolOutcome> {
         // 1. 检查工具是否存在
         let (tool, metadata) = {
             let tools = self.tools.read().unwrap();
             let meta = self.metadata.read().unwrap();
-            
+
             let tool = tools.get(name)
                 .ok_or_else(|| anyhow::anyhow!("Tool not found: {}", name))?
                 .clone();
             let metadata = meta.get(name)
                 .ok_or_else(|| anyhow::anyhow!("Tool metadata not found: {}", name))?
                 .clone();
-            
+
             (tool, metadata)
         };
-        
+
         // 2. 检查工具是否启用
         if !metadata.enabled {
             return Err(anyhow::anyhow!("Tool is disabled: {}", name));
         }
-        
+
         // 3. 验证参数
         ToolValidator::validate_arguments(&tool, &arguments)?;
-        
-        // 4. 根据来源路由到正确的执行器
-        match &metadata.source {
+
+        // 4. 根据来源路由到正确的执行器。
+        // 只在读取共享状态时持锁；异步执行前克隆 Arc 并释放 RwLockReadGuard，
+        // 避免 call_tool future 变成 !Send。
+        let result = match &metadata.source {
             ToolSource::Mcp { server_name } => {
-                // 路由到 MCP 管理器
-                let mcp = self.mcp_manager.read().unwrap();
-                if let Some(mcp) = &*mcp {
+                let mcp = self.mcp_manager.read().unwrap().clone();
+                if let Some(mcp) = mcp {
                     info!("Routing to MCP server '{}': {}", server_name, name);
                     mcp.call_tool(name, arguments).await
                 } else {
@@ -473,9 +475,13 @@ impl ToolRegistry {
                 }
             }
             ToolSource::Custom { handler_id } => {
-                // 路由到自定义执行器
-                let executors = self.custom_executors.read().unwrap();
-                if let Some(executor) = executors.get(handler_id) {
+                let executor = self
+                    .custom_executors
+                    .read()
+                    .unwrap()
+                    .get(handler_id)
+                    .cloned();
+                if let Some(executor) = executor {
                     info!("Routing to custom executor '{}': {}", handler_id, name);
                     executor.execute(name, arguments).await
                 } else {
@@ -483,16 +489,22 @@ impl ToolRegistry {
                 }
             }
             ToolSource::Builtin => {
-                // 路由到内置执行器
-                let executors = self.builtin_executors.read().unwrap();
-                if let Some(executor) = executors.get(name) {
+                let executor = self
+                    .builtin_executors
+                    .read()
+                    .unwrap()
+                    .get(name)
+                    .cloned();
+                if let Some(executor) = executor {
                     info!("Routing to builtin executor: {}", name);
                     executor.execute(name, arguments).await
                 } else {
                     Err(anyhow::anyhow!("Builtin executor not found: {}", name))
                 }
             }
-        }
+        }?;
+
+        Ok(ToolOutcome::new(result, metadata.categories))
     }
     
     // ========== 管理方法 ==========

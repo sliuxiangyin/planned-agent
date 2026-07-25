@@ -3,7 +3,15 @@ description = "ReAct Agent 行动 prompt"
 
 [content]
 text = """
-基于以下思考，选择工具并生成参数：
+基于以下思考，选择工具并生成参数。
+
+用户原始目标（必须保留其中的关键词、实体、URL、参数）：
+{{ user_goal }}
+
+当前步骤：
+- 意图：{{ coarse_step.intent }}
+- 期望产出：{{ coarse_step.expected_output }}
+- 数据需求：{{ data_requirements }}
 
 思考：{{ thought.reasoning }}
 计划：{{ thought.plan }}
@@ -17,9 +25,16 @@ text = """
 请选择最合适的工具，并生成正确的参数。
 
 重要：
-- 请严格按照思考结果选择工具，如果思考中说要使用 ai_process，就必须使用 ai_process
+- 必须保留用户原始目标中的关键词、实体、URL、路径、数值，不要替换为示例值
+- 工具参数必须来自用户目标、数据需求或前序步骤输出，不得使用占位符
+- 请严格按照思考结果选择工具
 - 如果需要使用前序步骤的输出数据，请直接使用上面提供的真实数据，不要使用示例数据或占位符
 - 必须返回有效的 JSON 格式，不要包含其他文本
+
+{% if has_intent_hint %}
+【{{ intent_label }}专属提示】
+{{ intent_hint }}
+{% endif %}
 
 返回JSON格式：
 {
@@ -30,6 +45,9 @@ text = """
 """
 
 [variables]
+user_goal = { description = "用户原始目标，必须保留其中的关键词与实体", required = true }
+coarse_step = { description = "粗粒度步骤（含 intent、expected_output、data_requirements 等）", required = true }
+data_requirements = { description = "当前步骤的数据需求列表（JSON 字符串）", required = false }
 thought = { description = "思考结果", required = true }
 tools = { description = "可用工具列表", required = true }
 previous_outputs = { description = "前序步骤的原始工具输出", required = false }

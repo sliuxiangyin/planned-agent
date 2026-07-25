@@ -16,6 +16,9 @@ chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
 which = "4"
 sysinfo = "0.30"
+readability-rust = "0.1"
+htmd = "0.5"
+scraper = "0.18"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

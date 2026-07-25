@@ -1,3 +1,8 @@
 pub mod default_react_agent;
+pub mod html_clean_subagent;
+pub mod intent_handler;
+pub mod intent_router;
+pub mod tool_result_handler;
+pub mod tool_result_router;
 
 pub use default_react_agent::*;

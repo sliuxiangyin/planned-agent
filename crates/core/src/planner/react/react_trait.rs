@@ -28,14 +28,19 @@ pub trait ReActAgent: Send + Sync {
     /// 行动：选择工具并生成参数
     async fn act(
         &self,
+        coarse_step: &CoarseGrainedStep,
         thought: &Thought,
         context: &PlanContext,
     ) -> Result<Action>;
     
     /// 执行：调用工具
+    /// `current_intent` 与 `next_intent` 用于工具结果的后处理路由（如 HTML 清洗子 Agent），
+    /// 不进入主 LLM 上下文，仅在工具结果后处理阶段使用。
     async fn execute_tool(
         &self,
         action: &Action,
+        current_intent: &str,
+        next_intent: &str,
     ) -> Result<Observation>;
     
     /// 观察：分析工具执行结果，判断是否完成目标，提取关键信息

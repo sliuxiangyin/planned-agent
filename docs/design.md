@@ -5,7 +5,7 @@
 1. **多 AI SDK 支持**：通过工厂模式抽象 AI 接口，支持流式输出和直接输出，便于后续适配不同 AI 服务（如 OpenAI、Anthropic 等）。
 2. **多 MCP 服务器支持**：支持同时连接多个 MCP 服务器，工具自动路由到正确的服务器。
 3. **灵活配置**：支持多个 AI 提供商和 MCP 服务器配置，可通过配置文件或命令行参数选择默认提供商/服务器。
-4. **计划生成**：分析用户输入，将其分解为结构化的计划步骤，最终给出结论（初期仅提供目录占位）。
+4. **计划生成与执行**：通过 `LlmCoarsePlanner` 生成结构化粗粒度计划，再由 `DefaultReActAgent` 按步骤动态选择工具并执行；详细步骤分析、统一执行器和协调器仍属于后续扩展。
 5. **提示工程**：提供强大的提示模板管理能力，支持变量替换、输出约束和验证，确保 LLM 响应质量。
 6. **异步运行时**：基于 tokio 实现全异步架构，确保高并发和低延迟。
 
@@ -41,9 +41,12 @@ planned-agent/
 │   │       ├── mcp/           # MCP 集成抽象
 │   │       │   ├── mod.rs
 │   │       │   └── traits.rs  # MCP 客户端 trait
-│   │       ├── planner/       # 计划引擎
+│   │       ├── planner/       # 计划引擎抽象
 │   │       │   ├── mod.rs
-│   │       │   └── traits.rs  # 计划器 trait (占位)
+│   │       │   ├── coarse/    # 粗粒度计划接口与类型
+│   │       │   ├── react/     # ReAct 接口与类型
+│   │       │   ├── replanner/ # 重规划类型
+│   │       │   └── validation/ # 计划验证类型
 │   │       └── prompt/        # 提示工程抽象
 │   │           ├── mod.rs
 │   │           └── traits.rs  # 提示管理器 trait
@@ -89,7 +92,10 @@ planned-agent/
 │           ├── main.rs        # 入口点
 │           ├── config.rs      # 配置管理（支持多配置）
 │           ├── agent.rs       # 代理核心逻辑
-│           └── cli.rs         # 命令行接口
+│           ├── cli.rs         # 命令行接口
+│           └── planner/
+│               ├── coarse/    # LlmCoarsePlanner
+│               └── react/     # DefaultReActAgent
 ├── prompts/                   # 提示模板目录
 │   ├── chat/                  # 对话提示
 │   │   ├── system.toml        # 系统角色提示
@@ -98,20 +104,24 @@ planned-agent/
 │   │   └── extract_info.toml  # 信息提取提示
 │   └── planning/              # 计划提示
 │       ├── coarse_plan.toml   # 粗粒度计划生成
-│       └── tool_exploration.toml # 工具探索和推荐
+│       ├── react_think.toml   # ReAct 思考
+│       ├── react_act.toml     # ReAct 行动
+│       └── react_observe.toml # ReAct 观察
 ├── examples/                  # 示例代码
 │   ├── stream_chat.rs         # 流式对话示例
 │   ├── mcp_tools.rs           # MCP 工具调用示例
 │   └── prompt_manager.rs      # 提示管理器示例
 ├── tests/                     # 集成测试
 └── docs/                      # 文档
-    ├── design.md              # 本文档
+    ├── design.md              # 项目总体设计
     ├── core.md                # 核心抽象层详细设计
     ├── ai-openai.md           # AI SDK 适配器详细设计
     ├── mcp-rmcp.md            # MCP 集成详细设计
     ├── tool-manager.md        # 工具管理器详细设计
-    ├── prompt-engineering.md  # 提示工程设计
-    └── planned-agent.md       # 主程序详细设计
+    ├── planned-agent.md       # 主程序详细设计
+    └── planned-agent/         # 主程序计划组件文档
+        ├── coarse-planner.md  # 粗粒度计划器
+        └── react-agent.md     # ReAct 执行组件
 ```
 
 ## 模块设计
@@ -125,6 +135,8 @@ planned-agent/
 5. [工具管理器 (`crates/tool-manager`)](tool-manager.md)
 6. [提示管理器 (`crates/prompt-manager`)](prompt-engineering.md)
 7. [主程序 (`crates/planned-agent`)](planned-agent.md)
+8. [主程序计划组件：粗粒度计划器](planned-agent/coarse-planner.md)
+9. [主程序计划组件：ReAct 执行器](planned-agent/react-agent.md)
 
 ## 依赖项 (Cargo.toml)
 
@@ -275,6 +287,9 @@ config = "0.13"
 
 ## 实现阶段
 
+当前计划引擎已经具备可运行的最小链路：`LlmCoarsePlanner` 生成 `CoarseGrainedPlan`，`DefaultReActAgent` 逐个执行计划步骤。`DetailedPlanner`、统一 `Executor`、`Supervisor` 和完整 `PlanOrchestrator` 尚未实现。
+
+
 ### 阶段一：基础架构 (第1-2天)
 1. 初始化 Cargo 工作空间
 2. 实现核心 trait 和类型定义
@@ -312,7 +327,7 @@ config = "0.13"
 
 ## 后续扩展
 1. **更多 AI 提供商**：添加 Anthropic、Google Gemini 等适配器
-2. **计划引擎实现**：完善计划生成和执行逻辑
+2. **计划引擎完善**：补充详细步骤分析、统一执行器、监督器和动态重规划协调逻辑
 3. **持久化**：保存对话历史和计划状态
 4. **Web API**：提供 RESTful 或 GraphQL 接口
 5. **插件系统**：支持自定义工具和功能扩展

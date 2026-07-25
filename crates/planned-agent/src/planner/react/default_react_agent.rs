@@ -12,6 +12,11 @@ use planned_agent_core::planner::react::*;
 use planned_agent_tool_manager::ToolRegistry;
 use planned_agent_core::types::{PlanContext, ChatCompletionRequest, Message, MessageRole, MessageContent};
 
+use super::html_clean_subagent::HtmlCleanSubAgent;
+use super::intent_handler::IntentHandler;
+use super::intent_router::IntentRouter;
+use super::tool_result_router::ToolResultRouter;
+
 /// 默认 ReAct Agent 实现
 pub struct DefaultReActAgent<PM: PromptManager> {
     /// AI 客户端
@@ -20,11 +25,13 @@ pub struct DefaultReActAgent<PM: PromptManager> {
     prompt_manager: Arc<PM>,
     /// 工具注册表
     tool_registry: Arc<ToolRegistry>,
+    /// 工具结果路由器：内部持有已注册的 handlers，一站式完成"路由 + 执行"
+    tool_result_router: ToolResultRouter,
     /// 配置
     config: ReActAgentConfig,
 }
 
-impl<PM: PromptManager> DefaultReActAgent<PM> {
+impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
     /// 创建新的 DefaultReActAgent
     pub fn new(
         ai_client: Arc<dyn AiClient>,
@@ -32,10 +39,19 @@ impl<PM: PromptManager> DefaultReActAgent<PM> {
         tool_registry: Arc<ToolRegistry>,
         config: ReActAgentConfig,
     ) -> Self {
+        let html_sub_agent = Arc::new(HtmlCleanSubAgent::with_llm_decider(
+            ai_client.clone(),
+            prompt_manager.clone(),
+            tool_registry.clone(),
+        ));
+        // 标准两个 handler 直接由 router 内部封装注册
+        let tool_result_router = ToolResultRouter::with_standard_handlers(html_sub_agent, 50_000);
+
         Self {
             ai_client,
             prompt_manager,
             tool_registry,
+            tool_result_router,
             config,
         }
     }
@@ -52,6 +68,49 @@ impl<PM: PromptManager> DefaultReActAgent<PM> {
             tool_registry,
             ReActAgentConfig::default(),
         )
+    }
+
+    /// 向 ReAct Prompt 注入原始用户目标和完整步骤约束。
+    fn with_step_context(
+        prompt_context: PromptContext,
+        coarse_step: &CoarseGrainedStep,
+        context: &PlanContext,
+    ) -> PromptContext {
+        let user_goal = context
+            .metadata
+            .get("user_goal")
+            .cloned()
+            .unwrap_or_else(|| Value::String("无".to_string()));
+        let step_value = serde_json::to_value(coarse_step).unwrap_or_else(|_| {
+            serde_json::json!({
+                "intent": coarse_step.intent,
+                "expected_output": coarse_step.expected_output,
+            })
+        });
+        let data_requirements = serde_json::to_string_pretty(&coarse_step.data_requirements)
+            .unwrap_or_else(|_| "[]".to_string());
+
+        prompt_context
+            .with_variable("user_goal", user_goal)
+            .with_variable("coarse_step", step_value)
+            .with_variable("data_requirements", serde_json::json!(data_requirements))
+    }
+
+    /// 根据 CoarseGrainedStep 解析主导意图，并把模板可消费的 flags 合并进 PromptContext。
+    ///
+    /// 流程：先路由（IntentRouter::route）→ 再处理（IntentHandler::handle）。
+    /// MixedFocus 时 `has_intent_hint=false`，模板中的 `{% if %}` 整体短路，
+    /// 对 prompt 体积零影响。
+    fn with_intent_flags(
+        coarse_step: &CoarseGrainedStep,
+        mut ctx: PromptContext,
+    ) -> PromptContext {
+        let intent = IntentRouter::route(coarse_step);
+        debug!(target: "react_agent", "Resolved step intent: {:?} for step {}", intent, coarse_step.id);
+        for (k, v) in IntentHandler::handle(intent) {
+            ctx = ctx.with_variable(k.to_string(), v);
+        }
+        ctx
     }
     
     /// 调用 LLM
@@ -172,7 +231,7 @@ impl<PM: PromptManager> DefaultReActAgent<PM> {
 }
 
 #[async_trait]
-impl<PM: PromptManager> ReActAgent for DefaultReActAgent<PM> {
+impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
     async fn execute_coarse_step(
         &self,
         coarse_step: &CoarseGrainedStep,
@@ -190,7 +249,14 @@ impl<PM: PromptManager> ReActAgent for DefaultReActAgent<PM> {
         
         for iteration in 0..self.config.max_iterations {
             debug!("ReAct iteration {}/{}", iteration + 1, self.config.max_iterations);
-            
+
+            // 计算下一步意图（用于后处理路由）
+            let next_intent = remaining_steps
+                .as_ref()
+                .and_then(|steps| steps.first().map(|step| step.intent.clone()))
+                .unwrap_or_default();
+            let current_intent = coarse_step.intent.clone();
+
             // 1. THINK - 思考
             let thought = match self.think(coarse_step, &history, context, remaining_steps.as_deref()).await {
                 Ok(thought) => {
@@ -208,11 +274,11 @@ impl<PM: PromptManager> ReActAgent for DefaultReActAgent<PM> {
                     ));
                 }
             };
-            
+
             // 2. ACT - 行动
             let mut act_result = None;
             for retry in 0..3 {
-                match self.act(&thought, context).await {
+                match self.act(coarse_step, &thought, context).await {
                     Ok(action) => {
                         debug!("Action: {} with params {}", action.tool_name, action.parameters);
                         act_result = Some(action);
@@ -233,16 +299,15 @@ impl<PM: PromptManager> ReActAgent for DefaultReActAgent<PM> {
                 }
             }
             let action = act_result.unwrap();
-            
-            // 3. EXECUTE - 执行工具
-            let raw_observation = match self.execute_tool(&action).await {
+
+            // 3. EXECUTE - 调用工具并经过后处理
+            let observation = match self.execute_tool(&action, &current_intent, &next_intent).await {
                 Ok(obs) => {
-                    debug!("Raw observation: error={:?}", obs.error);
+                    debug!("Observation: error={:?}", obs.error);
                     obs
                 }
                 Err(e) => {
                     error!("Execute tool failed: {}", e);
-                    // 创建失败的观察
                     Observation {
                         output: Value::Null,
                         is_complete: false,
@@ -251,9 +316,9 @@ impl<PM: PromptManager> ReActAgent for DefaultReActAgent<PM> {
                     }
                 }
             };
-            
+
             // 4. OBSERVE - 分析工具执行结果，提取关键信息
-            let observe_result = match self.observe(coarse_step, &raw_observation).await {
+            let observe_result = match self.observe(coarse_step, &observation).await {
                 Ok(result) => {
                     debug!("Observe: complete={}, summary={}", result.is_complete, result.summary);
                     result
@@ -266,20 +331,20 @@ impl<PM: PromptManager> ReActAgent for DefaultReActAgent<PM> {
                     }
                 }
             };
-            
-            // 记录历史
+
+            // 记录历史（清洗后的结果进入历史）
             history.push(ReActStep {
                 thought: thought.clone(),
                 action: action.clone(),
-                observation: raw_observation.clone(),
+                observation: observation.clone(),
             });
-            
+
             // 5. 判断是否完成
             if observe_result.is_complete {
                 info!("ReAct execution completed in {} iterations", iteration + 1);
                 return Ok(ReActExecutionResult::success(
                     coarse_step.id.clone(),
-                    raw_observation.output,
+                    observation.output,
                     history,
                     iteration + 1,
                     start_time.elapsed().as_millis() as u64,
@@ -342,13 +407,19 @@ impl<PM: PromptManager> ReActAgent for DefaultReActAgent<PM> {
         };
         
         // 使用 prompt_manager 渲染 prompt
-        let prompt_context = PromptContext::new()
-            .with_variable("coarse_step", serde_json::json!({"intent": coarse_step.intent}))
-            .with_variable("tools", serde_json::json!(self.get_tools_description()))
-            .with_variable("history", serde_json::json!(history_str))
-            .with_variable("previous_outputs", serde_json::json!(previous_outputs))
-            .with_variable("remaining_steps", serde_json::json!(remaining_steps_str));
-        
+        let prompt_context = Self::with_intent_flags(
+            coarse_step,
+            Self::with_step_context(
+                PromptContext::new()
+                    .with_variable("tools", serde_json::json!(self.get_tools_description()))
+                    .with_variable("history", serde_json::json!(history_str))
+                    .with_variable("previous_outputs", serde_json::json!(previous_outputs))
+                    .with_variable("remaining_steps", serde_json::json!(remaining_steps_str)),
+                coarse_step,
+                context,
+            ),
+        );
+
         let prompt = self.prompt_manager.render("planning/react_think", &prompt_context).await
             .map_err(|e| anyhow::anyhow!("Failed to render template planning/react_think: {}", e))?;
         
@@ -363,6 +434,7 @@ impl<PM: PromptManager> ReActAgent for DefaultReActAgent<PM> {
     
     async fn act(
         &self,
+        coarse_step: &CoarseGrainedStep,
         thought: &Thought,
         context: &PlanContext,
     ) -> Result<Action> {
@@ -372,14 +444,21 @@ impl<PM: PromptManager> ReActAgent for DefaultReActAgent<PM> {
             .unwrap_or_else(|| "无".to_string());
         
         // 使用 prompt_manager 渲染 prompt
-        let prompt_context = PromptContext::new()
-            .with_variable("thought", serde_json::json!({
-                "reasoning": thought.reasoning,
-                "plan": thought.plan
-            }))
-            .with_variable("tools", serde_json::json!(self.get_tools_description()))
-            .with_variable("previous_outputs", serde_json::json!(previous_outputs));
-        
+        let prompt_context = Self::with_intent_flags(
+            coarse_step,
+            Self::with_step_context(
+                PromptContext::new()
+                    .with_variable("thought", serde_json::json!({
+                        "reasoning": thought.reasoning,
+                        "plan": thought.plan
+                    }))
+                    .with_variable("tools", serde_json::json!(self.get_tools_description()))
+                    .with_variable("previous_outputs", serde_json::json!(previous_outputs)),
+                coarse_step,
+                context,
+            ),
+        );
+
         let prompt = self.prompt_manager.render("planning/react_act", &prompt_context).await?;
         
         // 调用 LLM
@@ -391,57 +470,60 @@ impl<PM: PromptManager> ReActAgent for DefaultReActAgent<PM> {
         Ok(action)
     }
     
+    /// 调用工具 + 后处理（路由 → handler 链式执行）。
+    ///
+    /// `current_intent` / `next_intent` 用于 handler 内部决策（如 HTML 清洗子 Agent 的格式选择）。
     async fn execute_tool(
         &self,
         action: &Action,
+        current_intent: &str,
+        next_intent: &str,
     ) -> Result<Observation> {
         let start_time = Instant::now();
         let tool_name = action.tool_name.clone();
         let parameters = action.parameters.clone();
-        
-        // 特殊处理 ai_process 工具
+
+        // 特殊处理 ai_process 工具：不经后处理，直接走原 AI 流程
         if tool_name == "ai_process" {
             return self.execute_ai_process(&parameters, start_time).await;
         }
-        
-        let tool_registry = self.tool_registry.clone();
-        
-        // 使用 spawn_blocking 来避免 RwLockReadGuard 的 Send 问题
-        let result = tokio::task::spawn_blocking(move || {
-            // 这里需要使用 block_on 来调用异步函数
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(tool_registry.call_tool(&tool_name, parameters))
-        }).await?;
-        
+
+        let outcome_result = self
+            .tool_registry
+            .call_tool(&tool_name, parameters)
+            .await;
+
         let duration_ms = start_time.elapsed().as_millis() as u64;
-        
-        match result {
-            Ok(tool_result) => {
-                if tool_result.is_error {
-                    Ok(Observation {
-                        output: tool_result.content,
-                        is_complete: false,
-                        error: Some("Tool returned error".to_string()),
-                        duration_ms,
-                    })
-                } else {
-                    Ok(Observation {
-                        output: tool_result.content,
-                        is_complete: false, // 需要后续判断
-                        error: None,
-                        duration_ms,
-                    })
-                }
-            }
+
+        let outcome = match outcome_result {
+            Ok(o) => o,
             Err(e) => {
-                Ok(Observation {
+                return Ok(Observation {
                     output: Value::Null,
                     is_complete: false,
                     error: Some(e.to_string()),
                     duration_ms,
-                })
+                });
             }
-        }
+        };
+
+        let raw_obs = Observation {
+            output: outcome.result.content,
+            is_complete: false,
+            error: if outcome.result.is_error {
+                Some("Tool returned error".to_string())
+            } else {
+                None
+            },
+            duration_ms,
+        };
+
+        // 在 execute_tool 内部一站式完成"路由 + handler 链式执行"。
+        // 原始 HTML 永远不会写进主上下文。
+        Ok(self
+            .tool_result_router
+            .process(raw_obs, &outcome.categories, current_intent, next_intent)
+            .await)
     }
     
     /// 观察：分析工具执行结果，判断是否完成目标
@@ -462,12 +544,18 @@ impl<PM: PromptManager> ReActAgent for DefaultReActAgent<PM> {
         // 将工具输出转换为字符串，确保 JSON 结构正确显示
         let tool_result_str = serde_json::to_string_pretty(&observation.output)
             .unwrap_or_else(|_| serde_json::to_string(&observation.output).unwrap_or_default());
-        
-        let context = PromptContext::new()
-            .with_variable("coarse_step", serde_json::json!({"intent": coarse_step.intent}))
-            .with_variable("tool_result", serde_json::json!(tool_result_str));
-        
-        let prompt = self.prompt_manager.render("planning/react_observe", &context).await
+
+        let prompt_context = Self::with_intent_flags(
+            coarse_step,
+            PromptContext::new()
+                .with_variable("coarse_step", serde_json::json!({
+                    "intent": coarse_step.intent,
+                    "expected_output": coarse_step.expected_output,
+                }))
+                .with_variable("tool_result", serde_json::json!(tool_result_str)),
+        );
+
+        let prompt = self.prompt_manager.render("planning/react_observe", &prompt_context).await
             .map_err(|e| anyhow::anyhow!("Failed to render template planning/react_observe: {}", e))?;
         
         // 调用 LLM

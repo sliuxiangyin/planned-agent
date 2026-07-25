@@ -15,6 +15,11 @@ text = """
 2. 提取与目标相关的关键信息
 3. 将信息组织成便于后续步骤使用的格式
 
+{% if has_intent_hint %}
+【{{ intent_label }}专属提示】
+{{ intent_hint }}
+{% endif %}
+
 返回JSON格式：
 {
   "extracted_info": {

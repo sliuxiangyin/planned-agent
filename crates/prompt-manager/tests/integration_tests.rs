@@ -138,16 +138,59 @@ async fn test_response_parsing() {
 #[tokio::test]
 async fn test_prompt_list() {
     let config = get_test_config();
-    
+
     let manager = FilePromptManager::new(config).unwrap();
     manager.initialize().await.unwrap();
-    
+
     let prompts = manager.list_prompts().await.unwrap();
     println!("Available prompts:");
     for prompt in &prompts {
         println!("  - {} (has schema: {})", prompt.name, prompt.has_output_schema);
     }
-    
+
     // 应该至少有3个prompt
     assert!(prompts.len() >= 3);
+}
+
+#[tokio::test]
+async fn test_coarse_plan_prompt_has_entity_preservation_rules() {
+    let config = get_test_config();
+
+    let manager = FilePromptManager::new(config).unwrap();
+    manager.initialize().await.unwrap();
+
+    // 渲染粗粒度计划 Prompt，验证 user_input 原样透传
+    let context = PromptContext::new()
+        .with_variable("user_input", json!("打开百度，搜索安仁乡，给出前三条相关信息并整理给我"))
+        .with_variable("context", json!("无历史上下文"))
+        .with_variable("available_categories", json!("- Browser（浏览器）\n- File（文件）"));
+
+    let rendered = manager
+        .render("planning/coarse_plan", &context)
+        .await
+        .unwrap();
+
+    // 用户原始输入必须原样出现在渲染结果中
+    assert!(
+        rendered.contains("打开百度，搜索安仁乡，给出前三条相关信息并整理给我"),
+        "渲染结果必须原样保留用户输入：\n{}",
+        rendered
+    );
+    // 必须包含实体保留强约束
+    assert!(
+        rendered.contains("用户实体保留约束"),
+        "粗粒度计划 Prompt 必须包含用户实体保留约束：\n{}",
+        rendered
+    );
+    assert!(
+        rendered.contains("安仁乡"),
+        "Prompt 必须保留示例中的关键地名：\n{}",
+        rendered
+    );
+    // 必须显式禁止占位符替代
+    assert!(
+        rendered.contains("禁止使用") && rendered.contains("占位符"),
+        "Prompt 必须显式禁止占位符：\n{}",
+        rendered
+    );
 }

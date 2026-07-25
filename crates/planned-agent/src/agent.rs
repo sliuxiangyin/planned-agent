@@ -11,6 +11,7 @@ use planned_agent_tool_manager::builtin::text_tools::TextToolsProvider;
 use planned_agent_tool_manager::builtin::system_tools::SystemToolsProvider;
 use planned_agent_tool_manager::builtin::data_tools::DataToolsProvider;
 use planned_agent_tool_manager::builtin::ai_tools::AiToolsProvider;
+use planned_agent_tool_manager::builtin::web_tools::WebToolsProvider;
 use anyhow::Result;
 use tracing::{info, error};
 use std::collections::HashMap;
@@ -34,6 +35,7 @@ impl Agent {
         tool_registry.register_builtin_provider(&SystemToolsProvider);
         tool_registry.register_builtin_provider(&DataToolsProvider);
         tool_registry.register_builtin_provider(&AiToolsProvider);
+        tool_registry.register_builtin_provider(&WebToolsProvider);
         
         Self {
             ai_manager: None,
@@ -235,14 +237,14 @@ impl Agent {
             info!("Calling tool: {}", call.function.name);
             
             // 使用工具注册表调用工具（自动路由）
-            let result = self.tool_registry.call_tool(&call.function.name, serde_json::from_str(&call.function.arguments).unwrap_or_default()).await?;
-            results.push((call, result));
+            let outcome = self.tool_registry.call_tool(&call.function.name, serde_json::from_str(&call.function.arguments).unwrap_or_default()).await?;
+            results.push((call, outcome));
         }
-        
+
         // 将工具结果反馈给 AI
         let tool_results_text = results.iter()
-            .map(|(call, result)| {
-                format!("Tool '{}' result: {}", call.function.name, result.content)
+            .map(|(call, outcome)| {
+                format!("Tool '{}' result: {}", call.function.name, outcome.result.content)
             })
             .collect::<Vec<_>>()
             .join("\n");

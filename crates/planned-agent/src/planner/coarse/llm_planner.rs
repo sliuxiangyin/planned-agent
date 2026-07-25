@@ -91,14 +91,18 @@ impl<PM: PromptManager> LlmCoarsePlanner<PM> {
     }
 
     /// 构建提示上下文
+    ///
+    /// 关键契约：`user_input` 必须原样保存用户原始输入字符串，不做任何归一化、
+    /// 截断、实体提取或泛化处理。该变量由粗粒度计划 Prompt 用于生成步骤，
+    /// 必须保证下游 CoarseGrainedStep 能追溯到原始关键词、人名、地名、URL、路径与数值。
     fn build_prompt_context(
         &self,
         input: &str,
         context: &PlanContext,
     ) -> Result<PromptContext> {
         let mut prompt_context = PromptContext::new();
-        
-        // 用户输入
+
+        // 用户输入：必须原样透传，不得修改。
         prompt_context = prompt_context.with_variable("user_input", json!(input));
         
         // 计划上下文信息（将历史记录转换为上下文字符串）
@@ -244,7 +248,137 @@ impl<PM: PromptManager + Send + Sync> CoarsePlanner for LlmCoarsePlanner<PM> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::collections::HashMap;
     use planned_agent_core::planner::coarse::CoarseGrainedStep;
+
+    // 用于捕获最近一次 LLM 请求的 Mock AI 客户端
+    struct CapturingMockAiClient {
+        last_request: Mutex<Option<ChatCompletionRequest>>,
+    }
+
+    impl CapturingMockAiClient {
+        fn new() -> Self {
+            Self {
+                last_request: Mutex::new(None),
+            }
+        }
+
+        fn captured_prompt(&self) -> Option<String> {
+            let guard = self.last_request.lock().unwrap();
+            guard.as_ref().and_then(|req| {
+                req.messages.first().and_then(|msg| {
+                    if let Some(MessageContent::Text { text }) = &msg.content {
+                        Some(text.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+        }
+    }
+
+    #[async_trait]
+    impl AiClient for CapturingMockAiClient {
+        async fn chat_completion(
+            &self,
+            request: ChatCompletionRequest,
+        ) -> Result<planned_agent_core::types::ChatCompletionResponse> {
+            // 捕获请求内容，用于后续断言
+            *self.last_request.lock().unwrap() = Some(request);
+
+            // 返回保留“安仁乡”的模拟计划（模拟理想 LLM 行为）
+            let response_json = r##"{
+                "id": "plan-anren",
+                "title": "搜索安仁乡",
+                "description": "打开百度搜索安仁乡并整理前三条结果",
+                "steps": [
+                    {
+                        "id": "step-1",
+                        "order": 1,
+                        "intent": "打开百度首页",
+                        "expected_output": "百度首页加载完成",
+                        "result_reference": "#E1",
+                        "dependencies": [],
+                        "data_requirements": [],
+                        "recommended_tool_categories": ["Browser"]
+                    },
+                    {
+                        "id": "step-2",
+                        "order": 2,
+                        "intent": "在百度搜索框输入'安仁乡'并执行搜索",
+                        "expected_output": "搜索结果页面，包含与'安仁乡'相关的结果",
+                        "result_reference": "#E2",
+                        "dependencies": ["#E1"],
+                        "data_requirements": [
+                            {
+                                "name": "search_keyword",
+                                "description": "搜索关键词",
+                                "required": true,
+                                "source_hint": "用户原始输入：搜索安仁乡"
+                            }
+                        ],
+                        "recommended_tool_categories": ["Browser"]
+                    },
+                    {
+                        "id": "step-3",
+                        "order": 3,
+                        "intent": "提取安仁乡搜索结果的前三条",
+                        "expected_output": "前三条安仁乡相关搜索结果",
+                        "result_reference": "#E3",
+                        "dependencies": ["#E2"],
+                        "data_requirements": [],
+                        "recommended_tool_categories": ["Browser", "Data"]
+                    }
+                ],
+                "complexity": "simple",
+                "risk_level": "low"
+            }"##;
+
+            Ok(planned_agent_core::types::ChatCompletionResponse {
+                id: "test".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0,
+                model: "test".to_string(),
+                choices: vec![planned_agent_core::types::Choice {
+                    index: 0,
+                    message: planned_agent_core::types::Message {
+                        role: planned_agent_core::types::MessageRole::Assistant,
+                        content: Some(planned_agent_core::types::MessageContent::Text {
+                            text: response_json.to_string(),
+                        }),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                }],
+                usage: None,
+                system_fingerprint: None,
+            })
+        }
+
+        async fn chat_completion_stream(
+            &self,
+            _request: ChatCompletionRequest,
+        ) -> Result<planned_agent_core::ai::ChatCompletionStream> {
+            unimplemented!()
+        }
+
+        fn provider_name(&self) -> &str {
+            "mock"
+        }
+
+        fn model_name(&self) -> &str {
+            "mock-model"
+        }
+
+        fn default_config(&self) -> ChatCompletionRequest {
+            unimplemented!()
+        }
+    }
 
     // Mock AI客户端
     struct MockAiClient;
@@ -392,6 +526,146 @@ mod tests {
         let plan = result.unwrap();
         assert_eq!(plan.title, "测试计划");
         assert_eq!(plan.steps.len(), 1);
+    }
+
+    // 真实 PromptManager，用于在测试中实际渲染 planning/coarse_plan 模板
+    struct RealPromptManager {
+        inner: planned_agent_prompt_manager::FilePromptManager,
+    }
+
+    #[async_trait]
+    impl PromptManager for RealPromptManager {
+        async fn load_template(
+            &self,
+            name: &str,
+        ) -> Result<planned_agent_core::prompt::PromptTemplate> {
+            self.inner.load_template(name).await
+        }
+
+        async fn render(
+            &self,
+            name: &str,
+            context: &planned_agent_core::prompt::PromptContext,
+        ) -> Result<String> {
+            self.inner.render(name, context).await
+        }
+
+        async fn list_prompts(
+            &self,
+        ) -> Result<Vec<planned_agent_core::prompt::PromptInfo>> {
+            self.inner.list_prompts().await
+        }
+
+        async fn exists(&self, name: &str) -> Result<bool> {
+            self.inner.exists(name).await
+        }
+
+        async fn reload(&self) -> Result<()> {
+            self.inner.reload().await
+        }
+
+        async fn get_output_schema(&self, name: &str) -> Result<Option<serde_json::Value>> {
+            self.inner.get_output_schema(name).await
+        }
+
+        async fn parse_response<T: serde::de::DeserializeOwned>(
+            &self,
+            name: &str,
+            response: &str,
+        ) -> Result<T> {
+            self.inner.parse_response(name, response).await
+        }
+
+        async fn validate_response(&self, name: &str, response: &str) -> Result<bool> {
+            self.inner.validate_response(name, response).await
+        }
+    }
+
+    async fn build_real_prompt_manager_async() -> Arc<RealPromptManager> {
+        use std::path::PathBuf;
+        use planned_agent_prompt_manager::{FilePromptManager, PromptManagerConfig};
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        // planned-agent 在 crates/planned-agent；向上两级到仓库根
+        let project_root = manifest_dir
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let config = PromptManagerConfig {
+            prompt_dir: project_root.join("prompts"),
+            ..Default::default()
+        };
+        let pm = FilePromptManager::new(config).unwrap();
+        pm.initialize().await.unwrap();
+        Arc::new(RealPromptManager { inner: pm })
+    }
+
+    /// 端到端测试：模拟 LLM 行为，验证
+    /// 1) 用户输入中的“安仁乡”被原样透传到 LLM 请求
+    /// 2) coarse_plan Prompt 包含新增的实体保留强约束
+    /// 3) 解析得到的 CoarseGrainedPlan 在所有 step.intent 中保留了“安仁乡”
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_search_anren_preserves_entity_in_prompt_and_plan() {
+        let ai_client = Arc::new(CapturingMockAiClient::new());
+        let prompt_manager = build_real_prompt_manager_async().await;
+
+        let planner = LlmCoarsePlanner::new(ai_client.clone(), prompt_manager);
+
+        let context = PlanContext {
+            user_id: Some("test-user".to_string()),
+            session_id: Some("test-session".to_string()),
+            history: vec![],
+            metadata: HashMap::new(),
+        };
+
+        let user_input = "打开百度，搜索安仁乡，给出前三条相关信息并整理给我";
+        let plan = planner
+            .generate_coarse_plan(user_input, &context)
+            .await
+            .expect("生成粗粒度计划失败");
+
+        // 1) 实际发送给 LLM 的 prompt 必须原样包含“安仁乡”
+        let rendered_prompt = ai_client
+            .captured_prompt()
+            .expect("未捕获到 LLM 请求内容");
+        assert!(
+            rendered_prompt.contains(user_input),
+            "渲染后 Prompt 必须原样保留用户输入:\n{}",
+            rendered_prompt
+        );
+        assert!(
+            rendered_prompt.contains("安仁乡"),
+            "渲染后 Prompt 必须包含关键地名安仁乡"
+        );
+        // 2) Prompt 必须包含新增的实体保留强约束
+        assert!(
+            rendered_prompt.contains("用户实体保留约束"),
+            "渲染后 Prompt 必须包含用户实体保留约束段"
+        );
+        assert!(
+            rendered_prompt.contains("禁止使用") && rendered_prompt.contains("占位符"),
+            "Prompt 必须显式禁止占位符"
+        );
+
+        // 3) 解析得到的步骤必须保留“安仁乡”
+        assert!(!plan.steps.is_empty(), "计划必须至少包含一个步骤");
+        for step in &plan.steps {
+            // 步骤 intent 中必须出现 “安仁乡”（至少在搜索步骤中必须）
+            let combined = format!(
+                "{} {}",
+                step.intent,
+                step.expected_output
+            );
+            if step.intent.contains("搜索") || step.intent.contains("提取") {
+                assert!(
+                    combined.contains("安仁乡"),
+                    "步骤 {} 的描述必须保留“安仁乡”: intent='{}', expected_output='{}'",
+                    step.id,
+                    step.intent,
+                    step.expected_output
+                );
+            }
+        }
     }
 
     #[tokio::test]
