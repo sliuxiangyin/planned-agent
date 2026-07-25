@@ -1,0 +1,457 @@
+# 提示工程设计
+
+## 概述
+
+提示工程是本项目的核心功能之一，用于管理、渲染和验证 LLM 提示模板。通过 `prompt-manager` 模块，我们可以：
+
+1. **模板化管理**：将提示模板存储在文件系统中，支持热更新
+2. **变量替换**：支持动态变量注入，生成个性化提示
+3. **输出约束**：定义输出格式和验证规则，确保 LLM 响应符合预期
+4. **多格式支持**：支持 TOML、TXT、Markdown 等多种模板格式
+
+## 模块架构
+
+### 核心组件
+
+```
+prompt-manager/
+├── src/
+│   ├── lib.rs          # 模块导出
+│   ├── manager.rs      # PromptManager 实现
+│   ├── loader.rs       # 文件加载器
+│   ├── template.rs     # 模板引擎
+│   └── config.rs       # 配置管理
+├── tests/
+│   └── integration_tests.rs  # 集成测试
+└── Cargo.toml
+```
+
+### 核心 Trait
+
+`PromptManager` trait 定义了提示管理器的核心接口：
+
+```rust
+#[async_trait]
+pub trait PromptManager: Send + Sync {
+    /// 加载 prompt 模板
+    async fn load_template(&self, name: &str) -> Result<PromptTemplate>;
+    
+    /// 渲染 prompt 模板
+    async fn render(&self, name: &str, context: &PromptContext) -> Result<String>;
+    
+    /// 列出所有可用 prompt
+    async fn list_prompts(&self) -> Result<Vec<PromptInfo>>;
+    
+    /// 检查 prompt 是否存在
+    async fn exists(&self, name: &str) -> Result<bool>;
+    
+    /// 重新加载所有 prompt（用于热更新）
+    async fn reload(&self) -> Result<()>;
+    
+    /// 获取 prompt 的输出 schema（如果定义了）
+    async fn get_output_schema(&self, name: &str) -> Result<Option<Value>>;
+    
+    /// 将 LLM 结果转换为结构化类型
+    async fn parse_response<T: serde::de::DeserializeOwned>(
+        &self, 
+        name: &str, 
+        response: &str
+    ) -> Result<T>;
+    
+    /// 验证 LLM 结果是否符合 schema
+    async fn validate_response(&self, name: &str, response: &str) -> Result<bool>;
+}
+```
+
+## 提示模板格式
+
+### TOML 格式（推荐）
+
+TOML 格式提供了完整的元数据支持，包括变量定义、输出模式等：
+
+```toml
+[name]
+description = "信息提取 prompt"
+
+[content]
+text = """
+请从以下文本中提取关键信息：
+
+{{ text }}
+
+请严格按照以下JSON格式返回：
+{{ example }}
+
+要求：
+- entities: 提取文本中的人名、地名、组织等实体
+- summary: 用一句话概括文本内容  
+- sentiment: 判断情感倾向（positive/negative/neutral）
+"""
+
+[variables]
+text = { description = "待分析的文本", required = true }
+
+[output_schema]
+format = "json"
+
+[output_schema.json_schema]
+type = "object"
+required = ["entities", "summary", "sentiment"]
+
+[output_schema.json_schema.properties.entities]
+type = "array"
+items = { type = "string" }
+
+[output_schema.json_schema.properties.summary]
+type = "string"
+
+[output_schema.json_schema.properties.sentiment]
+type = "string"
+enum = ["positive", "negative", "neutral"]
+```
+
+### 纯文本格式
+
+简单的纯文本提示，适用于不需要复杂元数据的场景：
+
+```text
+你是一个智能助手，请根据用户的问题提供准确、有帮助的回答。
+```
+
+### Markdown 格式
+
+支持 Markdown 格式的提示，适用于需要富文本的场景：
+
+```markdown
+# 系统提示
+
+你是一个智能助手，请根据用户的问题提供准确、有帮助的回答。
+
+## 注意事项
+- 保持回答简洁明了
+- 使用中文回答
+- 如果不确定，请说明
+```
+
+## 变量系统
+
+### 变量定义
+
+变量在模板中使用 `{{ variable_name }}` 语法定义：
+
+```toml
+[variables]
+user_name = { description = "用户名称", required = false }
+context = { description = "上下文信息", required = false }
+text = { description = "待分析的文本", required = true }
+```
+
+### 变量使用
+
+在提示模板中使用双大括号语法：
+
+```toml
+[content]
+text = """
+你好，{{ user_name }}！
+
+{{ context }}
+
+请分析以下文本：
+{{ text }}
+"""
+```
+
+### 自动变量
+
+系统会自动生成一些变量：
+
+- `example`：如果定义了输出模式，会自动生成示例输出
+
+## 输出模式
+
+### 输出格式
+
+支持多种输出格式：
+
+```rust
+pub enum OutputFormat {
+    Json,       // JSON 格式
+    Text,       // 纯文本
+    Markdown,   // Markdown 格式
+    Yaml,       // YAML 格式
+    Xml,        // XML 格式
+}
+```
+
+### JSON Schema 验证
+
+对于 JSON 格式，可以定义 JSON Schema 进行验证：
+
+```toml
+[output_schema]
+format = "json"
+
+[output_schema.json_schema]
+type = "object"
+required = ["entities", "summary", "sentiment"]
+
+[output_schema.json_schema.properties.entities]
+type = "array"
+items = { type = "string" }
+```
+
+### 输出约束
+
+可以添加输出约束，指导 LLM 生成符合要求的响应：
+
+```toml
+[output_schema]
+format = "json"
+constraints = "请确保返回有效的JSON格式，不要包含其他文本说明"
+```
+
+## 配置管理
+
+### 配置文件
+
+在 `config.toml` 中配置 PromptManager：
+
+```toml
+[prompt_manager]
+prompt_dir = "./prompts"
+
+[prompt_manager.template_engine]
+auto_reload = true
+
+[prompt_manager.cache]
+enabled = true
+max_size = 1000
+ttl_seconds = 3600
+```
+
+### 配置选项
+
+- `prompt_dir`：提示模板目录路径
+- `template_engine.auto_reload`：是否自动重新加载模板
+- `cache.enabled`：是否启用缓存
+- `cache.max_size`：最大缓存条目数
+- `cache.ttl_seconds`：缓存过期时间（秒）
+
+## 使用示例
+
+### 基本使用
+
+```rust
+use std::path::PathBuf;
+use serde_json::json;
+use planned_agent_core::prompt::{PromptManager, PromptContext};
+use planned_agent_prompt_manager::{FilePromptManager, PromptManagerConfig};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // 创建配置
+    let config = PromptManagerConfig {
+        prompt_dir: PathBuf::from("./prompts"),
+        ..Default::default()
+    };
+    
+    // 创建并初始化管理器
+    let manager = FilePromptManager::new(config)?;
+    manager.initialize().await?;
+    
+    // 列出所有提示
+    let prompts = manager.list_prompts().await?;
+    for prompt in &prompts {
+        println!("  - {} (has schema: {})", prompt.name, prompt.has_output_schema);
+    }
+    
+    // 渲染提示
+    let context = PromptContext::new()
+        .with_variable("text", json!("张三在北京的公司工作，他是一名软件工程师。"));
+    
+    let rendered = manager.render("analysis/extract_info", &context).await?;
+    println!("Rendered prompt:\n{}", rendered);
+    
+    Ok(())
+}
+```
+
+### 验证和解析响应
+
+```rust
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ExtractedInfo {
+    entities: Vec<String>,
+    summary: String,
+    sentiment: String,
+}
+
+// 验证 LLM 响应
+let llm_response = r#"
+{
+    "entities": ["张三", "北京", "公司"],
+    "summary": "张三在北京的公司工作",
+    "sentiment": "neutral"
+}
+"#;
+
+let is_valid = manager.validate_response("analysis/extract_info", llm_response).await?;
+if is_valid {
+    let extracted: ExtractedInfo = manager.parse_response("analysis/extract_info", llm_response).await?;
+    println!("Extracted info: {:?}", extracted);
+}
+```
+
+## 目录结构
+
+建议的提示模板目录结构：
+
+```
+prompts/
+├── chat/
+│   ├── system.toml      # 系统角色提示
+│   └── user.txt         # 用户消息模板
+├── analysis/
+│   └── extract_info.toml # 信息提取提示
+├── planning/
+│   ├── coarse_plan.toml  # 粗粒度计划生成
+│   └── tool_exploration.toml # 工具探索和推荐
+└── validation/
+    └── plan_check.toml   # 计划验证
+```
+
+## 最佳实践
+
+### 1. 模板设计原则
+
+- **单一职责**：每个模板只负责一个特定任务
+- **清晰变量**：明确定义变量名称、描述和是否必需
+- **输出约束**：为 JSON 输出定义 Schema，确保响应格式正确
+
+### 2. 变量命名规范
+
+- 使用 snake_case 命名变量
+- 变量名应具有描述性，如 `user_input`、`analysis_text`
+- 避免使用保留变量名，如 `example`、`schema`
+
+### 3. 输出模式设计
+
+- 为结构化输出定义 JSON Schema
+- 提供示例输出，帮助 LLM 理解预期格式
+- 添加输出约束，减少格式错误
+
+### 4. 错误处理
+
+- 验证 LLM 响应是否符合 Schema
+- 清理响应中的 markdown 代码块标记
+- 提供友好的错误信息
+
+### 5. 性能优化
+
+- 启用缓存，减少重复渲染
+- 使用热更新，避免重启应用
+- 合理设置缓存过期时间
+
+## 与计划引擎集成
+
+提示工程与计划引擎紧密集成，支持两阶段计划生成：
+
+### 第一阶段：粗粒度计划生成
+
+```toml
+# prompts/planning/coarse_plan.toml
+[name]
+description = "粗粒度计划生成"
+
+[content]
+text = """
+请根据用户需求，生成粗粒度的执行计划。
+
+用户需求：{{ user_input }}
+
+要求：
+1. 只定义"做什么"，不指定"怎么做"
+2. 使用 #E1、#E2 等语法定义结果引用
+3. 明确步骤间的数据依赖关系
+4. 声明每个步骤的数据需求
+
+请严格按照以下JSON格式返回：
+{{ example }}
+"""
+```
+
+### 第二阶段：工具探索和推荐
+
+```toml
+# prompts/planning/tool_exploration.toml
+[name]
+description = "工具探索和推荐prompt"
+
+[content]
+text = """
+请分析以下步骤意图与工具的相关性：
+
+步骤意图：{{ intent }}
+
+可用工具：
+{{ tools_desc }}
+
+请按以下逻辑分析：
+
+**第一步：匹配现有工具**
+评估每个工具的相关性分数（0-1），推荐最合适的工具。
+
+**第二步：如果没有合适工具**
+如果所有工具相关性都低于 0.3，请推荐：
+1. 需要的工具类型（如：browser, file, search, code 等）
+2. 建议安装的 MCP 服务器（如果知道）
+3. 通用解决方案（使用现有工具组合）
+
+返回JSON格式：
+{
+  "tools": [...],
+  "recommended": "推荐的工具名称或 null",
+  "tool_type_recommendation": {
+    "needed_types": ["browser", "search"],
+    "mcp_suggestions": [...],
+    "workaround": "使用现有工具的替代方案"
+  },
+  "notes": "探索说明"
+}
+"""
+```
+
+## 扩展性
+
+### 自定义模板引擎
+
+可以扩展模板引擎，支持更多语法：
+
+```rust
+pub struct CustomTemplateEngine {
+    // 自定义模板引擎实现
+}
+
+impl TemplateEngine for CustomTemplateEngine {
+    fn render(&self, template: &str, context: &HashMap<String, Value>) -> Result<String> {
+        // 自定义渲染逻辑
+    }
+}
+```
+
+### 自定义验证器
+
+可以添加自定义验证器，支持更复杂的验证逻辑：
+
+```rust
+pub trait ResponseValidator {
+    fn validate(&self, response: &str, schema: &Value) -> Result<bool>;
+}
+```
+
+## 总结
+
+提示工程是本项目的核心功能，通过 `prompt-manager` 模块提供了强大的提示模板管理能力。通过合理的模板设计、变量管理和输出约束，可以显著提高 LLM 的响应质量和一致性。

@@ -1,0 +1,55 @@
+[name]
+description = "ReAct Agent 行动 prompt"
+
+[content]
+text = """
+基于以下思考，选择工具并生成参数：
+
+思考：{{ thought.reasoning }}
+计划：{{ thought.plan }}
+
+可用工具：
+{{ tools }}
+
+前序步骤的原始工具输出：
+{{ previous_outputs }}
+
+请选择最合适的工具，并生成正确的参数。
+
+重要：
+- 请严格按照思考结果选择工具，如果思考中说要使用 ai_process，就必须使用 ai_process
+- 如果需要使用前序步骤的输出数据，请直接使用上面提供的真实数据，不要使用示例数据或占位符
+- 必须返回有效的 JSON 格式，不要包含其他文本
+
+返回JSON格式：
+{
+  "tool_name": "工具名称",
+  "parameters": { ... },
+  "reasoning": "选择该工具的理由"
+}
+"""
+
+[variables]
+thought = { description = "思考结果", required = true }
+tools = { description = "可用工具列表", required = true }
+previous_outputs = { description = "前序步骤的原始工具输出", required = false }
+
+[output_schema]
+format = "json"
+
+[output_schema.json_schema]
+type = "object"
+description = "行动决策"
+required = ["tool_name", "parameters", "reasoning"]
+
+[output_schema.json_schema.properties.tool_name]
+type = "string"
+description = "工具名称"
+
+[output_schema.json_schema.properties.parameters]
+type = "object"
+description = "工具参数"
+
+[output_schema.json_schema.properties.reasoning]
+type = "string"
+description = "选择该工具的理由"

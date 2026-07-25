@@ -1,0 +1,13 @@
+# Rust / Cargo 构建产物
+target/
+
+# IDE 与工具产物
+.playwright-mcp/
+.qoder/
+
+# 临时文件
+*.tmp
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

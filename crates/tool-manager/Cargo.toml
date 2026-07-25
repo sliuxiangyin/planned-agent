@@ -1,0 +1,21 @@
+[package]
+name = "planned-agent-tool-manager"
+version = "0.1.0"
+edition = "2021"
+description = "统一工具管理器，支持 MCP、自定义和内置工具"
+
+[dependencies]
+planned-agent-core = { path = "../core" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+which = "4"
+sysinfo = "0.30"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

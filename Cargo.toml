@@ -1,0 +1,22 @@
+[workspace]
+members = [
+    "crates/core",
+    "crates/ai-openai",
+    "crates/ai-manager",
+    "crates/mcp-rmcp",
+    "crates/prompt-manager",
+    "crates/tool-manager",
+    "crates/planned-agent",
+]
+resolver = "2"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }

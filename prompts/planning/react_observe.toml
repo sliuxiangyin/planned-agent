@@ -1,0 +1,45 @@
+[name]
+description = "ReAct Agent 观察 prompt"
+
+[content]
+text = """
+分析工具执行结果，判断是否完成目标：
+
+目标：{{ coarse_step.intent }}
+
+工具执行结果：
+{{ tool_result }}
+
+请判断：是否已完成目标？
+
+判断标准：
+- 如果工具输出完全满足目标要求，判断为 true
+- 如果工具输出包含了目标所需的关键信息，但需要进一步处理，判断为 false 并说明需要什么处理
+- 如果工具输出与目标无关或失败，判断为 false
+
+返回JSON格式（只返回JSON，不要其他内容）：
+{
+  "is_complete": true或false,
+  "reasoning": "判断理由"
+}
+"""
+
+[variables]
+coarse_step = { description = "粗粒度步骤", required = true }
+tool_result = { description = "工具执行结果", required = true }
+
+[output_schema]
+format = "json"
+
+[output_schema.json_schema]
+type = "object"
+description = "观察结果"
+required = ["is_complete", "reasoning"]
+
+[output_schema.json_schema.properties.is_complete]
+type = "boolean"
+description = "是否完成目标"
+
+[output_schema.json_schema.properties.reasoning]
+type = "string"
+description = "判断理由"

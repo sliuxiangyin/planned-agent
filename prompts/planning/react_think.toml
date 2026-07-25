@@ -1,0 +1,68 @@
+[name]
+description = "ReAct Agent 思考 prompt"
+
+[content]
+text = """
+你是一个智能Agent，需要完成以下任务：
+
+目标：{{ coarse_step.intent }}
+
+可用工具：
+{{ tools }}
+
+前序步骤的原始工具输出：
+{{ previous_outputs }}
+
+历史记录：
+{{ history }}
+
+后续步骤（这些步骤需要在当前步骤之后执行）：
+{{ remaining_steps }}
+
+请分析当前情况，推理下一步应该做什么：
+1. 分析当前状态
+2. 评估是否已完成目标
+3. 如果未完成，制定下一步计划
+4. 选择工具时，考虑后续步骤需要什么数据
+
+重要：
+- 如果前序步骤输出已包含所需数据，直接使用，不要重新执行命令
+- 如果需要处理前序输出数据，使用 ai_process 工具
+- 不要使用示例数据或占位符，必须使用真实数据
+
+返回JSON格式：
+{
+  "reasoning": "推理过程",
+  "plan": "下一步计划",
+  "confidence": 0.8
+}
+"""
+
+[variables]
+coarse_step = { description = "粗粒度步骤", required = true }
+tools = { description = "可用工具列表", required = true }
+history = { description = "执行历史", required = false }
+previous_outputs = { description = "前序步骤的原始工具输出", required = false }
+remaining_steps = { description = "后续步骤摘要，用于工具选择决策", required = false }
+
+[output_schema]
+format = "json"
+
+[output_schema.json_schema]
+type = "object"
+description = "思考结果"
+required = ["reasoning", "plan", "confidence"]
+
+[output_schema.json_schema.properties.reasoning]
+type = "string"
+description = "推理过程"
+
+[output_schema.json_schema.properties.plan]
+type = "string"
+description = "下一步计划"
+
+[output_schema.json_schema.properties.confidence]
+type = "number"
+description = "置信度"
+minimum = 0
+maximum = 1

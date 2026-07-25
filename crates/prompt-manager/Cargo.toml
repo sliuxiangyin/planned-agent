@@ -1,0 +1,16 @@
+[package]
+name = "planned-agent-prompt-manager"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+planned-agent-core = { path = "../core" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+tera = "1"
+toml = "0.8"
+walkdir = "2"

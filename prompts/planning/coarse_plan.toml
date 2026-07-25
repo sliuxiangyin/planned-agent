@@ -1,0 +1,261 @@
+[name]
+description = "粗粒度计划生成prompt"
+
+[content]
+text = """
+你是一个任务规划专家。请分析用户需求，生成粗粒度计划。
+
+用户需求：
+{{ user_input }}
+
+上下文信息：
+{{ context }}
+
+请严格按照以下JSON格式返回粗粒度计划：
+{{ example }}
+
+要求：
+1. 只定义"做什么"，不定义"怎么做"
+2. 每个步骤必须有 result_reference（格式：#E1, #E2, ...）
+3. 依赖关系用 result_reference 引用
+4. 评估计划复杂度和风险等级
+5. 为每个步骤推荐工具分类（可选，可为空数组）
+
+可用工具分类：
+{{ available_categories }}
+
+分类选择指南：
+- 浏览器操作、网页交互、HTTP请求、网页抓取 → Browser
+- 读取文件、写入文件、文件管理、目录操作 → File
+- 文本搜索、文本分析、文本转换 → Text
+- 数据处理、数据分析、数据库操作 → Data
+- 系统命令、进程管理、环境变量 → System
+- ADB设备、移动设备 → Device
+- Git操作、构建、测试 → Dev
+- 工具类、自定义、内置工具 → Utility
+
+示例：
+- “搜索文件” → [File] 或 [System]
+- “读取配置文件” → [File]
+- “执行构建命令” → [System, Dev]
+- “抓取网页内容” → [Browser]
+- “分析日志文件” → [File, Text]
+- “数据处理、排序、过滤、提取” → [Data]，推荐使用 ai_process 工具
+
+重要约束：
+1. 每个步骤必须是原子动作，只包含一个操作
+2. 避免使用“并”、“和”、“然后”等连接词
+3. 每个步骤应该可以用单个工具或一次AI调用完成
+4. 如果任务包含多个操作，必须拆分为多个步骤
+5. 从命令输出中提取数据、数据处理、排序、过滤、提取等操作，都必须作为独立步骤
+
+原子动作判断标准：
+- 如果步骤描述中包含“提取...并排序”、“解析...并处理”等，说明包含多个操作，必须拆分
+- 如果步骤可以用一个工具完成，就是原子动作
+- 如果步骤需要先用一个工具获取数据，再用另一个工具处理，就不是原子动作
+
+数据处理任务拆分原则：
+- 从命令输出中提取数据 → 独立步骤
+- 对数据进行排序 → 独立步骤
+- 对数据进行过滤 → 独立步骤
+- 提取前N个数据 → 独立步骤
+
+详细拆分示例：
+
+示例1 - 文件处理：
+任务：读取当前目录下的所有文件并按大小排序提取前三个
+
+❌ 错误：按文件大小排序（包含两个操作：提取+排序）
+✅ 正确：
+  步骤1: 获取当前目录下的所有文件列表
+  步骤2: 从 ls -la 输出中提取文件名和大小
+  步骤3: 按文件大小排序
+  步骤4: 提取前三个文件
+
+示例2 - 数据分析：
+任务：读取CSV文件并计算平均值
+
+❌ 错误：读取CSV文件并计算平均值
+✅ 正确：
+  步骤1: 读取CSV文件内容
+  步骤2: 解析CSV数据
+  步骤3: 计算平均值
+
+示例3 - 网络请求：
+任务：调用API并处理响应数据
+
+❌ 错误：调用API并处理响应数据
+✅ 正确：
+  步骤1: 发送API请求
+  步骤2: 解析响应数据
+  步骤3: 提取所需字段
+
+示例4 - 文本处理：
+任务：读取文件并提取关键词
+
+❌ 错误：读取文件并提取关键词
+✅ 正确：
+  步骤1: 读取文件内容
+  步骤2: 提取关键词
+
+示例5 - 数据库操作：
+任务：查询用户表并生成报告
+
+❌ 错误：查询用户表并生成报告
+✅ 正确：
+  步骤1: 查询用户表数据
+  步骤2: 统计用户数量
+  步骤3: 生成统计报告
+
+复杂度和风险等级约束：
+- complexity 只能是：simple（简单）、medium（中等）、complex（复杂）
+- risk_level 只能是：low（低）、medium（中）、high（高）、critical（紧急）
+"""
+
+[variables]
+user_input = { description = "用户输入的需求", required = true }
+context = { description = "计划上下文信息", required = true }
+available_categories = { description = "可用的工具分类列表", required = true }
+
+[output_schema]
+format = "json"
+
+[output_schema.json_schema]
+type = "object"
+required = ["id", "title", "description", "steps", "complexity", "risk_level"]
+
+[output_schema.json_schema.properties.id]
+type = "string"
+description = "计划唯一标识"
+
+[output_schema.json_schema.properties.title]
+type = "string"
+description = "计划标题"
+
+[output_schema.json_schema.properties.description]
+type = "string"
+description = "计划描述"
+
+[output_schema.json_schema.properties.steps]
+type = "array"
+description = "粗粒度步骤列表"
+
+[output_schema.json_schema.properties.steps.items]
+type = "object"
+required = ["id", "order", "intent", "expected_output", "result_reference", "dependencies", "data_requirements", "recommended_tool_categories"]
+
+[output_schema.json_schema.properties.steps.items.properties.id]
+type = "string"
+description = "步骤ID"
+
+[output_schema.json_schema.properties.steps.items.properties.order]
+type = "integer"
+description = "步骤顺序"
+
+[output_schema.json_schema.properties.steps.items.properties.intent]
+type = "string"
+description = "意图描述，如：获取搜索结果"
+
+[output_schema.json_schema.properties.steps.items.properties.expected_output]
+type = "string"
+description = "预期输出描述"
+
+[output_schema.json_schema.properties.steps.items.properties.result_reference]
+type = "string"
+description = "结果引用标识，如：#E1"
+
+[output_schema.json_schema.properties.steps.items.properties.dependencies]
+type = "array"
+items = { type = "string" }
+description = "依赖的步骤结果引用列表"
+
+[output_schema.json_schema.properties.steps.items.properties.data_requirements]
+type = "array"
+description = "数据需求列表"
+
+[output_schema.json_schema.properties.steps.items.properties.data_requirements.items]
+type = "object"
+required = ["name", "description", "required", "source_hint"]
+
+[output_schema.json_schema.properties.steps.items.properties.data_requirements.items.properties.name]
+type = "string"
+description = "需求名称"
+
+[output_schema.json_schema.properties.steps.items.properties.data_requirements.items.properties.description]
+type = "string"
+description = "需求描述"
+
+[output_schema.json_schema.properties.steps.items.properties.data_requirements.items.properties.required]
+type = "boolean"
+description = "是否必需"
+
+[output_schema.json_schema.properties.steps.items.properties.data_requirements.items.properties.source_hint]
+type = "string"
+description = "来源提示"
+
+[output_schema.json_schema.properties.steps.items.properties.recommended_tool_categories]
+type = "array"
+items = { type = "string", enum = ["Browser", "File", "Text", "Data", "System", "Device", "Dev", "Utility"] }
+description = "推荐的工具分类（可选，可为空数组）"
+
+[output_schema.json_schema.properties.complexity]
+type = "string"
+enum = ["simple", "medium", "complex"]
+description = "计划复杂度"
+
+
+
+
+[output_schema.json_schema.properties.risk_level]
+type = "string"
+enum = ["low", "medium", "high", "critical"]
+description = "风险等级"
+
+[output_schema.example]
+text = """
+{
+  "id": "plan-001",
+  "title": "执行任务",
+  "description": "根据用户需求执行相应操作",
+  "steps": [
+    {
+      "id": "step-1",
+      "order": 1,
+      "intent": "获取输入数据",
+      "expected_output": "获取所需数据",
+      "result_reference": "#E1",
+      "dependencies": [],
+      "data_requirements": [
+        {
+          "name": "input",
+          "description": "输入数据",
+          "required": true,
+          "source_hint": "从用户输入中提取"
+        }
+      ],
+      "recommended_tool_categories": ["File"]
+    },
+    {
+      "id": "step-2",
+      "order": 2,
+      "intent": "处理数据",
+      "expected_output": "处理后的数据",
+      "result_reference": "#E2",
+      "dependencies": ["#E1"],
+      "data_requirements": [
+        {
+          "name": "data",
+          "description": "待处理数据",
+          "required": true,
+          "source_hint": "从 #E1 中获取"
+        }
+      ],
+      "recommended_tool_categories": ["Text"]
+    }
+  ],
+  "complexity": "medium",
+  "risk_level": "low"
+}"""
+
+[output_schema.constraints]
+text = "请确保返回有效的JSON格式，不要包含其他文本说明"

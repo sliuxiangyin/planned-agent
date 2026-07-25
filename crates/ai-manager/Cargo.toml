@@ -1,0 +1,14 @@
+[package]
+name = "planned-agent-ai-manager"
+version = "0.1.0"
+edition = "2021"
+description = "AI客户端管理器，支持多个AI提供商"
+
+[dependencies]
+planned-agent-core = { path = "../core" }
+planned-agent-ai-openai = { path = "../ai-openai" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

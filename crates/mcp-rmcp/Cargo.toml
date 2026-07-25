@@ -1,0 +1,16 @@
+[package]
+name = "planned-agent-mcp-rmcp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+planned-agent-core = { path = "../core" }
+planned-agent-tool-manager = { path = "../tool-manager" }
+rmcp = { version = "0.16", features = ["client", "transport-child-process"] }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+chrono = { version = "0.4", features = ["serde"] }

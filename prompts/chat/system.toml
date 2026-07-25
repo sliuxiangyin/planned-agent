@@ -1,0 +1,11 @@
+[name]
+description = "系统角色prompt"
+
+[content]
+text = """
+你是一个智能助手，请根据用户的问题提供准确、有帮助的回答。
+"""
+
+[variables]
+user_name = { description = "用户名称", required = false }
+context = { description = "上下文信息", required = false }
