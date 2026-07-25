@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use planned_agent_core::planner::react::Observation;
 use serde_json::Value;
 
-use crate::planner::react::html_clean_subagent::HtmlCleanSubAgent;
+use crate::planner::react::sub_agents::html_clean_subagent::HtmlCleanSubAgent;
 use crate::planner::react::tool_result_router::ObservationPostHandler;
 
 /// Browser 分类工具的 HTML 清洗后处理器。
@@ -68,7 +68,7 @@ impl ObservationPostHandler for HtmlBrowserPostHandler {
 /// 仅当输出为疑似 HTML 的 `Value::String` 时返回 `Some(html)`。
 fn extract_top_level_html_string(value: &Value) -> Option<String> {
     let s = value.as_str()?;
-    if crate::planner::react::html_clean_subagent::looks_like_html(s) {
+    if crate::planner::react::sub_agents::html_clean_subagent::looks_like_html(s) {
         Some(s.to_string())
     } else {
         None
@@ -86,7 +86,7 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::json;
 
-    use crate::planner::react::html_clean_subagent::{FormatDecider, HtmlCleanSubAgent};
+    use crate::planner::react::sub_agents::html_clean_subagent::{FormatDecider, HtmlCleanSubAgent};
 
     fn obs_with_output(value: Value) -> Observation {
         Observation {

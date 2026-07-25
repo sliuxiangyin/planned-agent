@@ -1,0 +1,8 @@
+[package]
+name = "planned-agent-util"
+version = "0.1.0"
+edition = "2021"
+description = "通用工具函数 crate：与具体领域无关，被 workspace 其他 crate 共享。"
+
+[dependencies]
+serde_json.workspace = true

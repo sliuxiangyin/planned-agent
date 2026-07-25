@@ -12,7 +12,7 @@ use planned_agent_core::planner::react::*;
 use planned_agent_tool_manager::ToolRegistry;
 use planned_agent_core::types::{PlanContext, ChatCompletionRequest, Message, MessageRole, MessageContent};
 
-use super::html_clean_subagent::HtmlCleanSubAgent;
+use super::sub_agents::html_clean_subagent::HtmlCleanSubAgent;
 use super::intent_handler::IntentHandler;
 use super::intent_router::IntentRouter;
 use super::tool_result_router::ToolResultRouter;

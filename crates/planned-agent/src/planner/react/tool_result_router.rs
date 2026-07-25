@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use planned_agent_core::planner::react::Observation;
 use planned_agent_core::tool_registry::ToolCategory;
 
-use crate::planner::react::html_clean_subagent::{looks_like_html, HtmlCleanSubAgent};
+use crate::planner::react::sub_agents::html_clean_subagent::{looks_like_html, HtmlCleanSubAgent};
 use crate::planner::react::tool_result_handler::{
     BinaryTruncatePostHandler, HtmlBrowserPostHandler,
 };
