@@ -14,14 +14,24 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 初始化日志
+    // 初始化日志：同时输出到 stdout 和文件（logs/agent.log.YYYY-MM-DD，按天轮转）
+    let log_dir = "logs";
+    let _ = std::fs::create_dir_all(log_dir);
+    let file_appender = tracing_appender::rolling::daily(log_dir, "agent.log");
+    let (file_writer, _file_guard) = tracing_appender::non_blocking(file_appender);
+
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("Debug")),
+            // 默认 info 级；显式屏蔽 scraper/selectors（否则 chunk_html 会刷屏 DEBUG）
+            // 想看全部 debug 时：RUST_LOG=debug cargo run ...
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info,selectors=warn,scraper=warn")),
         )
+        .with_writer(std::io::stdout.and(file_writer))
         .init();
 
     // 解析命令行参数
@@ -254,6 +264,8 @@ async fn run_interactive_mode(agent: &mut Agent, use_stream: bool) -> Result<()>
     println!("Type 'test-prompt' to test prompt extraction");
     println!("Type 'prompts' to list available prompts");
     println!("Type 'test-coarse' 测试颗粒度计划");
+    println!("Type 'browse <url>' or 'browse <url> --verbose' 打开网页并获取快照");
+    println!("Type 'snapshot' 查看浏览命令帮助");
     println!("----------------------------------------");
 
     loop {
@@ -407,7 +419,7 @@ async fn run_interactive_mode(agent: &mut Agent, use_stream: bool) -> Result<()>
             }
             "test-coarse"=>{
                 println!("\n=== Testing Coarse Plan Generation ===");
-                
+
                 // 获取 AI 管理器和 Prompt Manager
                 let ai_manager = match agent.get_ai_manager() {
                     Some(manager) => manager,
@@ -416,7 +428,7 @@ async fn run_interactive_mode(agent: &mut Agent, use_stream: bool) -> Result<()>
                         continue;
                     }
                 };
-                
+
                 let ai_client = match ai_manager.default() {
                     Ok(client) => client,
                     Err(e) => {
@@ -424,7 +436,7 @@ async fn run_interactive_mode(agent: &mut Agent, use_stream: bool) -> Result<()>
                         continue;
                     }
                 };
-                
+
                 let prompt_manager = match agent.get_prompt_manager() {
                     Some(pm) => pm.clone(),
                     None => {
@@ -432,13 +444,13 @@ async fn run_interactive_mode(agent: &mut Agent, use_stream: bool) -> Result<()>
                         continue;
                     }
                 };
-                
+
                 // 创建粗粒度计划器
                 let planner = LlmCoarsePlanner::new(
                     ai_client,
                     std::sync::Arc::new(prompt_manager),
                 );
-                
+
                 // 构建计划上下文
                 let context = PlanContext {
                     user_id: Some("interactive-user".to_string()),
@@ -446,11 +458,11 @@ async fn run_interactive_mode(agent: &mut Agent, use_stream: bool) -> Result<()>
                     history: vec![],
                     metadata: std::collections::HashMap::new(),
                 };
-                
+
                 // 测试输入
                 let test_input = "读取 /home/code/planned-agent目录下的所有文件并按大小排序提取前三个";
                 println!("Input: {}", test_input);
-                
+
                 // 生成粗粒度计划
                 match planner.generate_coarse_plan(test_input, &context).await {
                     Ok(plan) => {
@@ -467,8 +479,85 @@ async fn run_interactive_mode(agent: &mut Agent, use_stream: bool) -> Result<()>
                     }
                 }
             }
+            "browse" | "snapshot" => {
+                println!("\n=== Browser Snapshot Mode ===");
+                println!("Usage: browse <url> or browse <url> --verbose");
+                println!("Example: browse https://www.example.com");
+                println!("         browse https://www.example.com --verbose");
+                println!("================================\n");
+            }
             _ => {
-                if use_stream {
+                // 检查是否是 browse 命令（支持带参数的形式）
+                let input_lower = input.to_lowercase();
+                if input_lower.starts_with("browse ") || input_lower.starts_with("snapshot ") {
+                    // 解析命令参数
+                    let parts: Vec<&str> = input.split_whitespace().collect();
+                    if parts.len() < 2 {
+                        println!("Error: Please provide a URL");
+                        println!("Usage: browse <url> [--verbose]");
+                        continue;
+                    }
+                    
+                    let url = parts[1];
+                    let verbose = parts.iter().any(|&p| p == "--verbose" || p == "-v");
+                    
+                    println!("Opening URL: {}", url);
+                    println!("Verbose mode: {}", verbose);
+                    println!();
+                    
+                    // 获取工具注册表
+                    let tool_registry = agent.get_tool_registry();
+                    
+                    // 1. 先导航到指定 URL
+                    println!("--- Step 1: Navigate to URL ---");
+                    let nav_args = serde_json::json!({
+                        "type": "url",
+                        "url": url
+                    });
+                    
+                    match tool_registry.call_tool("browser_navigate", nav_args).await {
+                        Ok(nav_result) => {
+                            println!("Navigate result:");
+                            println!("  is_error: {}", nav_result.result.is_error);
+                            println!("  call_id: {}", nav_result.result.call_id);
+                            println!("  content: {}", serde_json::to_string_pretty(&nav_result.result.content).unwrap_or_else(|_| nav_result.result.content.to_string()));
+                            println!("  categories: {:?}", nav_result.categories);
+                            println!();
+                            
+                            // 2. 获取页面快照
+                            println!("--- Step 2: Take Snapshot ---");
+                            let snap_args = serde_json::json!({
+                                "verbose": verbose
+                            });
+                            
+                            match tool_registry.call_tool("browser_snapshot", snap_args).await {
+                                Ok(snap_result) => {
+                                    println!("Snapshot result:");
+                                    println!("  is_error: {}", snap_result.result.is_error);
+                                    println!("  call_id: {}", snap_result.result.call_id);
+                                    println!("  content: {}", serde_json::to_string_pretty(&snap_result.result.content).unwrap_or_else(|_| snap_result.result.content.to_string()));
+                                    println!("  categories: {:?}", snap_result.categories);
+                                    println!();
+                                    
+                                    // 打印完整结果（格式化输出）
+                                    println!("=== Full Results ===");
+                                    println!("\n--- Navigate Result (JSON) ---");
+                                    println!("{}", serde_json::to_string_pretty(&nav_result).unwrap_or_default());
+                                    
+                                    println!("\n--- Snapshot Result (JSON) ---");
+                                    println!("{}", serde_json::to_string_pretty(&snap_result).unwrap_or_default());
+                                    println!("===================\n");
+                                }
+                                Err(e) => {
+                                    println!("Error taking snapshot: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!("Error navigating to URL: {}", e);
+                        }
+                    }
+                } else if use_stream {
                     let stream_result = agent.process_input_stream(input).await?;
                     println!("Response: {}", stream_result.content);
                 } else {

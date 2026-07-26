@@ -9,6 +9,7 @@ use planned_agent_core::ai::AiClient;
 use planned_agent_core::prompt::{PromptManager, PromptContext};
 use planned_agent_core::planner::coarse::CoarseGrainedStep;
 use planned_agent_core::planner::react::*;
+use planned_agent_core::tool_registry::ToolCategory;
 use planned_agent_tool_manager::ToolRegistry;
 use planned_agent_core::types::{PlanContext, ChatCompletionRequest, Message, MessageRole, MessageContent};
 
@@ -150,19 +151,26 @@ impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
     }
     
     /// 获取可用工具列表描述
-    fn get_tools_description(&self) -> String {
-        let tools = self.tool_registry.get_all_tools();
+    ///
+    /// 按 `categories` 过滤工具；若为空（None 或 []），兜底返回所有启用工具。
+    /// 这是修复 tool-prompt 噪声的关键点：让 LLM 只看到与步骤相关的工具。
+    fn get_tools_description(&self, categories: &[ToolCategory]) -> String {
+        let tools = if categories.is_empty() {
+            self.tool_registry.get_all_tools()
+        } else {
+            self.tool_registry.get_tools_by_categories(categories)
+        };
         let mut desc = String::new();
-        
+
         for tool in &tools {
             desc.push_str(&format!(
-                "- {}: {}\n  参数Schema：{}\n",
+                "- {}: {}\n  Schema：{}\n",
                 tool.name,
                 tool.description,
                 serde_json::to_string(&tool.input_schema).unwrap_or_default()
             ));
         }
-        
+
         desc
     }
     
@@ -407,11 +415,12 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
         };
         
         // 使用 prompt_manager 渲染 prompt
+        let step_categories = coarse_step.recommended_tool_categories.as_deref().unwrap_or(&[]);
         let prompt_context = Self::with_intent_flags(
             coarse_step,
             Self::with_step_context(
                 PromptContext::new()
-                    .with_variable("tools", serde_json::json!(self.get_tools_description()))
+                    .with_variable("tools", serde_json::json!(self.get_tools_description(step_categories)))
                     .with_variable("history", serde_json::json!(history_str))
                     .with_variable("previous_outputs", serde_json::json!(previous_outputs))
                     .with_variable("remaining_steps", serde_json::json!(remaining_steps_str)),
@@ -422,7 +431,15 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
 
         let prompt = self.prompt_manager.render("planning/react_think", &prompt_context).await
             .map_err(|e| anyhow::anyhow!("Failed to render template planning/react_think: {}", e))?;
-        
+
+        debug!(
+            target: "react_prompt",
+            "[planning/react_think] step={} chars={}\n{}",
+            coarse_step.id,
+            prompt.chars().count(),
+            prompt
+        );
+
         // 调用 LLM
         let response = self.call_llm(&prompt).await?;
         
@@ -444,6 +461,7 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
             .unwrap_or_else(|| "无".to_string());
         
         // 使用 prompt_manager 渲染 prompt
+        let step_categories = coarse_step.recommended_tool_categories.as_deref().unwrap_or(&[]);
         let prompt_context = Self::with_intent_flags(
             coarse_step,
             Self::with_step_context(
@@ -452,7 +470,7 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
                         "reasoning": thought.reasoning,
                         "plan": thought.plan
                     }))
-                    .with_variable("tools", serde_json::json!(self.get_tools_description()))
+                    .with_variable("tools", serde_json::json!(self.get_tools_description(step_categories)))
                     .with_variable("previous_outputs", serde_json::json!(previous_outputs)),
                 coarse_step,
                 context,
@@ -460,7 +478,15 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
         );
 
         let prompt = self.prompt_manager.render("planning/react_act", &prompt_context).await?;
-        
+
+        debug!(
+            target: "react_prompt",
+            "[planning/react_act] step={} chars={}\n{}",
+            coarse_step.id,
+            prompt.chars().count(),
+            prompt
+        );
+
         // 调用 LLM
         let response = self.call_llm(&prompt).await?;
         
@@ -557,7 +583,15 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
 
         let prompt = self.prompt_manager.render("planning/react_observe", &prompt_context).await
             .map_err(|e| anyhow::anyhow!("Failed to render template planning/react_observe: {}", e))?;
-        
+
+        debug!(
+            target: "react_prompt",
+            "[planning/react_observe] step={} chars={}\n{}",
+            coarse_step.id,
+            prompt.chars().count(),
+            prompt
+        );
+
         // 调用 LLM
         let response = self.call_llm(&prompt).await?;
         

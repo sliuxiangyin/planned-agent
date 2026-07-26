@@ -36,7 +36,7 @@ impl Agent {
         tool_registry.register_builtin_provider(&DataToolsProvider);
         tool_registry.register_builtin_provider(&AiToolsProvider);
         tool_registry.register_builtin_provider(&WebToolsProvider);
-        
+
         Self {
             ai_manager: None,
             tool_registry,
