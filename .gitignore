@@ -9,6 +9,7 @@ target/
 *.tmp
 *.swp
 *.swo
-.config.toml
+
 .DS_Store
 Thumbs.db
+config.toml

@@ -3,7 +3,7 @@
 name = "deepseek"
 provider = "openai"
 base_url = "https://api.deepseek.com/v1"
-api_key = "sk-eb0e920cc36d42aa85c6ad516196271a"
+api_key = "sk-eb0e920cc36d422aa85c6ad516196271a"
 model = "deepseek-v4-flash"
 max_tokens = 4096
 temperature = 0.7
