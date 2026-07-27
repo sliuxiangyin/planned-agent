@@ -5,23 +5,11 @@ description = "ReAct Agent 思考 prompt"
 text = """
 你是一个智能Agent，需要完成用户目标中的子任务。
 
-用户原始目标（必须保留其中的关键词、实体、URL、参数）：
-{{ user_goal }}
-
 当前步骤：
 - 意图：{{ coarse_step.intent }}
 - 期望产出：{{ coarse_step.expected_output }}
 - 数据需求：{{ data_requirements }}
 - 推荐工具类别：{{ coarse_step.recommended_tool_categories }}
-
-可用工具：
-{{ tools }}
-
-前序步骤的原始工具输出：
-{{ previous_outputs }}
-
-历史记录：
-{{ history }}
 
 后续步骤（这些步骤需要在当前步骤之后执行）：
 {{ remaining_steps }}
@@ -30,13 +18,7 @@ text = """
 1. 分析当前状态
 2. 评估是否已完成目标
 3. 如果未完成，制定下一步计划
-4. 选择工具时，考虑后续步骤需要什么数据
-
-重要：
-- 必须保留用户原始目标中的关键词、实体、URL、路径、数值，不要替换为示例值
-- 如果前序步骤输出已包含所需数据，直接使用，不要重新执行命令
-- 如果需要处理前序输出数据，使用 ai_process 工具
-- 不要使用示例数据或占位符，必须使用真实数据
+4. 规划下一步行动时，考虑后续步骤需要什么数据
 
 {% if has_intent_hint %}
 【{{ intent_label }}专属提示】
@@ -52,12 +34,11 @@ text = """
 """
 
 [variables]
-user_goal = { description = "用户原始目标，必须保留其中的关键词与实体", required = true }
+user_goal = { description = "用户原始目标（已在 System 和首条 User 消息中提供）", required = false }
 coarse_step = { description = "粗粒度步骤（含 intent、expected_output、data_requirements 等）", required = true }
 data_requirements = { description = "当前步骤的数据需求列表（JSON 字符串）", required = false }
-tools = { description = "可用工具列表", required = true }
-history = { description = "执行历史", required = false }
-previous_outputs = { description = "前序步骤的原始工具输出", required = false }
+history = { description = "执行历史（已在上下文中）", required = false }
+previous_outputs = { description = "前序步骤的原始工具输出（已在上下文中）", required = false }
 remaining_steps = { description = "后续步骤摘要，用于工具选择决策", required = false }
 
 [output_schema]

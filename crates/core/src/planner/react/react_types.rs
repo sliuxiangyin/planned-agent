@@ -30,8 +30,9 @@ pub struct Action {
     pub tool_name: String,
     /// 工具参数
     pub parameters: Value,
-    /// 选择该行动的理由
-    pub reasoning: String,
+    /// 选择该行动的理由（标准 tool_calls 用法下 LLM 不返回，仅作历史记录可选）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 /// 观察

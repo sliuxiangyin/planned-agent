@@ -1,12 +1,9 @@
 [name]
-description = "ReAct Agent 行动 prompt"
+description = "ReAct Agent 行动 prompt（标准 tool_calls 用法）"
 
 [content]
 text = """
-基于以下思考，选择工具并生成参数。
-
-用户原始目标（必须保留其中的关键词、实体、URL、参数）：
-{{ user_goal }}
+基于以下思考，选择工具并执行。
 
 当前步骤：
 - 意图：{{ coarse_step.intent }}
@@ -16,58 +13,16 @@ text = """
 思考：{{ thought.reasoning }}
 计划：{{ thought.plan }}
 
-可用工具：
-{{ tools }}
-
-前序步骤的原始工具输出：
-{{ previous_outputs }}
-
-请选择最合适的工具，并生成正确的参数。
-
-重要：
-- 必须保留用户原始目标中的关键词、实体、URL、路径、数值，不要替换为示例值
-- 工具参数必须来自用户目标、数据需求或前序步骤输出，不得使用占位符
-- 请严格按照思考结果选择工具
-- 如果需要使用前序步骤的输出数据，请直接使用上面提供的真实数据，不要使用示例数据或占位符
-- 必须返回有效的 JSON 格式，不要包含其他文本
-
 {% if has_intent_hint %}
 【{{ intent_label }}专属提示】
 {{ intent_hint }}
 {% endif %}
 
-返回JSON格式：
-{
-  "tool_name": "工具名称",
-  "parameters": { ... },
-  "reasoning": "选择该工具的理由"
-}
+请通过 tool_calls 选择最合适的工具并生成正确的参数。
+（可用工具已通过 API 工具列表提供，无需在文本中查看。）
 """
 
 [variables]
-user_goal = { description = "用户原始目标，必须保留其中的关键词与实体", required = true }
 coarse_step = { description = "粗粒度步骤（含 intent、expected_output、data_requirements 等）", required = true }
-data_requirements = { description = "当前步骤的数据需求列表（JSON 字符串）", required = false }
-thought = { description = "思考结果", required = true }
-tools = { description = "可用工具列表", required = true }
-previous_outputs = { description = "前序步骤的原始工具输出", required = false }
-
-[output_schema]
-format = "json"
-
-[output_schema.json_schema]
-type = "object"
-description = "行动决策"
-required = ["tool_name", "parameters", "reasoning"]
-
-[output_schema.json_schema.properties.tool_name]
-type = "string"
-description = "工具名称"
-
-[output_schema.json_schema.properties.parameters]
-type = "object"
-description = "工具参数"
-
-[output_schema.json_schema.properties.reasoning]
-type = "string"
-description = "选择该工具的理由"
+thought = { description = "思考结果（reasoning、plan）", required = true }
+intent_hint = { description = "意图专属提示", required = false }

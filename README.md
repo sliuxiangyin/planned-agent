@@ -160,3 +160,9 @@ MIT License
 │  │       └──────────────────────────────────────────────┘  │  │
 │  └───────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
+
+
+
+
+
+### Result\n[{\"title\":\"RustRAG - High Performance RAG Server - MCP Service\",\"link\":\"http://www.baidu.com/link?url=TeTDFl7iF9vcVDhTWKxOAsaUhyT4AafuiBVOfNj5-A53LbzjsP5rCotM0gnJb5w5pNzdZ6dtNHCcxWW5zLfV3iO_KAgcAdVaf_FCFYzYtza\"},{\"title\":\"文盘rust--使用 Rust 构建RAG_rust rag-CSDN博客\",\"link\":\"http://www.baidu.com/link?url=qq3fJjpZDT38_HRX0tSHF2vX5JcjottREKeeNJ9S6-yzpgRWVd1o4PnrHyt1RkzWgUmOAebqVoWqpUr2DdpWZAKAWbZawaazSE8xphRDerW\"},{\"title\":\"RAG增强LLM实现C/C++到Rust的安全代码自动转换-CSDN博客\",\"link\":\"http://www.baidu.com/link?url=oUdQFAz6tjWdbenuK408BKiJrrDld3M0spEmm401W0frBObiUTx4_WZvXXwqmIH9e3n46Jh5jT9T6zn2cUrEUUI26qWQCYCqMFEakLGItiu\"}]\n### Ran Playwright code\n```js\nawait (async (page) => { const data = await page.evaluate(() => { const results = document.querySelectorAll('.result'); if (results.length === 0) { const links = document.querySelectorAll('h3 a'); return Array.from(links).slice(0, 3).map(a => ({ title: a.textContent.trim(), link: a.href })); } return Array.from(results).slice(0, 3).map(item => { const a = item.querySelector('h3 a') || item.querySelector('a'); return { title: a ? a.textContent.trim() : '', link: a ? a.href : '' }; }); }); return data; })(page);\n```

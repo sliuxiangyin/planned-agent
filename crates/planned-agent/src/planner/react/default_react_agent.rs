@@ -11,7 +11,10 @@ use planned_agent_core::planner::coarse::CoarseGrainedStep;
 use planned_agent_core::planner::react::*;
 use planned_agent_core::tool_registry::ToolCategory;
 use planned_agent_tool_manager::ToolRegistry;
-use planned_agent_core::types::{PlanContext, ChatCompletionRequest, Message, MessageRole, MessageContent};
+use planned_agent_core::types::{
+    PlanContext, ChatCompletionRequest, Message, MessageRole, MessageContent,
+    ToolCall, FunctionCall, ToolType, ToolDefinition, FunctionDefinition,
+};
 
 use super::sub_agents::html_clean_subagent::HtmlCleanSubAgent;
 use super::intent_handler::IntentHandler;
@@ -30,6 +33,10 @@ pub struct DefaultReActAgent<PM: PromptManager> {
     tool_result_router: ToolResultRouter,
     /// 配置
     config: ReActAgentConfig,
+    /// 对话消息列表（每次执行时初始化）
+    messages: Vec<Message>,
+    /// 待处理的 tool_call_id（用于构造 tool 消息）
+    pending_tool_call_id: Option<String>,
 }
 
 impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
@@ -45,8 +52,12 @@ impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
             prompt_manager.clone(),
             tool_registry.clone(),
         ));
-        // 标准两个 handler 直接由 router 内部封装注册
-        let tool_result_router = ToolResultRouter::with_standard_handlers(html_sub_agent, 50_000);
+        // 标准 handler：StructureClean + HtmlClean + BinaryTruncate
+        let tool_result_router = ToolResultRouter::with_standard_handlers(
+            html_sub_agent,
+            50_000,
+            ai_client.clone(),
+        );
 
         Self {
             ai_client,
@@ -54,34 +65,16 @@ impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
             tool_registry,
             tool_result_router,
             config,
+            messages: Vec::new(),
+            pending_tool_call_id: None,
         }
     }
     
-    /// 使用默认配置创建
-    pub fn with_defaults(
-        ai_client: Arc<dyn AiClient>,
-        prompt_manager: Arc<PM>,
-        tool_registry: Arc<ToolRegistry>,
-    ) -> Self {
-        Self::new(
-            ai_client,
-            prompt_manager,
-            tool_registry,
-            ReActAgentConfig::default(),
-        )
-    }
-
-    /// 向 ReAct Prompt 注入原始用户目标和完整步骤约束。
+    /// 向 ReAct Prompt 注入完整步骤约束。
     fn with_step_context(
         prompt_context: PromptContext,
         coarse_step: &CoarseGrainedStep,
-        context: &PlanContext,
     ) -> PromptContext {
-        let user_goal = context
-            .metadata
-            .get("user_goal")
-            .cloned()
-            .unwrap_or_else(|| Value::String("无".to_string()));
         let step_value = serde_json::to_value(coarse_step).unwrap_or_else(|_| {
             serde_json::json!({
                 "intent": coarse_step.intent,
@@ -92,9 +85,21 @@ impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
             .unwrap_or_else(|_| "[]".to_string());
 
         prompt_context
-            .with_variable("user_goal", user_goal)
             .with_variable("coarse_step", step_value)
             .with_variable("data_requirements", serde_json::json!(data_requirements))
+    }
+
+    /// 构建后续步骤摘要字符串（用于 think prompt）
+    fn build_remaining_steps_str(steps: Option<&[CoarseGrainedStep]>) -> String {
+        match steps {
+            Some(steps) if !steps.is_empty() => {
+                steps.iter()
+                    .map(|s| format!("- 步骤{}: {}", s.order, s.intent))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            _ => "无".to_string(),
+        }
     }
 
     /// 根据 CoarseGrainedStep 解析主导意图，并把模板可消费的 flags 合并进 PromptContext。
@@ -113,8 +118,85 @@ impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
         }
         ctx
     }
+
+    /// 初始化消息列表：System + User(goal)
+    async fn init_messages(
+        &mut self,
+        _coarse_step: &CoarseGrainedStep,
+        context: &PlanContext,
+    ) -> Result<()> {
+        // 获取用户目标
+        let user_goal = context
+            .metadata
+            .get("user_goal")
+            .and_then(|v| v.as_str())
+            .unwrap_or("无")
+            .to_string();
+
+        // 渲染 System Prompt
+        let system_prompt = self.prompt_manager.render("planning/react_system", &PromptContext::new()).await
+            .map_err(|e| anyhow::anyhow!("Failed to render template planning/react_system: {}", e))?;
+
+        self.messages = vec![
+            Message {
+                role: MessageRole::System,
+                content: Some(MessageContent::Text { text: system_prompt }),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+                reasoning_content: None,
+            },
+            Message {
+                role: MessageRole::User,
+                content: Some(MessageContent::Text { text: format!("用户目标：\n{}", user_goal) }),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+                reasoning_content: None,
+            },
+        ];
+        
+        Ok(())
+    }
+
+    /// 调用 LLM（使用 self.messages，支持传入 tools）
+    ///
+    /// 返回 OpenAI 的 assistant Message（含 content 和 tool_calls）。
+    /// - `tools`：工具定义列表。think 阶段传 None，act 阶段按 step 类别过滤后传入。
+    /// - think() 需要从 message.content 提取文本解析 Thought
+    /// - act() 直接使用 message（含 tool_calls），符合 OpenAI 标准用法
+    async fn call_llm_with_messages(
+        &self,
+        tools: Option<Vec<ToolDefinition>>,
+    ) -> Result<Message> {
+        let request = ChatCompletionRequest {
+            model: self.ai_client.model_name().to_string(),
+            messages: self.messages.clone(),
+            tools,
+            temperature: Some(0.3),
+            max_tokens: Some(2000),
+            stream: false,
+            extra: Default::default(),
+        };
+
+        let response = self.ai_client.chat_completion(request).await?;
+
+        if let Some(choice) = response.choices.into_iter().next() {
+            Ok(choice.message)
+        } else {
+            Err(anyhow!("No choices in response"))
+        }
+    }
+
+    /// 从 Message 中提取 content 文本（用于 think 解析 Thought）
+    fn extract_text_content(message: &Message) -> Result<String> {
+        match &message.content {
+            Some(MessageContent::Text { text }) => Ok(text.clone()),
+            _ => Err(anyhow!("No text content in message")),
+        }
+    }
     
-    /// 调用 LLM
+    /// 调用 LLM（单 prompt，用于非对话场景如 observe）
     async fn call_llm(&self, prompt: &str) -> Result<String> {
         let request = ChatCompletionRequest {
             model: self.ai_client.model_name().to_string(),
@@ -150,6 +232,32 @@ impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
         }
     }
     
+    /// 根据 step 类别构建 ToolDefinition 列表
+    ///
+    /// 按 `categories` 过滤工具；若为空（None 或 []），兜底返回所有启用工具。
+    /// 返回 None 表示无可用工具。
+    fn build_tool_definitions(&self, categories: &[ToolCategory]) -> Option<Vec<ToolDefinition>> {
+        let tools = if categories.is_empty() {
+            self.tool_registry.get_all_tools()
+        } else {
+            self.tool_registry.get_tools_by_categories(categories)
+        };
+
+        if tools.is_empty() {
+            return None;
+        }
+
+        Some(tools.iter().map(|t| ToolDefinition {
+            r#type: ToolType::Function,
+            function: FunctionDefinition {
+                name: t.name.clone(),
+                description: Some(t.description.clone()),
+                parameters: Some(t.input_schema.clone()),
+                strict: None,
+            },
+        }).collect())
+    }
+
     /// 获取可用工具列表描述
     ///
     /// 按 `categories` 过滤工具；若为空（None 或 []），兜底返回所有启用工具。
@@ -172,6 +280,75 @@ impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
         }
 
         desc
+    }
+
+    /// 生成 tool_call_id（基于时间戳）
+    fn generate_tool_call_id(&self) -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("call_{}", timestamp)
+    }
+    
+    /// 推送 User 消息到 messages
+    fn push_user_message(&mut self, text: String) {
+        self.messages.push(Message {
+            role: MessageRole::User,
+            content: Some(MessageContent::Text { text }),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            reasoning_content: None,
+        });
+    }
+    
+    /// 推送普通 Assistant 消息到 messages
+    fn push_assistant_message(&mut self, text: String) {
+        self.messages.push(Message {
+            role: MessageRole::Assistant,
+            content: Some(MessageContent::Text { text }),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            reasoning_content: None,
+        });
+    }
+    
+    /// 推送带 tool_calls 的 Assistant 消息到 messages
+    fn push_assistant_with_tool_calls(&mut self, text: String, tool_calls: Vec<ToolCall>) {
+        self.messages.push(Message {
+            role: MessageRole::Assistant,
+            content: Some(MessageContent::Text { text }),
+            tool_calls: Some(tool_calls),
+            tool_call_id: None,
+            name: None,
+            reasoning_content: None,
+        });
+    }
+
+    /// 渲染 prompt 并推送为 User 消息
+    async fn render_push_user_message(
+        &mut self,
+        template: &str,
+        prompt_context: &PromptContext,
+        coarse_step: &CoarseGrainedStep,
+    ) -> Result<()> {
+        let prompt = self.prompt_manager.render(template, prompt_context).await
+            .map_err(|e| anyhow::anyhow!("Failed to render template {}: {}", template, e))?;
+
+        debug!(
+            target: "react_prompt",
+            "[{}] step={} chars={}\n{}",
+            template,
+            coarse_step.id,
+            prompt.chars().count(),
+            prompt
+        );
+
+        self.push_user_message(prompt);
+        Ok(())
     }
     
     /// 执行AI处理工具
@@ -241,7 +418,7 @@ impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
 #[async_trait]
 impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
     async fn execute_coarse_step(
-        &self,
+        &mut self,
         coarse_step: &CoarseGrainedStep,
         context: &PlanContext,
     ) -> Result<ReActExecutionResult> {
@@ -249,6 +426,9 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
         let mut history = Vec::new();
         
         info!("Starting ReAct execution for step: {}", coarse_step.intent);
+        
+        // 初始化消息列表：System + User(goal)
+        self.init_messages(coarse_step, context).await?;
         
         // 从 context 中获取后续步骤信息
         let remaining_steps: Option<Vec<CoarseGrainedStep>> = context.metadata
@@ -265,48 +445,19 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
                 .unwrap_or_default();
             let current_intent = coarse_step.intent.clone();
 
-            // 1. THINK - 思考
-            let thought = match self.think(coarse_step, &history, context, remaining_steps.as_deref()).await {
-                Ok(thought) => {
-                    debug!("Thought: {} (confidence: {})", thought.reasoning, thought.confidence);
-                    thought
-                }
-                Err(e) => {
-                    error!("Think failed: {}", e);
-                    return Ok(ReActExecutionResult::failure(
-                        coarse_step.id.clone(),
-                        format!("Think failed: {}", e),
-                        history,
-                        iteration,
-                        start_time.elapsed().as_millis() as u64,
-                    ));
-                }
-            };
+            // 1. THINK - 思考（消息追加由 think() 内部完成）
+            let thought = self.think(
+                coarse_step,
+                remaining_steps.as_deref(),
+            ).await?;
+            debug!("Thought: {} (confidence: {})", thought.reasoning, thought.confidence);
 
-            // 2. ACT - 行动
-            let mut act_result = None;
-            for retry in 0..3 {
-                match self.act(coarse_step, &thought, context).await {
-                    Ok(action) => {
-                        debug!("Action: {} with params {}", action.tool_name, action.parameters);
-                        act_result = Some(action);
-                        break;
-                    }
-                    Err(e) => {
-                        error!("Act failed (retry {}): {}", retry + 1, e);
-                        if retry == 2 {
-                            return Ok(ReActExecutionResult::failure(
-                                coarse_step.id.clone(),
-                                format!("Act failed after 3 retries: {}", e),
-                                history,
-                                iteration,
-                                start_time.elapsed().as_millis() as u64,
-                            ));
-                        }
-                    }
-                }
-            }
-            let action = act_result.unwrap();
+            // 2. ACT - 行动（消息追加由 act() 内部完成，含带 tool_calls 的 assistant 消息）
+            let action = self.act(
+                coarse_step,
+                &thought,
+            ).await?;
+            debug!("Action: {} with params {}", action.tool_name, action.parameters);
 
             // 3. EXECUTE - 调用工具并经过后处理
             let observation = match self.execute_tool(&action, &current_intent, &next_intent).await {
@@ -324,6 +475,22 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
                     }
                 }
             };
+            
+            // 将工具结果作为 Tool 消息追加（符合 OpenAI API 标准）
+            let tool_result_str = serde_json::to_string_pretty(&observation.output)
+                .unwrap_or_else(|_| serde_json::to_string(&observation.output).unwrap_or_default());
+            let tool_call_id = self.pending_tool_call_id.take().unwrap_or_else(|| "tool_result".to_string());
+            self.messages.push(Message {
+                role: MessageRole::Tool,
+                content: Some(MessageContent::ToolResult {
+                    tool_call_id: tool_call_id.clone(),
+                    content: tool_result_str,
+                }),
+                tool_calls: None,
+                tool_call_id: Some(tool_call_id),
+                name: None,
+                reasoning_content: None,
+            });
 
             // 4. OBSERVE - 分析工具执行结果，提取关键信息
             let observe_result = match self.observe(coarse_step, &observation).await {
@@ -371,97 +538,44 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
     }
     
     async fn think(
-        &self,
+        &mut self,
         coarse_step: &CoarseGrainedStep,
-        history: &[ReActStep],
-        context: &PlanContext,
         remaining_steps: Option<&[CoarseGrainedStep]>,
     ) -> Result<Thought> {
-        // 构建历史记录字符串
-        let history_str = if history.is_empty() {
-            "无".to_string()
-        } else {
-            history.iter().enumerate().map(|(i, step)| {
-                let output_str = serde_json::to_string_pretty(&step.observation.output)
-                    .unwrap_or_else(|_| serde_json::to_string(&step.observation.output).unwrap_or_default());
-                format!(
-                    "第{}轮：\n思考：{}\n行动：{}({})\n观察：{}",
-                    i + 1,
-                    step.thought.reasoning,
-                    step.action.tool_name,
-                    step.action.parameters,
-                    output_str
-                )
-            }).collect::<Vec<_>>().join("\n\n")
-        };
-        
-        // 获取前序步骤的原始输出
-        let previous_outputs = context.metadata.get("previous_outputs")
-            .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
-            .unwrap_or_else(|| "无".to_string());
-        
-        // 构建后续步骤摘要
-        let remaining_steps_str = if let Some(steps) = remaining_steps {
-            if steps.is_empty() {
-                "无".to_string()
-            } else {
-                steps.iter()
-                    .map(|s| format!("- 步骤{}: {}", s.order, s.intent))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }
-        } else {
-            "无".to_string()
-        };
-        
-        // 使用 prompt_manager 渲染 prompt
-        let step_categories = coarse_step.recommended_tool_categories.as_deref().unwrap_or(&[]);
+        // 1. 构建 prompt context
+        // think 阶段不感知具体工具：完整 ToolDefinition 仅在 act 阶段通过 API tools 参数注入，
+        // 此处只提供当前步骤、后续步骤与数据需求，便于模型规划下一步行动。
+        let remaining_steps_str = Self::build_remaining_steps_str(remaining_steps);
         let prompt_context = Self::with_intent_flags(
             coarse_step,
             Self::with_step_context(
                 PromptContext::new()
-                    .with_variable("tools", serde_json::json!(self.get_tools_description(step_categories)))
-                    .with_variable("history", serde_json::json!(history_str))
-                    .with_variable("previous_outputs", serde_json::json!(previous_outputs))
                     .with_variable("remaining_steps", serde_json::json!(remaining_steps_str)),
                 coarse_step,
-                context,
             ),
         );
+    
+        // 2. 渲染 prompt 并追加 User 消息
+        self.render_push_user_message("planning/react_think", &prompt_context, coarse_step).await?;
 
-        let prompt = self.prompt_manager.render("planning/react_think", &prompt_context).await
-            .map_err(|e| anyhow::anyhow!("Failed to render template planning/react_think: {}", e))?;
+        // 3. 调用 LLM（think 不需要工具，传 None）
+        let assistant_msg = self.call_llm_with_messages(None).await?;
 
-        debug!(
-            target: "react_prompt",
-            "[planning/react_think] step={} chars={}\n{}",
-            coarse_step.id,
-            prompt.chars().count(),
-            prompt
-        );
+        // 4. 追加 Assistant 消息
+        self.messages.push(assistant_msg.clone());
 
-        // 调用 LLM
-        let response = self.call_llm(&prompt).await?;
-        
-        // 使用 prompt_manager 解析响应
+        // 5. 解析响应（提取 content 文本，解析为 Thought）
+        let response = Self::extract_text_content(&assistant_msg)?;
         let thought: Thought = self.prompt_manager.parse_response("planning/react_think", &response).await?;
-        
         Ok(thought)
     }
     
     async fn act(
-        &self,
+        &mut self,
         coarse_step: &CoarseGrainedStep,
         thought: &Thought,
-        context: &PlanContext,
     ) -> Result<Action> {
-        // 获取前序步骤的原始输出
-        let previous_outputs = context.metadata.get("previous_outputs")
-            .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
-            .unwrap_or_else(|| "无".to_string());
-        
-        // 使用 prompt_manager 渲染 prompt
-        let step_categories = coarse_step.recommended_tool_categories.as_deref().unwrap_or(&[]);
+        // 1. 构建 prompt context（不再传 tools，由 API 参数传递）
         let prompt_context = Self::with_intent_flags(
             coarse_step,
             Self::with_step_context(
@@ -469,36 +583,43 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
                     .with_variable("thought", serde_json::json!({
                         "reasoning": thought.reasoning,
                         "plan": thought.plan
-                    }))
-                    .with_variable("tools", serde_json::json!(self.get_tools_description(step_categories)))
-                    .with_variable("previous_outputs", serde_json::json!(previous_outputs)),
+                    })),
                 coarse_step,
-                context,
             ),
         );
 
-        let prompt = self.prompt_manager.render("planning/react_act", &prompt_context).await?;
+        // 2. 渲染 prompt 并追加 User 消息
+        self.render_push_user_message("planning/react_act", &prompt_context, coarse_step).await?;
 
-        debug!(
-            target: "react_prompt",
-            "[planning/react_act] step={} chars={}\n{}",
-            coarse_step.id,
-            prompt.chars().count(),
-            prompt
-        );
+        // 3. 按 step 类别构建 tools 定义
+        let step_categories = coarse_step.recommended_tool_categories.as_deref().unwrap_or(&[]);
+        let tools = self.build_tool_definitions(step_categories);
 
-        // 调用 LLM
-        let response = self.call_llm(&prompt).await?;
-        
-        // 使用 prompt_manager 解析响应
-        let action: Action = self.prompt_manager.parse_response("planning/react_act", &response).await?;
-        
-        Ok(action)
+        // 4. 调用 LLM（act 传入 tools，让 OpenAI API 走标准 tool_calls 返回）
+        let assistant_msg = self.call_llm_with_messages(tools).await?;
+
+        // 5. 直接把 OpenAI 返回的 assistant 消息原样推入 messages（含 tool_calls）
+        self.messages.push(assistant_msg.clone());
+
+        // 6. 从 tool_calls 提取第一个工具调用作为 Action
+        let tool_call = assistant_msg.tool_calls.as_ref()
+            .and_then(|calls| calls.first())
+            .ok_or_else(|| anyhow!("No tool_calls in assistant response"))?;
+
+        let tool_name = tool_call.function.name.clone();
+        let parameters: Value = serde_json::from_str(&tool_call.function.arguments)
+            .map_err(|e| anyhow!("Failed to parse tool arguments: {}", e))?;
+
+        // 7. 保存 tool_call_id 供后续 tool 消息使用
+        self.pending_tool_call_id = Some(tool_call.id.clone());
+
+        Ok(Action {
+            tool_name,
+            parameters,
+            reasoning: None,
+        })
     }
     
-    /// 调用工具 + 后处理（路由 → handler 链式执行）。
-    ///
-    /// `current_intent` / `next_intent` 用于 handler 内部决策（如 HTML 清洗子 Agent 的格式选择）。
     async fn execute_tool(
         &self,
         action: &Action,
@@ -545,14 +666,12 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
         };
 
         // 在 execute_tool 内部一站式完成"路由 + handler 链式执行"。
-        // 原始 HTML 永远不会写进主上下文。
         Ok(self
             .tool_result_router
             .process(raw_obs, &outcome.categories, current_intent, next_intent)
             .await)
     }
     
-    /// 观察：分析工具执行结果，判断是否完成目标
     async fn observe(
         &self,
         coarse_step: &CoarseGrainedStep,
@@ -567,7 +686,6 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
         }
         
         // 使用 prompt_manager 渲染 prompt（使用 react_observe 判断是否完成）
-        // 将工具输出转换为字符串，确保 JSON 结构正确显示
         let tool_result_str = serde_json::to_string_pretty(&observation.output)
             .unwrap_or_else(|_| serde_json::to_string(&observation.output).unwrap_or_default());
 
@@ -611,17 +729,12 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
     }
     
     fn is_complete(&self, observation: &Observation) -> bool {
-        // 如果有错误，未完成
         if observation.error.is_some() {
             return false;
         }
-        
-        // 如果输出为 null，未完成
         if observation.output.is_null() {
             return false;
         }
-        
-        // 默认认为已完成（可以根据具体场景调整）
         true
     }
     

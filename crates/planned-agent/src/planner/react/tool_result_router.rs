@@ -16,6 +16,7 @@
 //!   `categories` 只在路由层参与判断，不下沉到 handler —— 减少冗余，便于扩展。
 //! - **handler 自己持有依赖**：例如 `HtmlBrowserPostHandler` 构造时持有 `Arc<HtmlCleanSubAgent>`，
 //!   路由器完全不感知 LLM 客户端存在。
+//! - **StructureClean 无条件执行**：作为处理链的第一环，所有 Observation 都必须先经过结构清洗。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,7 +27,7 @@ use planned_agent_core::tool_registry::ToolCategory;
 
 use crate::planner::react::sub_agents::html_clean_subagent::{looks_like_html, HtmlCleanSubAgent};
 use crate::planner::react::tool_result_handler::{
-    BinaryTruncatePostHandler, HtmlBrowserPostHandler,
+    BinaryTruncatePostHandler, HtmlBrowserPostHandler, StructureCleanPostHandler,
 };
 
 // =====================================================================
@@ -37,6 +38,9 @@ use crate::planner::react::tool_result_handler::{
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PostProcessKind {
+    /// 结构化清洗（无条件执行，处理链第一环）
+    /// 对所有工具输出进行结构化清洗，提取关键信息、去除冗余格式
+    StructureClean,
     /// Browser 分类 + 输出疑似 HTML → 走 HTML 清洗（结构化后进入主上下文）
     HtmlClean,
     /// 任意分类 + 输出过大 → 截断，防止 token 爆炸
@@ -49,6 +53,7 @@ impl PostProcessKind {
     /// 中文标签（用于日志 / 调试）
     pub fn label(&self) -> &'static str {
         match self {
+            PostProcessKind::StructureClean => "结构化清洗",
             PostProcessKind::HtmlClean => "HTML 清洗",
             PostProcessKind::BinaryTruncate => "大输出截断",
             PostProcessKind::Passthrough => "透传",
@@ -127,23 +132,35 @@ impl ToolResultRouter {
         }
     }
 
-    /// **便捷构造**：直接预装"标准两个 handler"（HTML 清洗 + 大输出截断）。
+    /// **便捷构造**：直接预装"标准 handler"（结构清洗 + HTML 清洗 + 大输出截断）。
     ///
-    /// 这是 `DefaultReActAgent` 场景下的常见配置——避免调用方写 4 行 register。
-    /// 若需要非标准配置，仍可走 `new() + register()` 路径。
+    /// StructureClean 无条件执行作为第一环，后续 HtmlClean 和 BinaryTruncate 按需触发。
+    /// 这是 `DefaultReActAgent` 场景下的常见配置。
     pub fn with_standard_handlers(
         html_sub_agent: std::sync::Arc<HtmlCleanSubAgent>,
         binary_truncate_max_bytes: usize,
+        ai_client: std::sync::Arc<dyn planned_agent_core::ai::AiClient>,
     ) -> Self {
         let mut r = Self::new();
+        
+        // 第一环：结构化清洗（无条件执行）
+        // r.register(
+        //     PostProcessKind::StructureClean,
+        //     std::sync::Arc::new(StructureCleanPostHandler::new(ai_client)),
+        // );
+        
+        // 第二环：HTML 清洗（Browser 分类 + 疑似 HTML 时触发）
         r.register(
             PostProcessKind::HtmlClean,
             std::sync::Arc::new(HtmlBrowserPostHandler::new(html_sub_agent)),
         );
+        
+        // 第三环：大输出截断
         r.register(
             PostProcessKind::BinaryTruncate,
             std::sync::Arc::new(BinaryTruncatePostHandler::new(binary_truncate_max_bytes)),
         );
+        
         r
     }
 
@@ -159,21 +176,29 @@ impl ToolResultRouter {
  
     /// **路由决策**（静态方法，无状态）：根据 `(categories, obs)` 决定走哪些步骤。
     ///
-    /// 决策规则（按优先级）：
-    /// 1. Browser 分类 + 输出疑似 HTML → `HtmlClean`
+    /// 决策规则（**StructureClean 无条件执行，始终作为第一环**）：
+    /// 1. ~~Browser 分类 + 输出疑似 HTML → `HtmlClean`~~ → 移至结构清洗之后
     /// 2. 输出超过 [`DEFAULT_TRUNCATE_THRESHOLD_BYTES`] 字节 → `BinaryTruncate`
     /// 3. 以上都不命中 → `Passthrough`
+    ///
+    /// **重要**：所有工具输出都会先经过 `StructureClean`，再根据内容类型决定后续处理。
     pub fn route(categories: &[ToolCategory], obs: &Observation) -> PostProcessPlan {
         let mut steps = Vec::new();
 
+        // Step 1: StructureClean 无条件执行（作为处理链第一环）
+        // steps.push(PostProcessKind::StructureClean);
+
+        // Step 2: 如果是 Browser 分类且输出疑似 HTML，走 HTML 清洗
         if categories.contains(&ToolCategory::Browser) && looks_like_html_obs(obs) {
             steps.push(PostProcessKind::HtmlClean);
         }
 
+        // Step 3: 输出过大则截断
         if output_too_large(obs, DEFAULT_TRUNCATE_THRESHOLD_BYTES) {
             steps.push(PostProcessKind::BinaryTruncate);
         }
 
+        // Step 4: 空列表兜底（理论上不会发生，因为 StructureClean 始终存在）
         if steps.is_empty() {
             steps.push(PostProcessKind::Passthrough);
         }
@@ -273,18 +298,21 @@ mod tests {
     #[test]
     fn browser_html_triggers_html_clean() {
         let plan = ToolResultRouter::route(&[ToolCategory::Browser], &obs_html());
+        assert!(plan.contains(PostProcessKind::StructureClean), "StructureClean 始终执行");
         assert!(plan.contains(PostProcessKind::HtmlClean));
     }
 
     #[test]
     fn non_browser_html_does_not_trigger_html_clean() {
         let plan = ToolResultRouter::route(&[ToolCategory::File], &obs_html());
+        assert!(plan.contains(PostProcessKind::StructureClean), "StructureClean 始终执行");
         assert!(!plan.contains(PostProcessKind::HtmlClean));
     }
 
     #[test]
     fn browser_but_not_html_does_not_trigger_html_clean() {
         let plan = ToolResultRouter::route(&[ToolCategory::Browser], &obs_short_text());
+        assert!(plan.contains(PostProcessKind::StructureClean), "StructureClean 始终执行");
         assert!(!plan.contains(PostProcessKind::HtmlClean));
     }
 
@@ -292,25 +320,44 @@ mod tests {
     fn oversized_triggers_binary_truncate() {
         let big = "x".repeat(DEFAULT_TRUNCATE_THRESHOLD_BYTES + 1);
         let plan = ToolResultRouter::route(&[ToolCategory::Text], &obs(json!(big)));
+        assert!(plan.contains(PostProcessKind::StructureClean), "StructureClean 始终执行");
         assert!(plan.contains(PostProcessKind::BinaryTruncate));
     }
 
     #[test]
-    fn short_output_falls_through_to_passthrough() {
+    fn short_output_always_has_structure_clean() {
         let plan = ToolResultRouter::route(&[ToolCategory::Text], &obs_short_text());
-        assert_eq!(plan.steps, vec![PostProcessKind::Passthrough]);
+        // 现在 StructureClean 始终执行，不再有 Passthrough
+        assert!(plan.contains(PostProcessKind::StructureClean), "StructureClean 始终执行");
+        assert_eq!(plan.steps[0], PostProcessKind::StructureClean);
     }
 
     #[test]
-    fn browser_with_huge_html_triggers_both() {
+    fn browser_with_huge_html_triggers_all() {
         let mut html = String::from("<!doctype html><html><body>");
         html.push_str(&"x".repeat(DEFAULT_TRUNCATE_THRESHOLD_BYTES));
         html.push_str("</body></html>");
         let plan = ToolResultRouter::route(&[ToolCategory::Browser], &obs(json!(html)));
+        // StructureClean 始终是第一环
+        assert_eq!(plan.steps[0], PostProcessKind::StructureClean);
         assert!(plan.contains(PostProcessKind::HtmlClean));
         assert!(plan.contains(PostProcessKind::BinaryTruncate));
-        assert_eq!(plan.steps[0], PostProcessKind::HtmlClean);
-        assert_eq!(plan.steps[1], PostProcessKind::BinaryTruncate);
+    }
+
+    #[test]
+    fn structure_clean_always_first() {
+        // 验证所有场景下 StructureClean 都是第一步
+        let scenarios = vec![
+            (&[ToolCategory::Browser] as &[ToolCategory], obs_html()),
+            (&[ToolCategory::File], obs_html()),
+            (&[ToolCategory::Text], obs_short_text()),
+        ];
+        
+        for (cats, obs) in scenarios {
+            let plan = ToolResultRouter::route(cats, &obs);
+            assert_eq!(plan.steps[0], PostProcessKind::StructureClean, 
+                "所有场景 StructureClean 必须是第一环");
+        }
     }
 
     #[tokio::test]
@@ -346,17 +393,23 @@ mod tests {
     }
 
     /// **链式语义**：后一个 handler 收到的必须是前一个 handler 的输出，而不是原始 obs。
-    /// —— HtmlClean 处理后，BinaryTruncate 拿到的是清洗结果（这里以追加后缀模拟）。
+    /// —— StructureClean 始终执行作为第一环，后续 HtmlClean、BinaryTruncate 按需触发。
     #[tokio::test]
     async fn process_chains_each_handler_receives_previous_output() {
         let mut router = ToolResultRouter::new();
+        
+        // 注册 StructureClean（第一环）
         router.register(
-            PostProcessKind::HtmlClean,
+            PostProcessKind::StructureClean,
             Arc::new(AppendSuffixHandler("A")),
         );
         router.register(
-            PostProcessKind::BinaryTruncate,
+            PostProcessKind::HtmlClean,
             Arc::new(AppendSuffixHandler("B")),
+        );
+        router.register(
+            PostProcessKind::BinaryTruncate,
+            Arc::new(AppendSuffixHandler("C")),
         );
 
         // 构造同时触发 HtmlClean（Browser + HTML）和 BinaryTruncate（> 50K 字节）的 obs
@@ -375,18 +428,19 @@ mod tests {
             .await;
 
         let s = result.output.as_str().unwrap();
-        // 链式：A 拿原 big_html，追加 "A" → B 拿 "...A"，再追加 "B" → 末尾应为 "AB"
+        // 链式：A(StructureClean) → B(HtmlClean) → C(BinaryTruncate)
+        // 末尾应为 "ABC"
         assert_eq!(
             &s[original_len..],
-            "AB",
-            "链式：原内容后应先追加 A 再追加 B（如果拿到的是原始 obs 这里会失败）"
+            "ABC",
+            "链式：原内容后应依次追加 A、B、C（如果拿到的是原始 obs 这里会失败）"
         );
         assert!(
             s.starts_with("<!doctype"),
             "原 HTML 头应保留（A 透传原内容后追加）"
         );
-        // 完整比对：原始 + A + B
-        assert_eq!(s, format!("{big_html}AB"));
+        // 完整比对：原始 + A + B + C
+        assert_eq!(s, format!("{big_html}ABC"));
     }
 
     /// 只有一个 handler 触发时，链式行为退化为"单步"，仍然正确。

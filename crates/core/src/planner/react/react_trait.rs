@@ -11,26 +11,23 @@ use crate::types::PlanContext;
 pub trait ReActAgent: Send + Sync {
     /// 执行粗粒度步骤
     async fn execute_coarse_step(
-        &self,
+        &mut self,
         coarse_step: &CoarseGrainedStep,
         context: &PlanContext,
     ) -> Result<ReActExecutionResult>;
     
     /// 思考：分析当前状态，推理下一步
     async fn think(
-        &self,
+        &mut self,
         coarse_step: &CoarseGrainedStep,
-        history: &[ReActStep],
-        context: &PlanContext,
         remaining_steps: Option<&[CoarseGrainedStep]>,
     ) -> Result<Thought>;
     
     /// 行动：选择工具并生成参数
     async fn act(
-        &self,
+        &mut self,
         coarse_step: &CoarseGrainedStep,
         thought: &Thought,
-        context: &PlanContext,
     ) -> Result<Action>;
     
     /// 执行：调用工具

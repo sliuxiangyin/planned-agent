@@ -8,6 +8,8 @@
 
 pub mod binary_truncate;
 pub mod html_clean;
+pub mod structure_clean;
 
 pub use binary_truncate::BinaryTruncatePostHandler;
 pub use html_clean::HtmlBrowserPostHandler;
+pub use structure_clean::StructureCleanPostHandler;

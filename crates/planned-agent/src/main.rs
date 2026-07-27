@@ -12,7 +12,7 @@ use planned_agent_core::planner::coarse::CoarsePlanner;
 use planner::coarse::LlmCoarsePlanner;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 
@@ -29,7 +29,7 @@ async fn main() -> Result<()> {
             // 默认 info 级；显式屏蔽 scraper/selectors（否则 chunk_html 会刷屏 DEBUG）
             // 想看全部 debug 时：RUST_LOG=debug cargo run ...
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,selectors=warn,scraper=warn")),
+                .unwrap_or_else(|_| EnvFilter::new("debug")),
         )
         .with_writer(std::io::stdout.and(file_writer))
         .init();
@@ -171,7 +171,7 @@ async fn run_test_execute(agent: &Agent, input: &str) -> Result<()> {
         retry_delay_ms: 1000,
     };
     
-    let react_agent = DefaultReActAgent::new(
+    let mut react_agent = DefaultReActAgent::new(
         ai_client.clone(),
         prompt_manager.clone(),
         tool_registry.clone(),
@@ -266,6 +266,7 @@ async fn run_interactive_mode(agent: &mut Agent, use_stream: bool) -> Result<()>
     println!("Type 'test-coarse' 测试颗粒度计划");
     println!("Type 'browse <url>' or 'browse <url> --verbose' 打开网页并获取快照");
     println!("Type 'snapshot' 查看浏览命令帮助");
+    println!("Type 'clean-snapshot <yaml_text>' 清洗 YAML 快照");
     println!("----------------------------------------");
 
     loop {
@@ -524,18 +525,29 @@ async fn run_interactive_mode(agent: &mut Agent, use_stream: bool) -> Result<()>
                             println!("  categories: {:?}", nav_result.categories);
                             println!();
                             
-                            // 2. 获取页面快照
-                            println!("--- Step 2: Take Snapshot ---");
-                            let snap_args = serde_json::json!({
-                                "verbose": verbose
+                            // 等待页面加载完成 (使用 browser_wait_for 工具)
+                            println!("--- Waiting for page to load ---");
+                            let wait_args = serde_json::json!({
+                                "text": "body"
+                            });
+                            if let Err(e) = tool_registry.call_tool("browser_wait_for", wait_args).await {
+                                println!("Warning: wait_for failed (non-critical): {}", e);
+                            } else {
+                                println!("Page loaded successfully");
+                            }
+                            
+                            // 2. 通过 JS 获取页面 HTML
+                            println!("--- Step 2: Get Page HTML via JS ---");
+                            let html_args = serde_json::json!({
+                                "function": "() => document.documentElement.outerHTML"
                             });
                             
-                            match tool_registry.call_tool("browser_snapshot", snap_args).await {
+                            match tool_registry.call_tool("browser_evaluate", html_args).await {
                                 Ok(snap_result) => {
                                     println!("Snapshot result:");
                                     println!("  is_error: {}", snap_result.result.is_error);
                                     println!("  call_id: {}", snap_result.result.call_id);
-                                    println!("  content: {}", serde_json::to_string_pretty(&snap_result.result.content).unwrap_or_else(|_| snap_result.result.content.to_string()));
+                                    info!("  content: {:?}", serde_json::to_string_pretty(&snap_result.result.content).unwrap_or_else(|_| snap_result.result.content.to_string()));
                                     println!("  categories: {:?}", snap_result.categories);
                                     println!();
                                     
