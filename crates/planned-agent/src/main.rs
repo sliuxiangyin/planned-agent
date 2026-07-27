@@ -105,10 +105,8 @@ async fn main() -> Result<()> {
 
 /// 运行完整的 Plan-and-Execute 测试流程
 async fn run_test_execute(agent: &Agent, input: &str) -> Result<()> {
-    use planner::coarse::LlmCoarsePlanner;
-    use planner::react::DefaultReActAgent;
-    use planned_agent_core::planner::coarse::CoarsePlanner;
-    use planned_agent_core::planner::react::{ReActAgent, ReActAgentConfig};
+    use planner::react::{PlanAndExecuteAgent, PlanAndExecuteConfig};
+    use planned_agent_core::planner::react::ReActAgentConfig;
     
     println!("=== Plan-and-Execute 测试 ===\n");
     println!("用户输入: {}\n", input);
@@ -116,131 +114,81 @@ async fn run_test_execute(agent: &Agent, input: &str) -> Result<()> {
     // 获取工具注册表
     let tool_registry = agent.get_tool_registry();
     
-    // 1. 创建粗粒度计划器
-    println!("--- 步骤1: 粗粒度计划器 ---");
+    // 获取 AI 客户端和 Prompt 管理器
     let ai_manager = agent.get_ai_manager()
         .ok_or_else(|| anyhow::anyhow!("AI管理器未初始化"))?;
     let ai_client = ai_manager.default()?;
     let prompt_manager = agent.get_prompt_manager_arc()
         .ok_or_else(|| anyhow::anyhow!("提示管理器未初始化"))?;
     
-    let coarse_planner = LlmCoarsePlanner::new(
-        ai_client.clone(),
-        prompt_manager.clone(),
-    );
-    
-    // 生成粗粒度计划
+    // 构建计划上下文
     let mut plan_context = PlanContext {
         user_id: None,
         session_id: None,
         history: Vec::new(),
         metadata: std::collections::HashMap::new(),
     };
-    plan_context.metadata.insert("user_goal".to_string(), serde_json::json!(input));
     plan_context.metadata.insert("max_steps".to_string(), serde_json::json!(5));
     plan_context.metadata.insert("available_tools".to_string(), 
         serde_json::json!(tool_registry.get_all_tools().iter().map(|t| t.name.clone()).collect::<Vec<_>>()));
     
-    let coarse_plan = match coarse_planner.generate_coarse_plan(input, &plan_context).await {
-        Ok(plan) => {
-            println!("生成粗粒度计划:");
-            println!("  计划ID: {}", plan.id);
-            println!("  步骤数量: {}", plan.steps.len());
-            for (i, step) in plan.steps.iter().enumerate() {
-                let categories = step.recommended_tool_categories.as_ref()
-                    .map(|cats| cats.iter().map(|c| format!("{:?}", c)).collect::<Vec<_>>().join(", "))
-                    .unwrap_or_else(|| "未知".to_string());
-                println!("  步骤{}: {} (工具分类: {})", i + 1, step.intent, categories);
-            }
-            println!();
-            plan
-        }
-        Err(e) => {
-            error!("粗粒度计划生成失败: {}", e);
-            return Err(e);
-        }
+    
+    // 配置 Plan-And-Execute Agent
+    let config = PlanAndExecuteConfig {
+        react_config: ReActAgentConfig {
+            max_iterations: 5,
+            step_timeout_ms: 30000,
+            enable_chain_of_thought: true,
+            max_retries: 3,
+            retry_delay_ms: 1000,
+        },
     };
     
-    // 2. 创建 ReAct Agent 并执行每个步骤
-    println!("--- 步骤2: ReAct Agent 执行 ---");
-    let react_config = ReActAgentConfig {
-        max_iterations: 5,
-        step_timeout_ms: 30000,
-        enable_chain_of_thought: true,
-        max_retries: 3,
-        retry_delay_ms: 1000,
-    };
-    
-    let mut react_agent = DefaultReActAgent::new(
+    // 创建并执行
+    let mut pae_agent = PlanAndExecuteAgent::new(
         ai_client.clone(),
         prompt_manager.clone(),
         tool_registry.clone(),
-        react_config,
+        config,
     );
     
-    println!("ReAct Agent 已创建: {}", react_agent.name());
-    println!("开始执行 {} 个步骤...\n", coarse_plan.steps.len());
+    let result = pae_agent.execute(input, &plan_context).await?;
     
-    // 存储前序步骤的结果，用于传递给后续步骤
-    // 存储前序步骤的原始工具输出，用于传递给后续步骤
-    let mut previous_outputs: Vec<serde_json::Value> = Vec::new();
+    // 打印计划
+    println!("--- 粗粒度计划 ---");
+    println!("  计划ID: {}", result.coarse_plan.id);
+    println!("  步骤数量: {}", result.coarse_plan.steps.len());
+    for (i, step) in result.coarse_plan.steps.iter().enumerate() {
+        let categories = step.recommended_tool_categories.as_ref()
+            .map(|cats| cats.iter().map(|c| format!("{:?}", c)).collect::<Vec<_>>().join(", "))
+            .unwrap_or_else(|| "未知".to_string());
+        println!("  步骤{}: {} → {} (工具分类: {}, 依赖: {:?})", 
+            i + 1, step.intent, step.result_reference, categories, step.dependencies);
+    }
+    println!();
     
-    // 执行每个粗粒度步骤
-    for (i, step) in coarse_plan.steps.iter().enumerate() {
-        println!("--- 执行步骤 {}/{}: {} ---", i + 1, coarse_plan.steps.len(), step.intent);
-        
-        // 将前序步骤的原始输出添加到上下文中
-        let mut step_context = plan_context.clone();
-        if !previous_outputs.is_empty() {
-            step_context.metadata.insert(
-                "previous_outputs".to_string(),
-                serde_json::json!(previous_outputs.iter().enumerate().map(|(idx, output)| {
-                    serde_json::json!({
-                        "step": idx + 1,
-                        "output": output
-                    })
-                }).collect::<Vec<_>>())
-            );
-        }
-        
-        // 将后续步骤信息添加到上下文中
-        let remaining_steps: Vec<_> = coarse_plan.steps.iter().skip(i + 1).collect();
-        step_context.metadata.insert(
-            "remaining_steps".to_string(),
-            serde_json::json!(remaining_steps)
-        );
-        
-        match react_agent.execute_coarse_step(step, &step_context).await {
-            Ok(result) => {
-                if result.success {
-                    println!("  ✓ 成功 (迭代次数: {}, 耗时: {}ms)", result.iterations, result.total_duration_ms);
-                    println!("  输出: {}", serde_json::to_string_pretty(&result.output).unwrap_or_default());
-                    
-                    // 保存原始输出，供后续步骤使用
-                    previous_outputs.push(result.output.clone());
-                    
-                    // 打印执行历史
-                    if !result.history.is_empty() {
-                        println!("  执行历史:");
-                        for (j, step) in result.history.iter().enumerate() {
-                            println!("    第{}轮:", j + 1);
-                            println!("      思考: {}", step.thought.reasoning);
-                            println!("      行动: {}({})", step.action.tool_name, step.action.parameters);
-                            println!("      观察: {}", step.observation.output);
-                        }
-                    }
+    // 打印执行结果
+    println!("--- 执行结果 ---");
+    for step in &result.coarse_plan.steps {
+        match result.step_results.get(&step.result_reference) {
+            Some(sr) => {
+                if sr.success {
+                    println!("  {} ✓ ({}ms, {} 次迭代)", step.result_reference, sr.duration_ms, sr.iterations);
+                    println!("    输出: {}", serde_json::to_string_pretty(&sr.output).unwrap_or_default());
                 } else {
-                    println!("  ✗ 失败: {}", result.error.unwrap_or_else(|| "未知错误".to_string()));
+                    println!("  {} ✗ 失败: {}", step.result_reference, 
+                        sr.error.as_deref().unwrap_or("未知错误"));
                 }
             }
-            Err(e) => {
-                println!("  ✗ 执行错误: {}", e);
+            None => {
+                println!("  {} ? 未找到结果", step.result_reference);
             }
         }
-        println!();
     }
+    println!();
     
-    println!("=== 测试完成 ===");
+    println!("=== 测试完成 (整体: {}, 耗时: {}ms) ===", 
+        if result.success { "成功" } else { "失败" }, result.total_duration_ms);
     
     Ok(())
 }

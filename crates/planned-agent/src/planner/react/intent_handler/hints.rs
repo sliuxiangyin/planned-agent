@@ -1,10 +1,10 @@
 //! 意图提示文案 + flags 生成
 //!
-//! 把 `StepIntent` 翻译成 3 个 Tera 模板变量：
-//! - `has_intent_hint : bool`  — 总开关，MixedFocus 时为 `false`，模板里的
+//! 把 `Vec<StepIntent>` 翻译成 3 个 Tera 模板变量：
+//! - `has_intent_hint : bool`  — 总开关，全为 MixedFocus 时为 `false`，模板里的
 //!                                 `{% if %}` 整体短路，prompt 中不出现任何空行 / 标题。
-//! - `intent_label    : String` — 中文标签（"浏览器" / "文本" / …），用于渲染标题行。
-//! - `intent_hint     : String` — 提示文案（MixedFocus 时为空串）。
+//! - `intent_label    : String` — 中文标签，多个意图用 " + " 连接。
+//! - `intent_hint     : String` — 提示文案，多个意图的 hint 合并。
 
 use std::collections::HashMap;
 use serde_json::Value;
@@ -14,15 +14,25 @@ use crate::planner::react::intent_router::StepIntent;
 pub struct IntentHandler;
 
 impl IntentHandler {
-    /// 处理一个意图，返回 Tera 模板可直接消费的 3 个变量。
-    pub fn handle(intent: StepIntent) -> HashMap<&'static str, Value> {
-        let mut flags = HashMap::with_capacity(3);
-        flags.insert(
-            "has_intent_hint",
-            Value::Bool(!matches!(intent, StepIntent::MixedFocus)),
-        );
-        flags.insert("intent_label", Value::String(intent.label().to_string()));
-        flags.insert("intent_hint", Value::String(intent.hint().to_string()));
+    /// 处理一组意图，合并为 Tera 模板可直接消费的 3 个变量。
+    ///
+    /// 多个意图的 label 用 " + " 连接，hint 用换行合并。
+    pub fn handle(intents: Vec<StepIntent>) -> HashMap<&'static str, Value> {
+        let mut flags: HashMap<&str, Value> = HashMap::with_capacity(3);
+
+        // 过滤掉 MixedFocus（它不是真正的意图，只是兜底占位）
+        let focused: Vec<_> = intents
+            .into_iter()
+            .filter(|i| !matches!(i, StepIntent::MixedFocus))
+            .collect();
+
+        let has_hint = !focused.is_empty();
+        let label = focused.iter().map(|i| i.label()).collect::<Vec<_>>().join(" + ");
+        let hint = focused.iter().map(|i| i.hint()).collect::<Vec<_>>().join("\n");
+
+        flags.insert("has_intent_hint", Value::Bool(has_hint));
+        flags.insert("intent_label", Value::String(label));
+        flags.insert("intent_hint", Value::String(hint));
         flags
     }
 }
@@ -39,6 +49,7 @@ impl StepIntent {
             StepIntent::DevFocus => "开发",
             StepIntent::DeviceFocus => "设备",
             StepIntent::UtilityFocus => "工具",
+            StepIntent::ReferenceFocus => "引用",
             StepIntent::MixedFocus => "",
         }
     }
@@ -54,6 +65,7 @@ impl StepIntent {
             StepIntent::DevFocus => DEV_HINT,
             StepIntent::DeviceFocus => DEVICE_HINT,
             StepIntent::UtilityFocus => UTILITY_HINT,
+            StepIntent::ReferenceFocus => REFERENCE_HINT,
             StepIntent::MixedFocus => "",
         }
     }
@@ -96,13 +108,17 @@ const UTILITY_HINT: &str = r#"- 当前聚焦工具 / 内置操作：使用工具
 - 选择最匹配意图的专用工具，避免用通用工具替代专业工具
 - 注意工具的输入约束，必要时拆分多次调用"#;
 
+const REFERENCE_HINT: &str = r#"- 当前步骤存在前序步骤结果，需要引用前序步骤产出的数据
+- 使用 builtin_fetch_step_result 工具获取指定引用标识（如 #E1、#E2）对应的步骤输出
+- 只需传入 reference 参数（引用标识），系统自动注入 results 数据"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn handle_returns_exactly_three_keys_when_focused() {
-        let flags = IntentHandler::handle(StepIntent::BrowserFocus);
+        let flags = IntentHandler::handle(vec![StepIntent::BrowserFocus]);
         assert_eq!(flags.len(), 3, "Focused 时只输出 3 个变量");
         for k in ["has_intent_hint", "intent_label", "intent_hint"] {
             assert!(flags.contains_key(k), "缺少键 {}", k);
@@ -123,7 +139,7 @@ mod tests {
 
     #[test]
     fn mixed_yields_disabled_flag_and_empty_strings() {
-        let flags = IntentHandler::handle(StepIntent::MixedFocus);
+        let flags = IntentHandler::handle(vec![StepIntent::MixedFocus]);
         assert_eq!(
             flags.get("has_intent_hint").and_then(|v| v.as_bool()),
             Some(false)
@@ -149,10 +165,11 @@ mod tests {
             StepIntent::DevFocus,
             StepIntent::DeviceFocus,
             StepIntent::UtilityFocus,
+            StepIntent::ReferenceFocus,
         ] {
             assert!(!intent.label().is_empty(), "label 应非空: {:?}", intent);
             assert!(!intent.hint().is_empty(), "hint 应非空: {:?}", intent);
-            let flags = IntentHandler::handle(intent);
+            let flags = IntentHandler::handle(vec![intent]);
             assert_eq!(
                 flags.get("has_intent_hint").and_then(|v| v.as_bool()),
                 Some(true),
@@ -164,7 +181,7 @@ mod tests {
 
     #[test]
     fn label_and_hint_are_consistent() {
-        // 校验所有 8 个 focused 变体的 label / hint 都非空且与 BROWSER_HINT 之类常量匹配
+        // 校验所有 focused 变体的 label / hint 都非空且与常量匹配
         assert_eq!(StepIntent::BrowserFocus.label(), "浏览器");
         assert_eq!(StepIntent::BrowserFocus.hint(), BROWSER_HINT);
         assert_eq!(StepIntent::TextFocus.label(), "文本");
@@ -181,5 +198,46 @@ mod tests {
         assert_eq!(StepIntent::DeviceFocus.hint(), DEVICE_HINT);
         assert_eq!(StepIntent::UtilityFocus.label(), "工具");
         assert_eq!(StepIntent::UtilityFocus.hint(), UTILITY_HINT);
+        assert_eq!(StepIntent::ReferenceFocus.label(), "引用");
+        assert_eq!(StepIntent::ReferenceFocus.hint(), REFERENCE_HINT);
+    }
+
+    #[test]
+    fn merged_intents_concatenate_label_and_hint() {
+        // BrowserFocus + ReferenceFocus → 标签用 " + " 连接，hint 合并
+        let flags = IntentHandler::handle(vec![
+            StepIntent::BrowserFocus,
+            StepIntent::ReferenceFocus,
+        ]);
+        assert_eq!(
+            flags.get("has_intent_hint").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            flags.get("intent_label").and_then(|v| v.as_str()),
+            Some("浏览器 + 引用")
+        );
+        let expected_hint = format!("{}\n{}", BROWSER_HINT, REFERENCE_HINT);
+        assert_eq!(
+            flags.get("intent_hint").and_then(|v| v.as_str()),
+            Some(expected_hint.as_str())
+        );
+    }
+
+    #[test]
+    fn empty_vec_yields_disabled_flag() {
+        let flags = IntentHandler::handle(vec![]);
+        assert_eq!(
+            flags.get("has_intent_hint").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            flags.get("intent_label").and_then(|v| v.as_str()),
+            Some("")
+        );
+        assert_eq!(
+            flags.get("intent_hint").and_then(|v| v.as_str()),
+            Some("")
+        );
     }
 }

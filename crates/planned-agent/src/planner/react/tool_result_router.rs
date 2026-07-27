@@ -234,13 +234,13 @@ impl ToolResultRouter {
         let plan = Self::route(categories, &obs);
         // 关键：`current` 在循环中被覆盖 —— 下一个 handler 收到的是上一个的输出
         let mut current = obs;
-        for kind in plan.steps {
-            if let Some(handler) = self.handlers.get(&kind) {
-                current = handler
-                    .handle(current, current_intent, next_intent)
-                    .await;
-            }
-        }
+        // for kind in plan.steps {
+        //     if let Some(handler) = self.handlers.get(&kind) {
+        //         current = handler
+        //             .handle(current, current_intent, next_intent)
+        //             .await;
+        //     }
+        // }
         current
     }
 }
@@ -250,11 +250,15 @@ impl ToolResultRouter {
 // =====================================================================
 
 /// 判断 `Observation.output` 是否疑似 HTML。
+/// 支持裸字符串和 JSON 包装对象（如 browser_evaluate 返回的 `{"result": "<html>..."}`）。
 fn looks_like_html_obs(obs: &Observation) -> bool {
-    let Some(s) = obs.output.as_str() else {
-        return false;
-    };
-    looks_like_html(s)
+    // 优先检查裸字符串
+    if let Some(s) = obs.output.as_str() {
+        return looks_like_html(s);
+    }
+    // 否则整体序列化为字符串再判断（覆盖 JSON 对象/数组等包装形式）
+    let serialized = serde_json::to_string(&obs.output).unwrap_or_default();
+    looks_like_html(&serialized)
 }
 
 /// 判断 `Observation.output` 是否过大（按 UTF-8 字节数）。

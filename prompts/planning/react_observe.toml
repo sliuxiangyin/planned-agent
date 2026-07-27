@@ -1,26 +1,20 @@
 [name]
-description = "ReAct Agent 观察 prompt"
+description = "ReAct Agent 观察 prompt（含 expected_output，复用 messages 上下文）"
 
 [content]
 text = """
-分析工具执行结果，判断是否完成目标：
+结合对话历史，分析本次工具执行结果，判断是否已完成目标：
 
-目标：{{ coarse_step.intent }}
+目标意图：{{ coarse_step.intent }}
+期望产出：{{ coarse_step.expected_output }}
 
-工具执行结果：
+本次工具输出：
 {{ tool_result }}
 
-请判断：是否已完成目标？
-
 判断标准：
-- 如果工具输出完全满足目标要求，判断为 true
-- 如果工具输出包含了目标所需的关键信息，但需要进一步处理，判断为 false 并说明需要什么处理
-- 如果工具输出与目标无关或失败，判断为 false
-
-{% if has_intent_hint %}
-【{{ intent_label }}专属提示】
-{{ intent_hint }}
-{% endif %}
+- 如果本次输出 + 对话历史中已有输出共同满足"期望产出"，判断为 true
+- 如果还需补充数据或进一步处理，判断为 false 并说明缺什么
+- 如果工具连续失败或无进展，判断为 false 并建议换策略
 
 返回JSON格式（只返回JSON，不要其他内容）：
 {
@@ -30,7 +24,7 @@ text = """
 """
 
 [variables]
-coarse_step = { description = "粗粒度步骤", required = true }
+coarse_step = { description = "粗粒度步骤（含 intent、expected_output）", required = true }
 tool_result = { description = "工具执行结果", required = true }
 
 [output_schema]

@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
+
+/// 共享的步骤结果存储（Arc<RwLock<HashMap>>）
+///
+/// 用于 Plan-And-Execute 流水线中步骤间的数据传递：
+/// - PlanAndExecuteAgent 持有写端，每步完成后更新
+/// - fetch_step_result 工具执行器持有读端，AI 调用时读取
+pub type StepResultStore = std::sync::Arc<std::sync::RwLock<HashMap<String, Value>>>;
 
 /// ReAct 步骤
 #[derive(Debug, Clone, Serialize, Deserialize)]

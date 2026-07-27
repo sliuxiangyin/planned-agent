@@ -17,7 +17,7 @@
 use planned_agent_core::planner::coarse::CoarseGrainedStep;
 use planned_agent_core::tool_registry::types::ToolCategory;
 
-/// 步骤主导意图（按行为焦点划分，与 `ToolCategory` 一一对应 + 一个兜底变体）。
+/// 步骤主导意图（按行为焦点划分，与 `ToolCategory` 一一对应 + 兜底变体 + 引用意图）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StepIntent {
     BrowserFocus,
@@ -28,6 +28,8 @@ pub enum StepIntent {
     DevFocus,
     DeviceFocus,
     UtilityFocus,
+    /// 多步骤间数据引用：当前步骤存在前序步骤结果，应提示 AI 使用引用工具。
+    ReferenceFocus,
     /// 多个 ToolCategory 同时出现 / 推荐列表为空 / 解析失败 —— 兜底。
     MixedFocus,
 }
@@ -36,25 +38,41 @@ pub enum StepIntent {
 pub struct IntentRouter;
 
 impl IntentRouter {
-    /// 根据当前步骤解析主导意图。
+    /// 根据当前步骤解析意图列表。
+    ///
+    /// 返回的 Vec 可能包含多个意图（如类别意图 + 引用意图），
+    /// 由 `IntentHandler` 合并为单一提示文案。
     ///
     /// 解析策略：
-    /// 1. 若 `recommended_tool_categories` 为 `None` 或空 → `MixedFocus`（兜底）
-    /// 2. 若只有一个类别 → 直接映射到对应 `StepIntent`
-    /// 3. 若多个 → 按 [`intent_priority`] 顺序选出优先级最高的那个
-    pub fn route(step: &CoarseGrainedStep) -> StepIntent {
-        let cats = match &step.recommended_tool_categories {
-            Some(c) if !c.is_empty() => c,
-            _ => return StepIntent::MixedFocus,
-        };
+    /// 1. 若 `has_previous_results` 为 true → 追加 `ReferenceFocus`
+    /// 2. 若 `recommended_tool_categories` 存在 → 按优先级映射到对应 `StepIntent`
+    /// 3. 若无任何意图 → 返回 `[MixedFocus]`
+    pub fn route(step: &CoarseGrainedStep ) -> Vec<StepIntent> {
+        let mut intents = Vec::new();
 
-        for priority_cat in intent_priority() {
-            if cats.contains(&priority_cat) {
-                return map_category(&priority_cat);
+        // 引用意图优先级最高，始终排在第一位
+        if !step.dependencies.is_empty() {
+            intents.push(StepIntent::ReferenceFocus);
+        }
+
+        // 类别意图（取优先级最高的一个）
+        if let Some(cats) = &step.recommended_tool_categories {
+            if !cats.is_empty() {
+                for priority_cat in intent_priority() {
+                    if cats.contains(&priority_cat) {
+                        intents.push(map_category(&priority_cat));
+                        break;
+                    }
+                }
             }
         }
-        // 理论不会走到这里（intent_priority 覆盖 ToolCategory::all()），兜底
-        StepIntent::MixedFocus
+
+        // 兜底：无任何意图时返回 MixedFocus
+        if intents.is_empty() {
+            intents.push(StepIntent::MixedFocus);
+        }
+
+        intents
     }
 }
 
@@ -105,12 +123,21 @@ mod tests {
         s
     }
 
+    fn make_step_with_deps(
+        cats: Option<Vec<ToolCategory>>,
+        deps: Vec<String>,
+    ) -> CoarseGrainedStep {
+        let mut s = make_step(cats);
+        s.dependencies = deps;
+        s
+    }
+
     #[test]
     fn empty_or_none_yields_mixed() {
-        assert_eq!(IntentRouter::route(&make_step(None)), StepIntent::MixedFocus);
+        assert_eq!(IntentRouter::route(&make_step(None)), vec![StepIntent::MixedFocus]);
         assert_eq!(
             IntentRouter::route(&make_step(Some(vec![]))),
-            StepIntent::MixedFocus
+            vec![StepIntent::MixedFocus]
         );
     }
 
@@ -118,23 +145,23 @@ mod tests {
     fn single_category_maps_directly() {
         assert_eq!(
             IntentRouter::route(&make_step(Some(vec![ToolCategory::Browser]))),
-            StepIntent::BrowserFocus
+            vec![StepIntent::BrowserFocus]
         );
         assert_eq!(
             IntentRouter::route(&make_step(Some(vec![ToolCategory::Text]))),
-            StepIntent::TextFocus
+            vec![StepIntent::TextFocus]
         );
         assert_eq!(
             IntentRouter::route(&make_step(Some(vec![ToolCategory::Data]))),
-            StepIntent::DataFocus
+            vec![StepIntent::DataFocus]
         );
         assert_eq!(
             IntentRouter::route(&make_step(Some(vec![ToolCategory::File]))),
-            StepIntent::FileFocus
+            vec![StepIntent::FileFocus]
         );
         assert_eq!(
             IntentRouter::route(&make_step(Some(vec![ToolCategory::System]))),
-            StepIntent::SystemFocus
+            vec![StepIntent::SystemFocus]
         );
     }
 
@@ -147,7 +174,7 @@ mod tests {
                 ToolCategory::Browser,
                 ToolCategory::Text,
             ]))),
-            StepIntent::BrowserFocus
+            vec![StepIntent::BrowserFocus]
         );
         // [File, Text] → Text 胜出（Text 优先级高于 File）
         assert_eq!(
@@ -155,7 +182,7 @@ mod tests {
                 ToolCategory::File,
                 ToolCategory::Text,
             ]))),
-            StepIntent::TextFocus
+            vec![StepIntent::TextFocus]
         );
         // [Dev, System] → System 胜出
         assert_eq!(
@@ -163,7 +190,29 @@ mod tests {
                 ToolCategory::Dev,
                 ToolCategory::System,
             ]))),
-            StepIntent::SystemFocus
+            vec![StepIntent::SystemFocus]
+        );
+    }
+
+    #[test]
+    fn dependencies_trigger_reference_focus() {
+        // 有依赖 → ReferenceFocus + 类别意图并存
+        assert_eq!(
+            IntentRouter::route(&make_step_with_deps(
+                Some(vec![ToolCategory::Browser]),
+                vec!["#E1".into()]
+            )),
+            vec![StepIntent::ReferenceFocus, StepIntent::BrowserFocus]
+        );
+        // 有依赖但无类别 → 仅 ReferenceFocus
+        assert_eq!(
+            IntentRouter::route(&make_step_with_deps(None, vec!["#E1".into()])),
+            vec![StepIntent::ReferenceFocus]
+        );
+        // 无依赖（首步）→ 不触发 ReferenceFocus
+        assert_eq!(
+            IntentRouter::route(&make_step(Some(vec![ToolCategory::Browser]))),
+            vec![StepIntent::BrowserFocus]
         );
     }
 }
