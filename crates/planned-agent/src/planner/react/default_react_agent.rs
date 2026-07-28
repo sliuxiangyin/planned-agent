@@ -22,6 +22,7 @@ use planned_agent_tool_manager::ToolRegistry;
 
 use super::agent_context::AgentContext;
 use super::chunk::ChunkStore;
+use super::chunk::executor_context::ExecutorContext;
 use super::ref_expander::expand_refs;
 use super::tool_executor;
 
@@ -49,8 +50,12 @@ impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
         ai_client: Arc<dyn AiClient>,
         prompt_manager: Arc<PM>,
         tool_registry: Arc<ToolRegistry>,
+        exec_ctx: Arc<ExecutorContext>,
         config: ReActAgentConfig,
     ) -> Self {
+        let chunk_store = Arc::new(ChunkStore::new(tool_registry.clone()));
+        exec_ctx.set_chunk_store(chunk_store.clone());
+
         Self {
             ai_client,
             prompt_manager,
@@ -58,11 +63,7 @@ impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
             config,
             ctx: AgentContext::new(),
             store: None,
-            chunk_store: {
-                let cs = Arc::new(ChunkStore::new(tool_registry.clone()));
-                tool_registry.set_extension(cs.clone());
-                cs
-            },
+            chunk_store,
         }
     }
 

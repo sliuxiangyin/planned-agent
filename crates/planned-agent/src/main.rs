@@ -118,6 +118,7 @@ async fn run_test_execute(agent: &Agent, input: &str) -> Result<()> {
     
     // 获取工具注册表
     let tool_registry = agent.get_tool_registry();
+    let exec_ctx = agent.get_exec_ctx();
     
     // 获取 AI 客户端和 Prompt 管理器
     let ai_manager = agent.get_ai_manager()
@@ -153,6 +154,7 @@ async fn run_test_execute(agent: &Agent, input: &str) -> Result<()> {
         ai_client.clone(),
         prompt_manager.clone(),
         tool_registry.clone(),
+        exec_ctx.clone(),
         config,
     );
     

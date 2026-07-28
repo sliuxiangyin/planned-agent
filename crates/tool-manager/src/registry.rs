@@ -1,4 +1,3 @@
-use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use anyhow::Result;
@@ -30,9 +29,6 @@ pub struct ToolRegistry {
     
     /// 分类索引（category -> tool_names）
     category_index: RwLock<HashMap<ToolCategory, Vec<String>>>,
-
-    /// 通用扩展存储：外部运行时注入，Executor 按类型取出
-    extensions: RwLock<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
 }
 
 impl ToolRegistry {
@@ -45,7 +41,6 @@ impl ToolRegistry {
             custom_executors: RwLock::new(HashMap::new()),
             builtin_executors: RwLock::new(HashMap::new()),
             category_index: RwLock::new(HashMap::new()),
-            extensions: RwLock::new(HashMap::new()),
         }
     }
     
@@ -575,27 +570,6 @@ impl ToolRegistry {
         } else {
             Err(anyhow::anyhow!("Tool not found: {}", name))
         }
-    }
-    
-    // ========== 通用扩展存储 ==========
-    
-    /// 注入扩展值（同一类型多次注入会覆盖）。
-    ///
-    /// Executor 可在构造时持有 `Arc<ToolRegistry>`，运行时通过 `get_extension` 取出。
-    pub fn set_extension<T: Any + Send + Sync>(&self, value: T) {
-        self.extensions
-            .write()
-            .unwrap()
-            .insert(TypeId::of::<T>(), Arc::new(value));
-    }
-    
-    /// 按类型取出扩展值（clone 一份，不受锁生命周期限制）。
-    pub fn get_extension<T: Any + Send + Sync + Clone>(&self) -> Option<T> {
-        self.extensions
-            .read()
-            .unwrap()
-            .get(&TypeId::of::<T>())
-            .and_then(|arc| arc.downcast_ref::<T>().cloned())
     }
     
     /// 获取统计信息

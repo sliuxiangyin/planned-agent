@@ -29,6 +29,7 @@ use planned_agent_core::types::PlanContext;
 use planned_agent_tool_manager::ToolRegistry;
 
 use super::default_react_agent::DefaultReActAgent;
+use super::chunk::executor_context::ExecutorContext;
 use crate::planner::coarse::LlmCoarsePlanner;
 
 /// 单个步骤的执行结果
@@ -82,6 +83,7 @@ pub struct PlanAndExecuteAgent<PM: PromptManager> {
     ai_client: Arc<dyn AiClient>,
     prompt_manager: Arc<PM>,
     tool_registry: Arc<ToolRegistry>,
+    exec_ctx: Arc<ExecutorContext>,
     config: PlanAndExecuteConfig,
     /// 共享的步骤结果存储，与 fetch_step_result 工具共用
     store: StepResultStore,
@@ -93,6 +95,7 @@ impl<PM: PromptManager + 'static> PlanAndExecuteAgent<PM> {
         ai_client: Arc<dyn AiClient>,
         prompt_manager: Arc<PM>,
         tool_registry: Arc<ToolRegistry>,
+        exec_ctx: Arc<ExecutorContext>,
         config: PlanAndExecuteConfig,
     ) -> Self {
         let store = StepResultStore::new(std::sync::RwLock::new(HashMap::new()));
@@ -100,6 +103,7 @@ impl<PM: PromptManager + 'static> PlanAndExecuteAgent<PM> {
             ai_client,
             prompt_manager,
             tool_registry,
+            exec_ctx,
             config,
             store,
         }
@@ -141,6 +145,7 @@ impl<PM: PromptManager + 'static> PlanAndExecuteAgent<PM> {
             self.ai_client.clone(),
             self.prompt_manager.clone(),
             self.tool_registry.clone(),
+            self.exec_ctx.clone(),
             self.config.react_config.clone(),
         );
         react_agent.set_store(self.store.clone());

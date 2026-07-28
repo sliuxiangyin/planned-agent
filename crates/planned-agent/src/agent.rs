@@ -14,6 +14,7 @@ use planned_agent_tool_manager::builtin::ai_tools::AiToolsProvider;
 use planned_agent_tool_manager::builtin::web_tools::WebToolsProvider;
 use planned_agent_tool_manager::builtin::step_result_tools::StepResultToolsProvider;
 use crate::planner::react::chunk::ChunkToolsProvider;
+use crate::planner::react::chunk::executor_context::ExecutorContext;
 use anyhow::Result;
 use tracing::{info, error};
 use std::collections::HashMap;
@@ -24,13 +25,16 @@ pub struct Agent {
     ai_manager: Option<AiManager>,
     tool_registry: Arc<ToolRegistry>,
     prompt_manager: Option<FilePromptManager>,
+    /// Executor 运行时注入上下文（避免与 ToolRegistry 循环引用）
+    exec_ctx: Arc<ExecutorContext>,
 }
 
 impl Agent {
     /// 创建新的代理
     pub fn new() -> Self {
         let tool_registry = Arc::new(ToolRegistry::new());
-        
+        let exec_ctx = Arc::new(ExecutorContext::new());
+
         // 注册内置工具
         tool_registry.register_builtin_provider(&FileToolsProvider);
         tool_registry.register_builtin_provider(&TextToolsProvider);
@@ -39,13 +43,14 @@ impl Agent {
         tool_registry.register_builtin_provider(&AiToolsProvider);
         tool_registry.register_builtin_provider(&WebToolsProvider);
         tool_registry.register_builtin_provider(&StepResultToolsProvider);
-        let chunk_provider = ChunkToolsProvider::new(tool_registry.clone());
+        let chunk_provider = ChunkToolsProvider::new(exec_ctx.clone());
         tool_registry.register_builtin_provider(&chunk_provider);
 
         Self {
             ai_manager: None,
             tool_registry,
             prompt_manager: None,
+            exec_ctx,
         }
     }
     
@@ -371,5 +376,10 @@ impl Agent {
     /// 获取工具注册表
     pub fn get_tool_registry(&self) -> &Arc<ToolRegistry> {
         &self.tool_registry
+    }
+
+    /// 获取执行器注入上下文
+    pub fn get_exec_ctx(&self) -> &Arc<ExecutorContext> {
+        &self.exec_ctx
     }
 }

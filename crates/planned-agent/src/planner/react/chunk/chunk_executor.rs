@@ -1,9 +1,9 @@
 //! 分片工具定义 + Executor + 内置 Provider。
 //!
-//! Executor 通过 `ToolRegistry` 的扩展存储获取运行时的 `ChunkStore`，
-//! 无需在注册时持有 `ChunkStore`，解耦构造时机。
+//! Executor 通过 `ExecutorContext` 获取运行时的 `ChunkStore`，
+//! 无需在注册时持有 `ChunkStore`，解耦构造时机，同时避免循环引用。
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -11,28 +11,30 @@ use serde_json::{json, Value};
 
 use planned_agent_core::tool_registry::{BuiltinToolProvider, ToolCategory, ToolExecutor};
 use planned_agent_core::types::{Tool, ToolResult};
-use planned_agent_tool_manager::ToolRegistry;
 
 use super::chunk_store::ChunkStore;
+use super::executor_context::ExecutorContext;
 
 /// 分片工具执行器。
 ///
-/// 通过 `ToolRegistry` 扩展存储获取运行时的 `ChunkStore`，
-/// 走正常的 `call_tool()` 路径，无需 `DefaultReActAgent` 拦截。
+/// 持有 `Weak<ExecutorContext>`（不增加 refcount，无循环引用风险），
+/// 运行时通过 `upgrade()` 获取 `ChunkStore`。
 pub struct ChunkStoreExecutor {
-    tool_registry: Arc<ToolRegistry>,
+    ctx: Weak<ExecutorContext>,
 }
 
 impl ChunkStoreExecutor {
-    pub fn new(tool_registry: Arc<ToolRegistry>) -> Self {
-        Self { tool_registry }
+    pub fn new(ctx: Weak<ExecutorContext>) -> Self {
+        Self { ctx }
     }
 
-    /// 从 ToolRegistry 扩展存储中取出 ChunkStore
     fn get_chunk_store(&self) -> Result<Arc<ChunkStore>> {
-        self.tool_registry
-            .get_extension::<Arc<ChunkStore>>()
-            .ok_or_else(|| anyhow::anyhow!("ChunkStore 尚未注入到 ToolRegistry"))
+        let exec_ctx = self.ctx
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("ExecutorContext 已释放"))?;
+        exec_ctx
+            .chunk_store()
+            .ok_or_else(|| anyhow::anyhow!("ChunkStore 尚未注入到 ExecutorContext"))
     }
 }
 
@@ -184,15 +186,15 @@ fn chunk_summary_tool() -> (Tool, Vec<ToolCategory>) {
 
 /// 分片工具提供者。
 ///
-/// 持有 `Arc<ToolRegistry>`，注册时将 registry 传给 `ChunkStoreExecutor`，
-/// executor 运行时通过扩展存储取出 `ChunkStore`。
+/// 持有 `Arc<ExecutorContext>`，注册时将 ctx 的 `Weak` 引用传给 `ChunkStoreExecutor`，
+/// executor 运行时通过 `upgrade()` 获取 `ChunkStore`。
 pub struct ChunkToolsProvider {
-    tool_registry: Arc<ToolRegistry>,
+    exec_ctx: Arc<ExecutorContext>,
 }
 
 impl ChunkToolsProvider {
-    pub fn new(tool_registry: Arc<ToolRegistry>) -> Self {
-        Self { tool_registry }
+    pub fn new(exec_ctx: Arc<ExecutorContext>) -> Self {
+        Self { exec_ctx }
     }
 }
 
@@ -206,6 +208,6 @@ impl BuiltinToolProvider for ChunkToolsProvider {
     }
 
     fn executor(&self) -> Arc<dyn ToolExecutor> {
-        Arc::new(ChunkStoreExecutor::new(self.tool_registry.clone()))
+        Arc::new(ChunkStoreExecutor::new(Arc::downgrade(&self.exec_ctx)))
     }
 }
