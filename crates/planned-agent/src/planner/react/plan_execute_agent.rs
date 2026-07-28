@@ -22,7 +22,7 @@ use tracing::{error, info};
 
 use planned_agent_core::ai::AiClient;
 use planned_agent_core::planner::coarse::{CoarseGrainedPlan, CoarsePlanner};
-use planned_agent_core::planner::react::{ReActAgent, ReActAgentConfig};
+use planned_agent_core::planner::react::{ReActAgent, ReActAgentConfig, ReActStep};
 use planned_agent_core::prompt::PromptManager;
 use planned_agent_core::planner::react::StepResultStore;
 use planned_agent_core::types::PlanContext;
@@ -42,6 +42,8 @@ pub struct StepResult {
     pub error: Option<String>,
     pub iterations: usize,
     pub duration_ms: u64,
+    /// 每轮完整执行历史（think+act+observe）
+    pub history: Vec<ReActStep>,
 }
 
 /// Plan-And-Execute 整体结果
@@ -65,7 +67,6 @@ impl Default for PlanAndExecuteConfig {
             react_config: ReActAgentConfig {
                 max_iterations: 5,
                 step_timeout_ms: 30_000,
-                enable_chain_of_thought: true,
                 max_retries: 3,
                 retry_delay_ms: 1000,
             },
@@ -127,8 +128,8 @@ impl<PM: PromptManager + 'static> PlanAndExecuteAgent<PM> {
             .await?;
 
         info!(
-            "[PlanAndExecute] 计划生成完成: {} 个步骤",
-            coarse_plan.steps.len()
+            "[PlanAndExecute] 计划生成结果: {:?} ",
+            coarse_plan
         );
 
         // ================================================================
@@ -150,7 +151,7 @@ impl<PM: PromptManager + 'static> PlanAndExecuteAgent<PM> {
             info!(
                 "[PlanAndExecute] 执行步骤 {}/{}: {} (ref={})",
                 i + 1,
-                coarse_plan.steps.len(),
+                step.id,
                 step.intent,
                 step.result_reference
             );
@@ -161,7 +162,17 @@ impl<PM: PromptManager + 'static> PlanAndExecuteAgent<PM> {
                     anyhow::anyhow!("StepResultStore 写锁获取失败: {}", e)
                 })?;
                 for (ref_id, result) in &step_results {
-                    store.insert(ref_id.clone(), result.output.clone());
+                    if result.success {
+                        store.insert(ref_id.clone(), result.output.clone());
+                    } else {
+                        // 失败步骤存错误信息，避免后续步骤拿到 null 误判为有数据
+                        store.insert(ref_id.clone(), serde_json::json!({
+                            "error": true,
+                            "message": result.error.clone().unwrap_or_else(|| "步骤执行失败".to_string()),
+                            "step_id": result.step_id,
+                            "hint": "此步骤执行失败，无可用数据，请基于前序可用的步骤继续"
+                        }));
+                    }
                 }
             }
             if !step_results.is_empty() {
@@ -194,6 +205,7 @@ impl<PM: PromptManager + 'static> PlanAndExecuteAgent<PM> {
                         error: result.error.clone(),
                         iterations: result.iterations,
                         duration_ms: result.total_duration_ms,
+                        history: result.history,
                     };
 
                     if result.success {
@@ -226,6 +238,7 @@ impl<PM: PromptManager + 'static> PlanAndExecuteAgent<PM> {
                             error: Some(e.to_string()),
                             iterations: 0,
                             duration_ms: 0,
+                            history: Vec::new(),
                         },
                     );
                 }

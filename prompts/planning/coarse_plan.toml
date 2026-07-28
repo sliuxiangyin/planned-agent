@@ -16,7 +16,7 @@ text = """
 
 要求：
 1. 只定义"做什么"，不定义"怎么做"
-2. 每个步骤必须有 result_reference（格式：#E1, #E2, ...）
+2. 每个步骤必须有 result_reference，必须严格使用 #E + 数字 格式（如 #E1、#E2、#E3...），禁止使用其他格式
 3. 依赖关系用 result_reference 引用
 4. 评估计划复杂度和风险等级
 5. 为每个步骤推荐工具分类（可选，可为空数组）
@@ -108,11 +108,14 @@ text = """
 - 如果步骤可以用一个工具完成，就是原子动作
 - 如果步骤需要先用一个工具获取数据，再用另一个工具处理，就不是原子动作
 
-数据处理任务拆分原则：
-- 从命令输出中提取数据 → 独立步骤
+数据处理任务拆分原则（强制）：
+- 从命令输出/网页内容中提取数据 → 独立步骤
 - 对数据进行排序 → 独立步骤
 - 对数据进行过滤 → 独立步骤
 - 提取前N个数据 → 独立步骤
+- 整理格式/生成输出 → 独立步骤（放在最后）
+- ⚠️ "提取"本身包含两个操作：1)获取原始数据 2)解析/提取结构化内容。必须分开。
+- ⚠️ "提取前三个" = 提取 + 取前N，是两个独立步骤。
 
 详细拆分示例：
 
@@ -161,6 +164,7 @@ text = """
   步骤2: 统计用户数量
   步骤3: 生成统计报告
 
+- 如果某个步骤的产出已经是结构化数据（JSON/数组/列表），则不需要单独的"整理格式"步骤
 复杂度和风险等级约束：
 - complexity 只能是：simple（简单）、medium（中等）、complex（复杂）
 - risk_level 只能是：low（低）、medium（中）、high（高）、critical（紧急）
@@ -216,12 +220,13 @@ description = "预期输出描述"
 
 [output_schema.json_schema.properties.steps.items.properties.result_reference]
 type = "string"
-description = "结果引用标识，如：#E1"
+description = "结果引用标识，格式：#E1"
+pattern = "^#E\\d+$"
 
 [output_schema.json_schema.properties.steps.items.properties.dependencies]
 type = "array"
-items = { type = "string" }
-description = "依赖的步骤结果引用列表"
+items = { type = "string", pattern = "^#E\\d+$" }
+description = "依赖的步骤结果引用列表（#E1 格式）"
 
 [output_schema.json_schema.properties.steps.items.properties.data_requirements]
 type = "array"

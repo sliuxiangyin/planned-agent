@@ -158,7 +158,7 @@ impl<PM: PromptManager + Send + Sync> CoarsePlanner for LlmCoarsePlanner<PM> {
             ],
             tools: None,
             temperature: Some(0.3),  // 允许更多创造性
-            max_tokens: Some(2000),
+            max_tokens: Some(4000),
             stream: false,
             extra: std::collections::HashMap::new(),
         };

@@ -41,6 +41,9 @@ pub struct Action {
     /// 选择该行动的理由（标准 tool_calls 用法下 LLM 不返回，仅作历史记录可选）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// 对应的 tool_call_id（用于构造 Tool 响应消息）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 /// 观察
@@ -63,8 +66,6 @@ pub struct ReActAgentConfig {
     pub max_iterations: usize,
     /// 单步超时时间（毫秒）
     pub step_timeout_ms: u64,
-    /// 是否启用思考链
-    pub enable_chain_of_thought: bool,
     /// 失败重试次数
     pub max_retries: u32,
     /// 重试延迟（毫秒）
@@ -76,7 +77,6 @@ impl Default for ReActAgentConfig {
         Self {
             max_iterations: 10,
             step_timeout_ms: 30000,
-            enable_chain_of_thought: true,
             max_retries: 3,
             retry_delay_ms: 1000,
         }

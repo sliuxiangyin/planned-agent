@@ -78,7 +78,8 @@ impl StepIntent {
 // =====================================================================
 
 const BROWSER_HINT: &str = r#"
-- 浏览器工具返回的 HTML / 原始 DOM 严禁直接进入下一步；必须经过 page_extract 等工具结构化后再传递"#;
+- 浏览器工具返回的 HTML / 原始 DOM 严禁直接进入下一步；必须经过 builtin_clean_html 工具清洗为纯文本后再传递
+- 浏览器操作可以一次返回多个 tool_call 形成连续操作链（如 snapshot → type → click），充分利用一次对话完成多步交互，减少等待轮次"#;
 
 const TEXT_HINT: &str = r#"- 当前聚焦文本处理：优先使用 text_grep / text_transform / text_count 等文本类工具
 - 输入通常是纯字符串或简单结构化文本，避免调用浏览器或 shell
@@ -108,9 +109,9 @@ const UTILITY_HINT: &str = r#"- 当前聚焦工具 / 内置操作：使用工具
 - 选择最匹配意图的专用工具，避免用通用工具替代专业工具
 - 注意工具的输入约束，必要时拆分多次调用"#;
 
-const REFERENCE_HINT: &str = r#"- 当前步骤存在前序步骤结果，需要引用前序步骤产出的数据
-- 使用 builtin_fetch_step_result 工具获取指定引用标识（如 #E1、#E2）对应的步骤输出
-- 只需传入 reference 参数（引用标识），系统自动注入 results 数据"#;
+const REFERENCE_HINT: &str = r##"- 当前步骤存在前序步骤结果，需要引用前序步骤产出的数据
+- 使用 builtin_fetch_step_result 工具获取步骤引用标识（如 #E1），系统只返回引用号和数据大小
+- 后续工具调用时，直接用引用号（如 "#E1"）作为参数值传入，系统自动展开为真实数据"##;
 
 #[cfg(test)]
 mod tests {

@@ -15,6 +15,11 @@ text = """
 {{ remaining_steps }}
 {% endif %}
 
+{% if previous_results and previous_results != "（暂无前序步骤结果）" %}
+【前序步骤结果摘要】
+{{ previous_results }}
+{% endif %}
+
 【可用工具】
 {{ tool_names }}
 
@@ -27,7 +32,7 @@ text = """
 - 必须保留用户原始目标中的关键词、实体、URL、路径、数值，不要替换为示例值
 - 工具参数必须来自用户目标、数据需求或前序工具输出，禁止使用占位符或示例值
 - 如果前序步骤的输出已包含所需数据，直接使用，不要重新获取
-- 每次只调用一个工具；调用后等待工具结果再决定下一步
+- fetch_step_result 只调用一次获取前序结果；拿到引用标识（如 #E1）后，直接把 "#E1" 作为其他工具的参数值传入，系统自动展开为实际数据。不要重复调用 fetch_step_result 获取同一引用
 - 当工具输出已满足当前步骤的"期望产出"时，回复 DONE 并总结已完成的内容
 
 【工作方式】
@@ -43,4 +48,5 @@ text = """
 coarse_step = { description = "当前粗粒度步骤（含 intent、expected_output 等）", required = true }
 data_requirements = { description = "数据需求列表（JSON 字符串）", required = false }
 remaining_steps = { description = "后续步骤摘要", required = false }
+previous_results = { description = "前序步骤结果摘要", required = false }
 tool_names = { description = "当前步骤可用工具名称 + 简要描述（文本）", required = true }

@@ -25,12 +25,17 @@ async fn main() -> Result<()> {
     let (file_writer, _file_guard) = tracing_appender::non_blocking(file_appender);
 
     tracing_subscriber::fmt()
-        .with_env_filter(
-            // 默认 info 级；显式屏蔽 scraper/selectors（否则 chunk_html 会刷屏 DEBUG）
-            // 想看全部 debug 时：RUST_LOG=debug cargo run ...
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("debug")),
-        )
+        .with_env_filter({
+            // 默认 debug 级别；强制屏蔽 scraper/html5ever 的 DEBUG 刷屏
+            let mut filter = EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("debug"));
+            filter = filter
+                .add_directive("html5ever=warn".parse().unwrap())
+                .add_directive("markup5ever=warn".parse().unwrap())
+                .add_directive("scraper=warn".parse().unwrap())
+                .add_directive("selectors=warn".parse().unwrap());
+            filter
+        })
         .with_writer(std::io::stdout.and(file_writer))
         .init();
 
@@ -138,7 +143,6 @@ async fn run_test_execute(agent: &Agent, input: &str) -> Result<()> {
         react_config: ReActAgentConfig {
             max_iterations: 5,
             step_timeout_ms: 30000,
-            enable_chain_of_thought: true,
             max_retries: 3,
             retry_delay_ms: 1000,
         },
@@ -155,40 +159,102 @@ async fn run_test_execute(agent: &Agent, input: &str) -> Result<()> {
     let result = pae_agent.execute(input, &plan_context).await?;
     
     // 打印计划
-    println!("--- 粗粒度计划 ---");
-    println!("  计划ID: {}", result.coarse_plan.id);
-    println!("  步骤数量: {}", result.coarse_plan.steps.len());
-    for (i, step) in result.coarse_plan.steps.iter().enumerate() {
-        let categories = step.recommended_tool_categories.as_ref()
-            .map(|cats| cats.iter().map(|c| format!("{:?}", c)).collect::<Vec<_>>().join(", "))
-            .unwrap_or_else(|| "未知".to_string());
-        println!("  步骤{}: {} → {} (工具分类: {}, 依赖: {:?})", 
-            i + 1, step.intent, step.result_reference, categories, step.dependencies);
+    println!("\n{} 阶段1: 粗粒度计划 {}", "─".repeat(4), "─".repeat(40));
+    println!("计划: {} | {} 步骤 | 复杂度: {:?}",
+        result.coarse_plan.title,
+        result.coarse_plan.steps.len(),
+        result.coarse_plan.complexity);
+    if !result.coarse_plan.description.is_empty() {
+        println!("描述: {}", result.coarse_plan.description);
     }
     println!();
-    
-    // 打印执行结果
-    println!("--- 执行结果 ---");
     for step in &result.coarse_plan.steps {
-        match result.step_results.get(&step.result_reference) {
-            Some(sr) => {
-                if sr.success {
-                    println!("  {} ✓ ({}ms, {} 次迭代)", step.result_reference, sr.duration_ms, sr.iterations);
-                    println!("    输出: {}", serde_json::to_string_pretty(&sr.output).unwrap_or_default());
+        let cats = step.recommended_tool_categories.as_ref()
+            .map(|c| c.iter().map(|x| format!("{:?}", x)).collect::<Vec<_>>().join(","))
+            .unwrap_or_else(|| "—".to_string());
+        let deps = if step.dependencies.is_empty() {
+            String::new()
+        } else {
+            format!("  \u{21B3} {}", step.dependencies.join(", "))
+        };
+        println!("  {:>3}  {:<40} \u{2192} {}  [{}]{}",
+            format!("#{}", step.order), step.intent, step.result_reference, cats, deps);
+    }
+
+    // 打印执行结果
+    println!("\n{} 阶段2: 逐步执行 {}", "─".repeat(4), "─".repeat(40));
+    let mut success_count = 0u32;
+    let mut fail_count = 0u32;
+
+    for step in &result.coarse_plan.steps {
+        let ref_id = &step.result_reference;
+        println!();
+        println!("  {}  {}", ref_id, step.intent);
+
+        match result.step_results.get(ref_id) {
+            Some(sr) if sr.success => {
+                success_count += 1;
+                // 提取工具名
+                let tools: Vec<&str> = sr.history.iter()
+                    .map(|h| h.action.tool_name.as_str())
+                    .collect();
+                let tool_str = if tools.is_empty() {
+                    "(无工具调用)".to_string()
                 } else {
-                    println!("  {} ✗ 失败: {}", step.result_reference, 
-                        sr.error.as_deref().unwrap_or("未知错误"));
+                    tools.join(" \u{2192} ")
+                };
+                println!("  \u{2705} {}次迭代 {}ms", sr.iterations, sr.duration_ms);
+                println!("  工具: {}", tool_str);
+                // 输出截断
+                let out = serde_json::to_string(&sr.output).unwrap_or_default();
+                let size = out.len();
+                let preview: String = out.chars().take(200).collect();
+                let suffix = if out.chars().count() > 200 { "..." } else { "" };
+                println!("  输出({}B): {}{}", size, preview, suffix);
+            }
+            Some(sr) => {
+                fail_count += 1;
+                let err = sr.error.as_deref().unwrap_or("未知错误");
+                println!("  \u{274C} {}次迭代 {}ms  错误: {}", sr.iterations, sr.duration_ms, err);
+                if !sr.history.is_empty() {
+                    println!("  执行历史:");
+                    for (i, h) in sr.history.iter().enumerate() {
+                        // 简化参数显示
+                        let params_str = serde_json::to_string(&h.action.parameters).unwrap_or_default();
+                        let params_short = if params_str.len() > 60 {
+                            format!("{}...", &params_str[..57])
+                        } else {
+                            params_str
+                        };
+                        // 输出大小
+                        let out_str = serde_json::to_string(&h.observation.output).unwrap_or_default();
+                        let size = out_str.len();
+                        let err_mark = if h.observation.error.is_some() { " \u{26A0}" } else { "" };
+                        println!("    {}\u{20E3} {}({})\u{2192}{}B{}",
+                            i + 1, h.action.tool_name, params_short, size, err_mark);
+                    }
+                    // 最后一条的 observe 结论
+                    if let Some(last) = sr.history.last() {
+                        if !last.thought.reasoning.is_empty() {
+                            println!("    \u{1F4AD} observe: {}", last.thought.reasoning);
+                        }
+                    }
                 }
             }
             None => {
-                println!("  {} ? 未找到结果", step.result_reference);
+                fail_count += 1;
+                println!("  \u{2753} 未找到结果");
             }
         }
     }
+
+    // 总结
     println!();
-    
-    println!("=== 测试完成 (整体: {}, 耗时: {}ms) ===", 
-        if result.success { "成功" } else { "失败" }, result.total_duration_ms);
+    println!("{}", "─".repeat(56));
+    let status = if result.success { "\u{2705} 成功" } else { "\u{274C} 失败" };
+    println!("  {} | \u{2705} {} / \u{274C} {} | {}ms",
+        status, success_count, fail_count, result.total_duration_ms);
+    println!("{}", "─".repeat(56));
     
     Ok(())
 }

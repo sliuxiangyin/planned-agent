@@ -209,17 +209,46 @@ impl ToolExecutor for DataToolsExecutor {
                 let mut result = Vec::new();
                 
                 if let Some(array) = data.as_array() {
-                    // 从数组中提取
+                    // 从数组中提取：path 必须是数字索引或 JSONPath 风格 "[0:3]"
                     if let Ok(index) = path.parse::<usize>() {
                         if index < array.len() {
                             result.push(array[index].clone());
+                        } else {
+                            return Err(anyhow::anyhow!(
+                                "索引 {} 超出数组范围（数组长度 {}）",
+                                index, array.len()
+                            ));
                         }
+                    } else {
+                        return Err(anyhow::anyhow!(
+                            "path '{}' 不是有效的数组索引，对数组请使用数字索引（如 '0'、'2'）",
+                            path
+                        ));
                     }
                 } else if let Some(object) = data.as_object() {
                     // 从对象中提取
                     if let Some(value) = object.get(path) {
                         result.push(value.clone());
+                    } else {
+                        let keys: Vec<&str> = object.keys().map(|k| k.as_str()).collect();
+                        return Err(anyhow::anyhow!(
+                            "path '{}' 在对象中不存在，可用字段: {:?}",
+                            path, keys
+                        ));
                     }
+                } else {
+                    // data 不是数组也不是对象（如字符串、数字等）
+                    let data_type = match data {
+                        Value::String(_) => "字符串",
+                        Value::Number(_) => "数字",
+                        Value::Bool(_) => "布尔值",
+                        Value::Null => "null",
+                        _ => "未知类型",
+                    };
+                    return Err(anyhow::anyhow!(
+                        "extract_data 要求 data 为数组或对象，但收到的是 {}。请用 ai_process 处理非结构化数据。",
+                        data_type
+                    ));
                 }
                 
                 // 限制数量

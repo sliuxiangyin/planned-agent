@@ -64,7 +64,8 @@ ReAct Agent 以粗粒度步骤为执行边界，不负责生成整个计划，�
 
 - `tool_name`：要调用的工具名称。
 - `parameters`：工具参数，类型为 JSON `Value`。
-- `reasoning`：选择该工具的理由。
+- `reasoning`：选择该工具的理由（当前 `think_and_act` 合并模式下 LLM 不返回此字段，仅作历史记录可选）。
+- `tool_call_id`：对应的 OpenAI tool_call ID，用于构造 Tool 响应消息。多 tool_call 场景下每个 Action 都携带独立的 ID。
 
 ### 4.3 `Observation`
 
@@ -93,152 +94,163 @@ ReAct Agent 以粗粒度步骤为执行边界，不负责生成整个计划，�
 
 ## 5. 单步执行流程
 
-`execute_coarse_step` 对当前步骤最多执行 `max_iterations` 轮：
+`execute_coarse_step` 采用 **Think+Act 合并 → 多 Action 顺序执行 → 单次 Observe** 的架构：
 
-```text
-粗粒度步骤和上下文
-        |
-        v
-      THINK  -> 生成 Thought
-        |
-        v
-       ACT   -> 生成 Action
-        |
-        v
-    EXECUTE  -> 调用工具并生成 Observation
-        |
-        v
-     OBSERVE -> 判断是否完成
-        |
-   +----+----+
-   |         |
-完成       未完成
-   |         |
-返回结果   进入下一轮
+- LLM 通过 OpenAI 原生 `tool_calls` 机制一次调用即可返回 0~N 个工具调用
+- 多个 tool_call 全部顺序执行，每个都构造正确的 Tool 响应消息
+- 所有 action 完成后，仅调用一次 `observe` 判断步骤是否完成
+
+```mermaid
+graph TB
+    START(["execute_coarse_step(coarse_step, context)"])
+    START --> INIT["1. init_messages()<br/>System(step上下文+工具名+意图) + User(目标)"]
+    INIT --> LOOP_START{"'outer: loop<br/>iteration < max_iterations?"}
+    LOOP_START -->|超限| FAIL(["返回 failure: 'Exceeded max iterations'"])
+    LOOP_START -->|继续| THINK_ACT["2. think_and_act(coarse_step)"]
+
+    subgraph THINK_AND_ACT ["think_and_act()"]
+        BUILD["build_tool_definitions(step)"]
+        LLM["call_llm_with_messages(messages, tools)"]
+        BUILD --> LLM
+        LLM --> CHECK_DONE{"tool_calls 为空<br/>且 content 以 DONE 开头?"}
+        CHECK_DONE -->|是| DONE_RET["返回 vec![]"]
+        CHECK_DONE -->|否| EXTRACT["遍历 tool_calls → Vec&lt;Action&gt;<br/>每个 Action 带 tool_call_id"]
+        EXTRACT --> RET_VEC["返回 (Vec&lt;Action&gt;, assistant_msg)"]
+    end
+
+    THINK_ACT --> IS_EMPTY{"3. actions.is_empty()?"}
+    IS_EMPTY -->|是| SUCCESS_DONE(["返回 success: DONE"])
+
+    IS_EMPTY -->|否| PUSH_ASST["4. push assistant_msg (含全部 tool_calls)"]
+    PUSH_ASST --> FOR_EACH["5. for action in actions:"]
+
+    subgraph ACTION_LOOP ["逐个执行"]
+        DETECT{"重复检测: 连续相同 action?"}
+        DETECT -->|≥3次| REPEAT_FAIL(["break 'outer → failure"])
+        DETECT -->|否| EXEC["6. execute_tool(action)"]
+        EXEC --> TOOL_MSG["7. push Tool 消息 (role=Tool, tool_call_id)"]
+        TOOL_MSG --> NEXT_ACTION{"还有更多 action?"}
+        NEXT_ACTION -->|是| DETECT
+    end
+
+    NEXT_ACTION -->|否| OBSERVE["8. observe(coarse_step, final_obs)"]
+    OBSERVE --> UPDATE["9. 更新 history 最后一条的 thought"]
+    UPDATE --> IS_COMPLETE{"is_complete?"}
+    IS_COMPLETE -->|是| SUCCESS_FINAL(["返回 success"])
+    IS_COMPLETE -->|否| INC_ITER["iteration += 1"]
+    INC_ITER --> LOOP_START
 ```
 
-### 5.1 THINK
+### 5.1 初始化（init_messages）
 
-`think` 会构建以下 Prompt 变量：
+构建初始消息列表：
 
-- `coarse_step`：当前步骤意图。
-- `tools`：所有已注册工具的名称、描述和输入 Schema。
-- `history`：之前循环的思考、行动和观察。
-- `previous_outputs`：当前步骤之前的原始输出。
-- `remaining_steps`：当前步骤之后的步骤摘要。
+- `System`：动态渲染 `planning/react_system` Prompt，注入步骤意图、可用工具名称、前序结果摘要、后续步骤摘要、意图标志
+- `User`：用户原始目标
 
-模型需要返回 `Thought` JSON。Prompt 明确要求模型优先复用前序输出；需要处理已有数据时通常选择 `ai_process`。
+前序结果以摘要形式注入（仅显示引用标识和大小），避免 System prompt 膨胀。
 
-### 5.2 ACT
+### 5.2 Think+Act 合并（think_and_act）
 
-`act` 将以下信息交给模型：
+一次 LLM 调用完成思考和行动决策，不再分离 Think/Act 两个 Prompt：
 
-- 当前思考中的 `reasoning` 和 `plan`。
-- 可用工具描述。
-- 前序步骤的原始输出。
+1. 调用 `build_tool_definitions(step)` 构建工具定义（按 categories 解析 + 有依赖时自动添加 `fetch_step_result`）
+2. 调用 `call_llm_with_messages(messages, tools)` 发送完整对话历史 + 工具定义
+3. LLM 返回 Assistant Message，可包含 0~N 个 `tool_calls` 或文本 "DONE"
+4. 解析 tool_calls → 构建 `Vec<Action>`，每个 Action 携带对应的 `tool_call_id`
 
-模型必须返回包含 `tool_name`、`parameters` 和 `reasoning` 的 `Action` JSON。行动解析失败时，外层执行循环最多重试三次；三次都失败则当前步骤失败。
+**DONE 判断**：当 tool_calls 为空且 content 以 "DONE" 开头时，认为 LLM 判断步骤已完成。
 
-### 5.3 EXECUTE
+**多 tool_call 处理**：LLM 返回多个 tool_call 时，全部提取为 Action，后续顺序执行。
 
-工具执行分为两条路径：
+### 5.3 工具执行（execute_tool）
 
-#### 普通工具
+工具执行按工具名分流：
 
-1. 克隆工具名称和参数。
-2. 在阻塞线程中调用 `ToolRegistry.call_tool`，避免持有读锁影响异步任务。
-3. 将 `ToolResult.content` 包装为 `Observation`。
-4. 工具返回错误时设置 `Observation.error`，并保持未完成状态。
+#### `builtin_fetch_step_result`
 
-#### `ai_process`
+直接从共享 `StepResultStore` 查找引用数据（如 `#E1`）：
+- ≤800 字节：返回完整数据
+- >800 字节：返回引用包装（含 size 和 hint，提示 LLM 后续直接传引用字符串）
 
-`ai_process` 由 ReAct Agent 特殊处理，不经过注册表中的占位执行器：
+#### 其他工具
 
-1. 从参数中读取 `data` 和 `instruction`。
-2. 将数据和指令组成新的模型 Prompt。
-3. 调用模型处理数据。
-4. 如果响应是合法 JSON，则保存为 JSON；否则保存为字符串。
-5. 返回未完成的 `Observation`，由后续 OBSERVE 阶段判断是否完成。
+1. **expand_refs**：递归扫描参数中的 `#E1` 引用字符串，自动从 Store 展开为真实数据
+2. **ai_process**：特殊处理，展开引用后走独立 AI 子流程（不经过 ToolRegistry）
+3. **普通工具**：通过 `tool_registry.call_tool` 执行
+4. **后处理**：通过 `tool_result_router.process()` 一站式完成 StructureClean → HtmlClean → BinaryTruncate 链式处理
 
-### 5.4 OBSERVE
+### 5.4 消息推入（每条 Action 后）
 
-`observe` 将当前步骤意图和工具结果再次发送给模型。模型返回：
+每执行完一个 Action，立即构造并推入一条 Tool 响应消息：
 
-```json
-{
-  "is_complete": true,
-  "reasoning": "判断理由"
-}
+```
+Message { role: Tool, tool_call_id: action.tool_call_id, content: ToolResult { ... } }
 ```
 
-当 `is_complete` 为 `true` 时，ReAct Agent 将本轮工具输出作为当前步骤最终输出；否则继续下一轮循环。
+这保证了 OpenAI 消息交替约束：Assistant(tool_calls) → Tool(result) → Tool(result) → ... → 下一轮 Assistant。
 
-如果工具执行已经产生错误，`observe` 不再调用模型，而是直接返回未完成结果。
+### 5.5 观察（observe）
+
+所有 action 执行完成后，仅调用一次 `observe`：
+
+1. 取最后一条 observation 的 output 作为 tool_result
+2. 用**独立 LLM 调用**（不走 messages 历史）渲染 `planning/react_observe` Prompt
+3. 模型返回 `{is_complete, reasoning}`
+4. observe 结论回流到 messages 历史（User prompt + Assistant response），供下轮 think_and_act 可见
+5. 更新 history 最后一条记录的 `thought.reasoning` 和 `thought.confidence`
+
+### 5.6 重复检测
+
+记录每次 action 的签名（`tool_name:parameters`）：
+- 连续 ≥3 次相同签名 → `break 'outer` 提前终止，防止死循环
+- 签名变化时重置计数器
 
 ## 6. 上下文传递
 
-主程序在逐步执行计划时为每个步骤复制 `PlanContext`，并使用 `metadata` 传递数据：
+主程序在逐步执行计划时为每个步骤注入 `PlanContext`，ReAct Agent 通过以下机制传递上下文：
 
-| Metadata 键 | 内容 |
+| 机制 | 内容 |
 | --- | --- |
-| `previous_outputs` | 已完成步骤的编号和原始输出数组 |
-| `remaining_steps` | 当前步骤之后的 `CoarseGrainedStep` 数组 |
+| `StepResultStore`（共享 HashMap） | 前序步骤的执行结果，以引用标识（如 `#E1`）为 key。由 `fetch_step_result` 工具读取，由 `expand_refs` 自动展开 |
+| `init_messages` System Prompt | 注入前序结果摘要（引用标识 + 大小）、后续步骤摘要、意图标志 |
+| 对话历史 `self.messages` | 完整的 Assistant(tool_calls) → Tool(result) → observe(User+Assistant) 链路，LLM 每次调用都可见完整历史 |
+| `CoarseGrainedStep.dependencies` | 声明式依赖，有依赖时自动为 LLM 注入 `fetch_step_result` 工具定义 |
 
-ReAct Agent 读取方式：
-
-- `think` 将两类数据都写入思考 Prompt。
-- `act` 将 `previous_outputs` 写入行动 Prompt。
-- 后续步骤可以直接引用前序结果，而不必重复执行获取数据的工具。
-
-当前主程序的协调逻辑位于 [main.rs](../../crates/planned-agent/src/main.rs) 的 `run_test_execute`。
+后续步骤直接传 `"#E1"` 引用字符串作为工具参数，系统层自动展开为真实数据，LLM 无需感知引用展开细节。
 
 ## 7. Prompt 契约
 
-### 7.1 `planning/react_think`
+### 7.1 `planning/react_system`
 
-输入变量：
+System Prompt，在 `init_messages` 时动态渲染，输入变量：
 
-- `coarse_step`
-- `tools`
-- `history`
-- `previous_outputs`
-- `remaining_steps`
+- `coarse_step`：当前步骤意图和期望输出
+- `tool_names`：可用工具的名称、描述和输入 Schema（文本形式）
+- `previous_results`：前序步骤结果摘要（引用标识 + 大小）
+- `remaining_steps`：后续步骤摘要
+- `data_requirements`：步骤的数据依赖声明
+- 意图标志（`intent_flags`）：由 IntentRouter/IntentHandler 动态注入的提示变量
 
-输出字段：
+模型行为约束：
+- 通过 OpenAI 原生 `tool_calls` 机制自主选择工具
+- 无需调用工具时回复 "DONE"
+- `fetch_step_result` 只调用一次获取前序结果；拿到引用标识后直接作为其他工具的参数值传入
 
-- `reasoning`
-- `plan`
-- `confidence`
+### 7.2 `planning/react_observe`
 
-### 7.2 `planning/react_act`
+观察 Prompt，在所有 action 执行完成后调用，输入变量：
 
-输入变量：
-
-- `thought`
-- `tools`
-- `previous_outputs`
-
-输出字段：
-
-- `tool_name`
-- `parameters`
-- `reasoning`
-
-当前行动 Prompt 要求必须选择工具，因此当思考阶段判断“已有数据已足够、无需再调用工具”时，模型仍可能生成一个工具行动。项目目前没有专门的完成或跳过 Action 类型。
-
-### 7.3 `planning/react_observe`
-
-输入变量：
-
-- `coarse_step`
-- `tool_result`
+- `coarse_step`：当前步骤意图和期望输出
+- `tool_result`：最后一条 action 的工具输出
+- 意图标志
 
 输出字段：
 
-- `is_complete`
-- `reasoning`
+- `is_complete`：布尔值，判断当前步骤是否完成
+- `reasoning`：判断理由
 
-三个 Prompt 的结构化响应都由 `PromptManager.parse_response` 解析。Prompt 管理器可以清除 Markdown JSON 代码块和前后说明，但格式错误的 JSON 仍会导致解析失败。
+`observe` 使用**独立 LLM 调用**（不走 messages 历史），避免 tool_calls 模式污染 LLM 输出格式。响应由 `PromptManager.parse_response` 解析。
 
 ## 8. 配置
 
@@ -247,10 +259,9 @@ ReAct Agent 读取方式：
 | 配置项 | 默认值 | 说明 |
 | --- | ---: | --- |
 | `max_iterations` | `10` | 单个粗粒度步骤允许的最大循环次数 |
-| `step_timeout_ms` | `30000` | 单步超时配置字段 |
-| `enable_chain_of_thought` | `true` | 是否启用思考链配置字段 |
-| `max_retries` | `3` | 重试配置字段 |
-| `retry_delay_ms` | `1000` | 重试延迟配置字段 |
+| `step_timeout_ms` | `30000` | 单步总超时（毫秒），超时后步骤失败 |
+| `max_retries` | `3` | `ai_process` 失败重试次数 |
+| `retry_delay_ms` | `1000` | 重试延迟（预留字段，当前未使用） |
 
 测试执行入口使用 `max_iterations = 5`，其他字段与默认配置一致。
 
@@ -310,21 +321,25 @@ if result.success {
 
 历史既用于最终诊断，也会在下一轮 THINK 阶段重新提供给模型。最终结果只返回最后一次成功观察对应的工具输出，不会自动汇总所有轮次结果。
 
-## 12. 当前限制与排查建议
+## 12. 已知问题与设计决策
 
-- `step_timeout_ms` 当前只是配置字段，`execute_coarse_step` 没有实际应用超时控制。
-- `enable_chain_of_thought` 当前没有改变执行分支。
-- 行动重试次数在执行循环中固定为三次，尚未读取 `max_retries`。
-- `retry_delay_ms` 当前没有用于等待重试。
-- `is_complete` 辅助方法存在，但主循环使用的是 `observe` 返回的 `ObserveResult`。
-- `ai_process` 每次执行后都将工具观察标记为未完成，完成判断依赖额外的 OBSERVE 模型调用。
-- 行动 Prompt 要求必须选择工具，没有显式的“完成当前步骤”协议；当模型判断无需操作时，可能选择无关工具。
-- 模型返回未转义引号、额外说明或不完整 JSON 时，`PromptManager.parse_response` 会失败并触发行动重试。
-- 工具名称必须与 `ToolRegistry` 中的注册名称一致，否则会得到工具调用错误。
+### 待改进
+
+- `retry_delay_ms`：预留字段，当前未在任何重试逻辑中使用。
+- `max_retries`：仅在 `ai_process` 内部硬编码使用，未读取配置值。
+
+### 设计决策（非 bug）
+
+- `Observation.is_complete` 字段始终为 `false`：工具层面的完成标记不在此处判断，真正的完成由 `observe()` 返回的 `ObserveResult.is_complete` 决定。
+- `ai_process` 返回 `is_complete=false`：`ai_process` 是数据处理步骤，完成后仍需 observe 判断整体步骤是否完成。
+- 工具名称必须与 `ToolRegistry` 注册名一致：任何工具系统的固有约束。
+- 多 tool_call 的 observe 只看最后一条 observation：前面的 action 结果已作为 Tool 消息进入对话历史，下轮 LLM 可见。
+
+### 排查建议
 
 排查时建议按以下顺序查看：
 
-1. 检查 `Thought` 中是否正确理解了当前目标和前序输出。
+1. 检查日志 `[LLM] content=... tool_calls=...` 确认 LLM 返回了什么。
 2. 检查 `Action.tool_name` 是否为已注册工具。
 3. 检查 `Action.parameters` 是否符合工具输入 Schema。
 4. 检查工具原始输出和 `Observation.error`。

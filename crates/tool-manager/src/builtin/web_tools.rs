@@ -99,12 +99,15 @@ fn clean_html(arguments: Value) -> Result<ToolResult> {
 
     let original_chars = html.chars().count();
 
+    // 剥离无意义标签（style/script/noscript/template），避免 CSS/JS 污染后续提取
+    let clean_html_input = strip_noise_tags(html);
+
     // 正文优先提取
     let (article_title, content_html, extraction_method) =
-        try_readability(html).unwrap_or_else(|| {
+        try_readability(&clean_html_input).unwrap_or_else(|| {
             (
                 None,
-                html.to_string(),
+                clean_html_input,
                 "full_page".to_string(),
             )
         });
@@ -307,6 +310,56 @@ fn normalize_whitespace(s: &str) -> String {
     }
 
     result.trim().to_string()
+}
+
+/// 剥离 HTML 中的无意义标签（style/script/noscript/template）及其内容，
+/// 避免 CSS/JS 代码污染后续提取输出。
+fn strip_noise_tags(html: &str) -> String {
+    let noise_tags: &[&str] = &["style", "script", "noscript", "template"];
+    let lower_html = html.to_lowercase();
+
+    let mut result = String::with_capacity(html.len());
+    let mut i = 0;
+
+    while i < html.len() {
+        let rest = &html[i..];
+        let first_char = match rest.chars().next() {
+            Some(c) => c,
+            None => break,
+        };
+
+        if first_char == '<' {
+            let is_closing = rest.len() > 1 && rest.as_bytes()[1] == b'/';
+
+            // 提取标签名（ASCII only，byte 操作安全）
+            let tag_content_start = if is_closing { i + 2 } else { i + 1 };
+            let tag_rest = &html[tag_content_start..];
+            let tag_name: String = tag_rest
+                .chars()
+                .take_while(|c| !matches!(c, ' ' | '>' | '/' | '\n' | '\r' | '\t'))
+                .map(|c| c.to_ascii_lowercase())
+                .collect();
+
+            if !tag_name.is_empty() && noise_tags.contains(&tag_name.as_str()) {
+                let close_pattern = format!("</{}", tag_name);
+                let search_from = if is_closing { i } else { tag_content_start + tag_name.len() };
+                if let Some(end_offset) = lower_html[search_from..].find(&close_pattern) {
+                    let abs_end = search_from + end_offset + close_pattern.len();
+                    // 找到闭合的 '>'
+                    if let Some(gt_offset) = html[abs_end..].find('>') {
+                        i = abs_end + gt_offset + 1; // 跳过整个标签到 > 之后
+                        continue;
+                    }
+                }
+                // 找不到闭合标签则回退，当作普通标签处理
+            }
+        }
+
+        result.push(first_char);
+        i += first_char.len_utf8();
+    }
+
+    result
 }
 
 /// 在字符边界处截断，优先回退到最近的换行
