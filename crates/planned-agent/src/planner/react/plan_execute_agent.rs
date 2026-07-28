@@ -65,8 +65,8 @@ impl Default for PlanAndExecuteConfig {
     fn default() -> Self {
         Self {
             react_config: ReActAgentConfig {
-                max_iterations: 5,
-                step_timeout_ms: 30_000,
+                max_iterations: 15,
+                step_timeout_ms: 60_000,
                 max_retries: 3,
                 retry_delay_ms: 1000,
             },

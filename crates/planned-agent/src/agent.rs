@@ -13,6 +13,7 @@ use planned_agent_tool_manager::builtin::data_tools::DataToolsProvider;
 use planned_agent_tool_manager::builtin::ai_tools::AiToolsProvider;
 use planned_agent_tool_manager::builtin::web_tools::WebToolsProvider;
 use planned_agent_tool_manager::builtin::step_result_tools::StepResultToolsProvider;
+use crate::planner::react::chunk::ChunkToolsProvider;
 use anyhow::Result;
 use tracing::{info, error};
 use std::collections::HashMap;
@@ -38,6 +39,8 @@ impl Agent {
         tool_registry.register_builtin_provider(&AiToolsProvider);
         tool_registry.register_builtin_provider(&WebToolsProvider);
         tool_registry.register_builtin_provider(&StepResultToolsProvider);
+        let chunk_provider = ChunkToolsProvider::new(tool_registry.clone());
+        tool_registry.register_builtin_provider(&chunk_provider);
 
         Self {
             ai_manager: None,

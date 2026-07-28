@@ -110,8 +110,8 @@ const UTILITY_HINT: &str = r#"- 当前聚焦工具 / 内置操作：使用工具
 - 注意工具的输入约束，必要时拆分多次调用"#;
 
 const REFERENCE_HINT: &str = r##"- 当前步骤存在前序步骤结果，需要引用前序步骤产出的数据
-- 使用 builtin_fetch_step_result 工具获取步骤引用标识（如 #E1），系统只返回引用号和数据大小
-- 后续工具调用时，直接用引用号（如 "#E1"）作为参数值传入，系统自动展开为真实数据"##;
+- 使用 builtin_fetch_step_result 工具获取引用数据
+"##;
 
 #[cfg(test)]
 mod tests {
