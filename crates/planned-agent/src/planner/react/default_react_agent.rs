@@ -256,6 +256,23 @@ impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
 
         Ok((actions, assistant_msg))
     }
+
+    /// 如果输出是 ChunkedView，还原为完整原文；否则直接返回。
+    fn unwrap_chunked_output(&self, output: &Value) -> Value {
+        let chunk_id = output.get("chunk_id").and_then(|v| v.as_str());
+        match chunk_id {
+            Some(id) => {
+                match self.chunk_store.get_full_text(id) {
+                    Ok(text) => Value::String(text),
+                    Err(e) => {
+                        warn!("ChunkedView 还原失败 (chunk_id={}): {}，保持原输出", id, e);
+                        output.clone()
+                    }
+                }
+            }
+            None => output.clone(),
+        }
+    }
 }
 
 #[async_trait]
@@ -444,9 +461,11 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
 
                 // ── 5. 判断完成 ──
                 if observe_result.is_complete {
+                    // 将分片视图还原为原始文本，避免 ChunkedView 存入 StepResultStore
+                    let output = self.unwrap_chunked_output(&final_obs.output);
                     break Ok(ReActExecutionResult::success(
                         coarse_step.id.clone(),
-                        final_obs.output,
+                        output,
                         history,
                         iteration + 1,
                         start_time.elapsed().as_millis() as u64,

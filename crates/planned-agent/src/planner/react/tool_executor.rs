@@ -330,14 +330,16 @@ pub(crate) async fn handle_generic_tool(
     // 通过 ChunkStore 处理输出：大文本自动分片，小文本原样透传
     let processed_output = chunk_store.handle(outcome.result.content).await?;
 
+    let error_msg = if outcome.result.is_error {
+        Some(extract_error_content(&processed_output))
+    } else {
+        None
+    };
+
     let raw_obs = Observation {
         output: processed_output,
         is_complete: false,
-        error: if outcome.result.is_error {
-            Some("Tool returned error".to_string())
-        } else {
-            None
-        },
+        error: error_msg,
         duration_ms,
     };
 
@@ -345,4 +347,20 @@ pub(crate) async fn handle_generic_tool(
     save_tool_output_to_log(tool_name, &parameters, &raw_obs.output, call_id);
 
     Ok(raw_obs)
+}
+
+/// 从工具输出中提取有意义的错误信息
+fn extract_error_content(output: &Value) -> String {
+    let text = match output {
+        Value::String(s) => s.clone(),
+        other => serde_json::to_string(other).unwrap_or_else(|_| format!("{:?}", other)),
+    };
+
+    // 截取前 500 字符，避免给 LLM 喂入过多无用信息
+    let max_len = 500;
+    if text.len() <= max_len {
+        format!("工具执行错误: {}", text)
+    } else {
+        format!("工具执行错误: {}...", &text[..max_len])
+    }
 }

@@ -186,6 +186,20 @@ impl ChunkStore {
         self.read_view(chunk_id, next_offset, self.config.window_size)
     }
 
+    /// 获取完整原始文本（步骤完成时还原 ChunkedView → 原文）。
+    pub fn get_full_text(&self, chunk_id: &str) -> Result<String> {
+        let guard = self
+            .entries
+            .read()
+            .map_err(|e| anyhow!("ChunkStore 读锁失败: {}", e))?;
+
+        let entry = guard
+            .get(chunk_id)
+            .ok_or_else(|| anyhow!("未找到分片数据: {}", chunk_id))?;
+
+        Ok(entry.text.clone())
+    }
+
     // ── 搜索 ────────────────────────────────────────
 
     /// 关键词搜索，返回匹配列表。
