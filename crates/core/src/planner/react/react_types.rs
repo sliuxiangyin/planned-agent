@@ -90,6 +90,18 @@ pub struct ObserveResult {
     pub is_complete: bool,
     /// 分析说明
     pub summary: String,
+    /// 是否超出当前步骤范围
+    pub is_out_of_scope: bool,
+}
+
+impl Default for ObserveResult {
+    fn default() -> Self {
+        Self {
+            is_complete: false,
+            summary: String::new(),
+            is_out_of_scope: false,
+        }
+    }
 }
 
 /// ReAct 执行结果

@@ -220,16 +220,19 @@ impl<PM: PromptManager + 'static> PlanAndExecuteAgent<PM> {
                         );
                     } else {
                         error!(
-                            "[PlanAndExecute] 步骤 {} 失败 (ref={}): {:?}",
+                            "[PlanAndExecute] 步骤 {} 失败 (ref={}): {:?}，终止流水线",
                             step.id, step.result_reference, result.error
                         );
                     }
 
                     step_results.insert(step.result_reference.clone(), step_result);
+                    if !result.success {
+                        break;
+                    }
                 }
                 Err(e) => {
                     error!(
-                        "[PlanAndExecute] 步骤 {} 执行异常 (ref={}): {}",
+                        "[PlanAndExecute] 步骤 {} 执行异常 (ref={}): {}，终止流水线",
                         step.id, step.result_reference, e
                     );
                     step_results.insert(
@@ -246,6 +249,7 @@ impl<PM: PromptManager + 'static> PlanAndExecuteAgent<PM> {
                             history: Vec::new(),
                         },
                     );
+                    break;
                 }
             }
         }

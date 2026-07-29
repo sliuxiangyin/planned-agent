@@ -79,10 +79,10 @@ impl ChunkedView {
             "hint": format!(
                 "📋 分片视图 (ID: {}, 共{}页, 当前第{}页)\n\
                  可操作:\n\
-                 - chunk_read(\"{}\") → 翻到下一页\n\
-                 - chunk_read(\"{}\", offset=N) → 跳到指定位置\n\
-                 - chunk_search(\"{}\", \"关键词\") → 搜索\n\
-                 - chunk_summary(\"{}\") → 重新查看结构索引",
+                 - builtin_chunk_read(\"{}\") → 翻到下一页\n\
+                 - builtin_chunk_read(\"{}\", offset=N) → 跳到指定位置\n\
+                 - builtin_chunk_search(\"{}\", \"关键词\") → 搜索\n\
+                 - builtin_chunk_summary(\"{}\") → 重新查看结构索引",
                 self.chunk_id,
                 self.total_windows,
                 self.current_offset / self.window_size.max(1) + 1,

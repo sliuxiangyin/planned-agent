@@ -142,8 +142,8 @@ async fn run_test_execute(agent: &Agent, input: &str) -> Result<()> {
     // 配置 Plan-And-Execute Agent
     let config = PlanAndExecuteConfig {
         react_config: ReActAgentConfig {
-            max_iterations: 5,
-            step_timeout_ms: 30000,
+            max_iterations: 15,
+            step_timeout_ms: 130000,
             max_retries: 3,
             retry_delay_ms: 1000,
         },
@@ -190,6 +190,7 @@ async fn run_test_execute(agent: &Agent, input: &str) -> Result<()> {
 
     for step in &result.coarse_plan.steps {
         let ref_id = &step.result_reference;
+        let is_last = Some(step.id.as_str()) == result.coarse_plan.steps.last().map(|s| s.id.as_str());
         println!();
         println!("  {}  {}", ref_id, step.intent);
 
@@ -207,12 +208,14 @@ async fn run_test_execute(agent: &Agent, input: &str) -> Result<()> {
                 };
                 println!("  \u{2705} {}次迭代 {}ms", sr.iterations, sr.duration_ms);
                 println!("  工具: {}", tool_str);
-                // 输出截断
                 let out = serde_json::to_string(&sr.output).unwrap_or_default();
-                let size = out.len();
-                let preview: String = out.chars().take(200).collect();
-                let suffix = if out.chars().count() > 200 { "..." } else { "" };
-                println!("  输出({}B): {}{}", size, preview, suffix);
+                if is_last {
+                    println!("  输出({}B):\n{}", out.len(), out);
+                } else {
+                    let preview: String = out.chars().take(200).collect();
+                    let suffix = if out.chars().count() > 200 { "..." } else { "" };
+                    println!("  输出({}B): {}{}", out.len(), preview, suffix);
+                }
             }
             Some(sr) => {
                 fail_count += 1;

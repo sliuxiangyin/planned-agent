@@ -17,7 +17,7 @@ use planned_agent_core::planner::coarse::CoarseGrainedStep;
 use planned_agent_core::planner::react::StepResultStore;
 use planned_agent_core::planner::react::*;
 use planned_agent_core::prompt::{PromptContext, PromptManager};
-use planned_agent_core::types::{Message, PlanContext};
+use planned_agent_core::types::{Message, MessageContent, PlanContext};
 use planned_agent_tool_manager::ToolRegistry;
 
 use super::agent_context::AgentContext;
@@ -256,23 +256,6 @@ impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
 
         Ok((actions, assistant_msg))
     }
-
-    /// 如果输出是 ChunkedView，还原为完整原文；否则直接返回。
-    fn unwrap_chunked_output(&self, output: &Value) -> Value {
-        let chunk_id = output.get("chunk_id").and_then(|v| v.as_str());
-        match chunk_id {
-            Some(id) => {
-                match self.chunk_store.get_full_text(id) {
-                    Ok(text) => Value::String(text),
-                    Err(e) => {
-                        warn!("ChunkedView 还原失败 (chunk_id={}): {}，保持原输出", id, e);
-                        output.clone()
-                    }
-                }
-            }
-            None => output.clone(),
-        }
-    }
 }
 
 #[async_trait]
@@ -343,6 +326,17 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
 
                 // ── 1. THINK+ACT ──
                 let (actions, assistant_msg) = self.think_and_act(coarse_step).await?;
+                // 迭代日志：当前轮次、执行动作、LLM 文本回复
+                info!(
+                    "[STEP:{}] [ITER#{}] tools={:?} content={:?}",
+                    coarse_step.id,
+                    iteration,
+                    actions.iter().map(|a| &a.tool_name).collect::<Vec<_>>(),
+                    assistant_msg.content.as_ref().and_then(|c| match c {
+                        MessageContent::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    }).unwrap_or("(none)")
+                );
 
                 // ── 2. 检查 DONE ──
                 if actions.is_empty() {
@@ -430,7 +424,7 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
                     last_observation = Some(observation);
                 }
 
-                // ── 4. OBSERVE ──
+                // ── 4. OBSERVE（范围守卫：每次 ACT 后检查是否越界）──
                 let final_obs = last_observation.unwrap_or(Observation {
                     output: Value::Null,
                     is_complete: false,
@@ -442,35 +436,28 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
                     Ok(result) => result,
                     Err(e) => {
                         error!("Observe failed: {}", e);
-                        ObserveResult {
-                            is_complete: false,
-                            summary: format!("Observe failed: {}", e),
-                        }
+                        ObserveResult::default()
                     }
                 };
 
-                // 更新最后一条历史记录的 thought（observe 结论）
+                info!("[OBSERVE] complete={} out_of_scope={} summary={:?}",
+                    observe_result.is_complete, observe_result.is_out_of_scope, observe_result.summary);
+
                 if let Some(last) = history.last_mut() {
                     last.thought.reasoning = observe_result.summary.clone();
-                    last.thought.confidence = if observe_result.is_complete {
-                        1.0
-                    } else {
-                        0.5
-                    };
+                    last.thought.confidence = if observe_result.is_complete { 1.0 } else { 0.5 };
                 }
 
-                // ── 5. 判断完成 ──
-                if observe_result.is_complete {
-                    // 将分片视图还原为原始文本，避免 ChunkedView 存入 StepResultStore
-                    let output = self.unwrap_chunked_output(&final_obs.output);
-                    break Ok(ReActExecutionResult::success(
-                        coarse_step.id.clone(),
-                        output,
-                        history,
-                        iteration + 1,
-                        start_time.elapsed().as_millis() as u64,
-                    ));
+                if observe_result.is_out_of_scope {
+                    let scope_warning = format!(
+                        "⚠️ 你当前的行为超出了本步骤的范围。\n当前步骤只需要: {}\n请严格只完成这一步，完成后输出 DONE。不要做后续步骤的事情。",
+                        coarse_step.expected_output
+                    );
+                    self.ctx.push_user_message(scope_warning);
+                    warn!("[SCOPE] step={} out-of-scope detected: {}",
+                        coarse_step.id, observe_result.summary);
                 }
+
                 iteration += 1;
             }
         };
@@ -536,17 +523,13 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
         coarse_step: &CoarseGrainedStep,
         observation: &Observation,
     ) -> Result<ObserveResult> {
-        // 如果工具执行出错，直接返回
-        if observation.error.is_some() {
-            return Ok(ObserveResult {
-                is_complete: false,
-                summary: format!("工具执行错误: {}", observation.error.as_ref().unwrap()),
-            });
-        }
-
         // 渲染 observe prompt
-        let tool_result_str = serde_json::to_string_pretty(&observation.output)
-            .unwrap_or_else(|_| serde_json::to_string(&observation.output).unwrap_or_default());
+        let tool_result_str = if observation.error.is_some() {
+            format!("工具执行错误: {}", observation.error.as_ref().unwrap())
+        } else {
+            serde_json::to_string_pretty(&observation.output)
+                .unwrap_or_else(|_| serde_json::to_string(&observation.output).unwrap_or_default())
+        };
 
         let prompt_context = self.ctx.with_intent_flags(
             coarse_step,
@@ -569,7 +552,7 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
                 anyhow::anyhow!("Failed to render template planning/react_observe: {}", e)
             })?;
 
-        // 用独立调用判断完成度（避免 messages 历史中的 tool_calls 模式污染 LLM 输出）
+        // 用独立调用判断完成度和范围（避免 messages 历史中的 tool_calls 模式污染 LLM 输出）
         let response = tool_executor::call_llm(&self.ai_client, &prompt).await?;
 
         // 解析响应
@@ -577,6 +560,8 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
         struct ObserveResponse {
             is_complete: bool,
             reasoning: String,
+            #[serde(default)]
+            is_out_of_scope: bool,
         }
 
         let observe_response: ObserveResponse = self
@@ -600,6 +585,7 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
         Ok(ObserveResult {
             is_complete: observe_response.is_complete,
             summary: observe_response.reasoning,
+            is_out_of_scope: observe_response.is_out_of_scope,
         })
     }
 

@@ -164,8 +164,15 @@ impl ChunkStore {
         let offset = offset.min(entry.total_bytes.saturating_sub(1));
 
         let end = (offset + effective_size).min(entry.total_bytes);
-        let window = if offset < entry.text.len() && end <= entry.text.len() {
-            entry.text[offset..end].to_string()
+        // 确保 offset 和 end 落在 UTF-8 字符边界上，避免切片 panic
+        let safe_offset = floor_char_boundary(&entry.text, offset);
+        let safe_end = if end < entry.text.len() {
+            floor_char_boundary(&entry.text, end)
+        } else {
+            entry.text.len()
+        };
+        let window = if safe_offset < entry.text.len() && safe_end <= entry.text.len() {
+            entry.text[safe_offset..safe_end].to_string()
         } else {
             String::new()
         };
@@ -364,6 +371,14 @@ fn short_uuid() -> String {
         .chars()
         .take(8)
         .collect()
+}
+
+/// 将字节偏移向下取整到最近的 UTF-8 字符边界
+fn floor_char_boundary(s: &str, mut pos: usize) -> usize {
+    while pos > 0 && !s.is_char_boundary(pos) {
+        pos -= 1;
+    }
+    pos
 }
 
 // ── 测试 ──────────────────────────────────────────────

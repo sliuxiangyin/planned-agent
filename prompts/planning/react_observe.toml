@@ -3,7 +3,7 @@ description = "ReAct Agent 观察 prompt（含 expected_output，复用 messages
 
 [content]
 text = """
-结合对话历史，分析本次工具执行结果，判断是否已完成目标：
+你是一个步骤范围守卫，检查当前工具执行是否在步骤范围内。
 
 目标意图：{{ coarse_step.intent }}
 期望产出：{{ coarse_step.expected_output }}
@@ -11,16 +11,19 @@ text = """
 本次工具输出：
 {{ tool_result }}
 
-判断标准：
-- 如果本次输出 + 对话历史中已有输出共同满足"期望产出"，判断为 true
-- 如果还需补充数据或进一步处理，判断为 false 并说明缺什么
-- 如果工具连续失败或无进展，判断为 false 并建议换策略
-- ⚠️ 如果工具输出了符合预期格式的结果数据（JSON数组、结构化文本等），就算任务完成，不要再等更完美的输出。不要追求"整理格式"或"美化输出"后才判断完成。
+判断规则：
+1. **范围检查**：本次工具调用的目标，是否只属于当前步骤（{{ coarse_step.intent }}）？
+   - 如果工具执行了超出当前步骤范围的操作（比如步骤1只需"打开页面"，却执行了"搜索+提取结果"），is_out_of_scope 为 true
+   - 如果工具操作严格在步骤范围内，is_out_of_scope 为 false
+2. **完成度检查**：当前步骤的"期望产出"是否已满足？
+   - 如果本次输出 + 对话历史中已有输出共同满足"期望产出"，is_complete 为 true
+   - 如果还需补充数据或进一步处理，is_complete 为 false
 
 返回JSON格式（只返回JSON，不要其他内容）：
 {
   "is_complete": true或false,
-  "reasoning": "判断理由"
+  "reasoning": "判断理由",
+  "is_out_of_scope": true或false
 }
 """
 
@@ -34,7 +37,7 @@ format = "json"
 [output_schema.json_schema]
 type = "object"
 description = "观察结果"
-required = ["is_complete", "reasoning"]
+required = ["is_complete", "reasoning", "is_out_of_scope"]
 
 [output_schema.json_schema.properties.is_complete]
 type = "boolean"
@@ -43,3 +46,7 @@ description = "是否完成目标"
 [output_schema.json_schema.properties.reasoning]
 type = "string"
 description = "判断理由"
+
+[output_schema.json_schema.properties.is_out_of_scope]
+type = "boolean"
+description = "是否超出当前步骤范围"
