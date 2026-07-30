@@ -328,7 +328,7 @@ pub(crate) async fn handle_generic_tool(
     };
 
     // 通过 ChunkStore 处理输出：大文本自动分片，小文本原样透传
-    let processed_output = chunk_store.handle(outcome.result.content).await?;
+    let processed_output = chunk_store.handle(outcome.result.content, tool_name).await?;
 
     let error_msg = if outcome.result.is_error {
         Some(extract_error_content(&processed_output))

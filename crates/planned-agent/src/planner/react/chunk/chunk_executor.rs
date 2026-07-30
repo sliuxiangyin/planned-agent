@@ -48,10 +48,9 @@ impl ToolExecutor for ChunkStoreExecutor {
                 let chunk_id = arguments["chunk_id"]
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("缺少 chunk_id"))?;
-                let offset = arguments["offset"].as_u64().unwrap_or(0) as usize;
-                let size = arguments["size"].as_u64().unwrap_or(4096) as usize;
+                let chunk_index = arguments["chunk"].as_u64().unwrap_or(0) as usize;
 
-                let view = cs.read_view(chunk_id, offset, size)?;
+                let view = cs.read_chunk(chunk_id, chunk_index)?;
                 let content = serde_json::to_value(&view)?;
                 Ok(ToolResult {
                     call_id: String::new(),
@@ -80,7 +79,7 @@ impl ToolExecutor for ChunkStoreExecutor {
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("缺少 chunk_id"))?;
 
-                let view = cs.read_view(chunk_id, 0, 0)?;
+                let view = cs.read_chunk(chunk_id, 0)?;
                 let content = serde_json::to_value(&view)?;
                 Ok(ToolResult {
                     call_id: String::new(),
@@ -111,7 +110,7 @@ fn chunk_read_tool() -> (Tool, Vec<ToolCategory>) {
     (
         Tool {
             name: "builtin_chunk_read".to_string(),
-            description: "读取分片缓存中的指定窗口。不传 offset 则从开头读取，传 offset 则跳到指定字节位置。每次返回窗口内容 + 全局结构索引。"
+            description: "按语义块翻页读取分片缓存，自动对齐段落/句子边界，不会截断内容。每次返回当前块内容 + 全局结构索引。"
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -120,13 +119,9 @@ fn chunk_read_tool() -> (Tool, Vec<ToolCategory>) {
                         "type": "string",
                         "description": "分片缓存 ID（从 ChunkedView 中获取）"
                     },
-                    "offset": {
+                    "chunk": {
                         "type": "integer",
-                        "description": "起始字节偏移（可选，默认 0）"
-                    },
-                    "size": {
-                        "type": "integer",
-                        "description": "窗口大小（可选，默认 4096）"
+                        "description": "语义分块索引（0-based，默认 0）"
                     }
                 },
                 "required": ["chunk_id"]

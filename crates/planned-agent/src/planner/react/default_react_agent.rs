@@ -53,7 +53,7 @@ impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
         exec_ctx: Arc<ExecutorContext>,
         config: ReActAgentConfig,
     ) -> Self {
-        let chunk_store = Arc::new(ChunkStore::new(tool_registry.clone()));
+        let chunk_store = Arc::new(ChunkStore::new());
         exec_ctx.set_chunk_store(chunk_store.clone());
 
         Self {
@@ -456,6 +456,17 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
                     self.ctx.push_user_message(scope_warning);
                     warn!("[SCOPE] step={} out-of-scope detected: {}",
                         coarse_step.id, observe_result.summary);
+                }
+
+                // ── 5. observe 完成处理 ──
+                if observe_result.is_complete {
+                    break Ok(ReActExecutionResult::success(
+                        coarse_step.id.clone(),
+                        final_obs.output.clone(),
+                        history,
+                        iteration + 1,
+                        start_time.elapsed().as_millis() as u64,
+                    ));
                 }
 
                 iteration += 1;

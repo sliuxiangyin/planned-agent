@@ -28,3 +28,5 @@ clap = { version = "4", features = ["derive"] }
 config = "0.13"
 futures = "0.3"
 uuid = { version = "1", features = ["v4"] }
+crw-extract.workspace = true
+crw-core.workspace = true

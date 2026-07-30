@@ -4,47 +4,32 @@
 //! 内部通过 `Arc<RwLock<>>` 实现线程安全。
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 use anyhow::{anyhow, Result};
-use serde_json::{json, Value};
+use serde_json::Value;
 use tracing::warn;
 use uuid::Uuid;
 
-use planned_agent_tool_manager::ToolRegistry;
-
 use super::chunk_view::{ChunkedView, SearchMatch};
 use super::smart_index::{self, ContentType};
+use crw_core::types::{ChunkStrategy, FilterMode};
 
 // ── 配置 ──────────────────────────────────────────────
-
-pub const DEFAULT_WINDOW_SIZE: usize = 4096;
-pub const DEFAULT_CHUNK_THRESHOLD: usize = 8192;
-pub const EXPAND_THRESHOLD: usize = 800;
 
 #[derive(Debug, Clone)]
 pub struct ChunkConfig {
     pub window_size: usize,
     pub chunk_threshold: usize,
-    pub expand_threshold: usize,
 }
 
 impl Default for ChunkConfig {
     fn default() -> Self {
         Self {
-            window_size: DEFAULT_WINDOW_SIZE,
-            chunk_threshold: DEFAULT_CHUNK_THRESHOLD,
-            expand_threshold: EXPAND_THRESHOLD,
+            window_size: 4096,
+            chunk_threshold: 8192,
         }
     }
-}
-
-// ── 来源标记 ──────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-pub enum ChunkSource {
-    ToolOutput { tool_name: String },
-    Reference { ref_id: String },
 }
 
 // ── 内部条目 ──────────────────────────────────────────
@@ -53,8 +38,8 @@ struct ChunkEntry {
     text: String,
     total_bytes: usize,
     sections: Vec<super::chunk_view::Section>,
-    #[allow(dead_code)]
-    source: ChunkSource,
+    /// 语义分块字节偏移: (start_byte, end_byte)，用于 BM25 搜索定位
+    chunk_offsets: Vec<(usize, usize)>,
 }
 
 // ── ChunkStore ────────────────────────────────────────
@@ -62,39 +47,32 @@ struct ChunkEntry {
 pub struct ChunkStore {
     entries: RwLock<HashMap<String, ChunkEntry>>,
     config: ChunkConfig,
-    tool_registry: Arc<ToolRegistry>,
 }
 
 impl ChunkStore {
-    pub fn new(tool_registry: Arc<ToolRegistry>) -> Self {
-        Self::with_config(tool_registry, ChunkConfig::default())
+    pub fn new() -> Self {
+        Self::with_config(ChunkConfig::default())
     }
 
-    pub fn with_config(tool_registry: Arc<ToolRegistry>, config: ChunkConfig) -> Self {
+    fn with_config(config: ChunkConfig) -> Self {
         Self {
             entries: RwLock::new(HashMap::new()),
             config,
-            tool_registry,
         }
     }
 
     // ── 存储 ───────────────────────────────────────
 
-    /// 存入文本，自动检测类型 → 清洗 → 建索引 → 返回 chunk_id。
-    pub async fn store(&self, raw_text: &str, source: ChunkSource) -> Result<String> {
-        let chunk_id = match &source {
-            ChunkSource::ToolOutput { tool_name } => {
-                format!("tool_{}_{}", tool_name, short_uuid())
-            }
-            ChunkSource::Reference { ref_id } => {
-                format!("ref_{}", ref_id.trim_start_matches('#').trim_start_matches('E'))
-            }
-        };
+    /// 存入文本，自动检测类型 → 清洗 → 语义分块 → 建索引 → 返回 chunk_id。
+    async fn store(&self, raw_text: &str, tool_name: &str) -> Result<String> {
+        let chunk_id = format!("tool_{}_{}", tool_name, short_uuid());
 
-        // 清洗：HTML → 调用 builtin_clean_html 转为纯文本
-        let ct = smart_index::detect_content_type(raw_text);
+        // ── 1. 类型检测 ──
+        let ct: ContentType = smart_index::detect_content_type(raw_text);
+
+        // ── 2. HTML 清洗（crw-extract）→ 转为 Markdown ──
         let cleaned = if ct == ContentType::Html {
-            self.clean_html(raw_text).await.unwrap_or_else(|e| {
+            self.clean_html(raw_text).unwrap_or_else(|e| {
                 warn!("HTML 清洗失败，使用原文: {}", e);
                 raw_text.to_string()
             })
@@ -102,16 +80,26 @@ impl ChunkStore {
             raw_text.to_string()
         };
 
+        // 清洗后 HTML 已转为 Markdown，后续用 Markdown 索引
+        let index_ct = if ct == ContentType::Html {
+            ContentType::Markdown
+        } else {
+            ct
+        };
+
         let total_bytes = cleaned.len();
 
-        // 建索引（基于清洗后的文本）
-        let sections = smart_index::build_index_for(&cleaned, ct);
+        // ── 3. 语义分块（crw-extract chunking）──
+        let chunk_offsets = self.build_semantic_chunks(&cleaned, index_ct);
+
+        // ── 4. 结构索引 ──
+        let sections = smart_index::build_index_for(&cleaned, index_ct);
 
         let entry = ChunkEntry {
             text: cleaned,
             total_bytes,
             sections,
-            source,
+            chunk_offsets,
         };
 
         self.entries
@@ -122,24 +110,17 @@ impl ChunkStore {
         Ok(chunk_id)
     }
 
-    /// 调用 builtin_clean_html 工具进行清洗。
-    async fn clean_html(&self, html: &str) -> Result<String> {
-        let outcome = self
-            .tool_registry
-            .call_tool(
-                "builtin_clean_html",
-                json!({ "html": html, "format": "text" }),
-            )
-            .await?;
+    /// 使用 crw-extract 清洗 HTML：去除 boilerplate → 转为 Markdown。
+    /// Markdown 对 LLM 更友好，且可直接复用现有 index_markdown。
+    fn clean_html(&self, html: &str) -> Result<String> {
+        // Step 1: 去除 script/style/nav/footer/ads 等噪音标签
+        let cleaned = crw_extract::clean::clean_html(html, true, &[], &[])
+            .map_err(|e| anyhow::anyhow!("crw-extract HTML 清洗失败: {}", e))?;
 
-        let content = outcome
-            .result
-            .content
-            .get("content")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("builtin_clean_html 未返回 content 字段"))?;
+        // Step 2: 转为 Markdown（LLM 友好格式，且可复用 Markdown 索引）
+        let markdown = crw_extract::markdown::html_to_markdown(&cleaned);
 
-        Ok(content.to_string())
+        Ok(markdown)
     }
 
     // ── 读取窗口 ────────────────────────────────────
@@ -180,6 +161,7 @@ impl ChunkStore {
         Ok(ChunkedView::new(
             chunk_id.to_string(),
             entry.total_bytes,
+            entry.chunk_offsets.len(),
             entry.sections.clone(),
             window,
             offset,
@@ -187,14 +169,10 @@ impl ChunkStore {
         ))
     }
 
-    /// 自动翻页：读取当前 offset 后的下一个窗口（offset = prev_offset + window_size）。
-    pub fn read_next_view(&self, chunk_id: &str, prev_offset: usize) -> Result<ChunkedView> {
-        let next_offset = prev_offset + self.config.window_size;
-        self.read_view(chunk_id, next_offset, self.config.window_size)
-    }
-
-    /// 获取完整原始文本（步骤完成时还原 ChunkedView → 原文）。
-    pub fn get_full_text(&self, chunk_id: &str) -> Result<String> {
+    /// 按语义分块索引读取窗口，自动对齐 chunk 边界。
+    /// 不会在句子中间截断，比字节偏移更适合 LLM 阅读。
+    /// 无语义分块时自动回退到字节窗口。
+    pub fn read_chunk(&self, chunk_id: &str, chunk_index: usize) -> Result<ChunkedView> {
         let guard = self
             .entries
             .read()
@@ -204,12 +182,36 @@ impl ChunkStore {
             .get(chunk_id)
             .ok_or_else(|| anyhow!("未找到分片数据: {}", chunk_id))?;
 
-        Ok(entry.text.clone())
+        // 有语义分块 → 按分块索引读取
+        if chunk_index < entry.chunk_offsets.len() {
+            let (start, end) = entry.chunk_offsets[chunk_index];
+            let window = if start < entry.text.len() && end <= entry.text.len() {
+                entry.text[start..end].to_string()
+            } else {
+                String::new()
+            };
+
+            return Ok(ChunkedView::new(
+                chunk_id.to_string(),
+                entry.total_bytes,
+                entry.chunk_offsets.len(),
+                entry.sections.clone(),
+                window,
+                start,
+                end - start,
+            ));
+        }
+
+        // 回退：无分块或索引越界 → 按字节窗口读取
+        let offset = chunk_index * self.config.window_size;
+        self.read_view(chunk_id, offset, self.config.window_size)
     }
 
     // ── 搜索 ────────────────────────────────────────
 
-    /// 关键词搜索，返回匹配列表。
+    /// BM25 语义搜索 + 关键词回退。
+    /// 优先使用 store 时构建的语义分块进行 BM25 相关性排序，
+    /// 无分块时回退到简单关键词匹配。
     pub fn search(
         &self,
         chunk_id: &str,
@@ -224,6 +226,69 @@ impl ChunkStore {
             .get(chunk_id)
             .ok_or_else(|| anyhow!("未找到分片数据: {}", chunk_id))?;
 
+        // 有语义分块 → BM25 搜索
+        if !entry.chunk_offsets.is_empty() {
+            return self.search_bm25(entry, query);
+        }
+
+        // 回退：简单关键词搜索
+        self.search_fallback_keyword(entry, query)
+    }
+
+    /// BM25 语义搜索：用 crw-extract 的 filter_chunks_scored 排序并映射回 SearchMatch。
+    fn search_bm25(&self, entry: &ChunkEntry, query: &str) -> Result<Vec<SearchMatch>> {
+        // 1. 按 chunk_offsets 提取各 chunk 文本
+        let chunks: Vec<String> = entry
+            .chunk_offsets
+            .iter()
+            .map(|&(s, e)| {
+                if s < entry.text.len() && e <= entry.text.len() {
+                    entry.text[s..e].to_string()
+                } else {
+                    String::new()
+                }
+            })
+            .collect();
+
+        // 2. BM25 排序，取 top 20
+        let scored = crw_extract::filter::filter_chunks_scored(
+            &chunks,
+            query,
+            &FilterMode::Bm25,
+            20,
+        );
+
+        // 3. 映射回 SearchMatch
+        let mut matches = Vec::with_capacity(scored.len());
+        for sc in &scored {
+            if sc.index < entry.chunk_offsets.len() {
+                let (chunk_start, _chunk_end) = entry.chunk_offsets[sc.index];
+
+                // 上下文：截取 chunk 前 300 字符作为摘要
+                let context: String = sc.content.chars().take(300).collect();
+                let context = if sc.content.len() > 300 {
+                    format!("{}…", context)
+                } else {
+                    context
+                };
+
+                matches.push(SearchMatch {
+                    offset: chunk_start,
+                    context,
+                    section_title: find_section_title(&entry.sections, chunk_start),
+                });
+
+                if matches.len() >= 20 {
+                    break;
+                }
+            }
+        }
+
+        Ok(matches)
+    }
+
+    /// 回退关键词搜索（保留原逻辑作为降级方案）。
+    fn search_fallback_keyword(&self, entry: &ChunkEntry, query: &str) -> Result<Vec<SearchMatch>> {
         let text = &entry.text;
         let lower_text = text.to_lowercase();
         let lower_query = query.to_lowercase();
@@ -235,28 +300,18 @@ impl ChunkStore {
         while let Some(pos) = lower_text[search_start..].find(&lower_query) {
             let abs_pos = search_start + pos;
 
-            // 上下文范围
             let ctx_start = abs_pos.saturating_sub(context_radius);
             let ctx_end = (abs_pos + lower_query.len() + context_radius).min(text.len());
 
             let context = if ctx_start > 0 && ctx_end < text.len() {
-                format!(
-                    "…{}…",
-                    &text[ctx_start..ctx_end]
-                )
+                format!("…{}…", &text[ctx_start..ctx_end])
             } else if ctx_start == 0 {
                 format!("{}…", &text[ctx_start..ctx_end])
             } else {
                 format!("…{}", &text[ctx_start..ctx_end])
             };
 
-            // 所属 section
-            let section_title = entry
-                .sections
-                .iter()
-                .rev()
-                .find(|s| s.start_byte <= abs_pos)
-                .map(|s| s.title.clone());
+            let section_title = find_section_title(&entry.sections, abs_pos);
 
             matches.push(SearchMatch {
                 offset: abs_pos,
@@ -264,7 +319,6 @@ impl ChunkStore {
                 section_title,
             });
 
-            // 前进，最多返回 20 条
             if matches.len() >= 20 {
                 break;
             }
@@ -274,26 +328,10 @@ impl ChunkStore {
         Ok(matches)
     }
 
-    // ── 索引查询 ────────────────────────────────────
-
-    /// 获取结构索引。
-    pub fn get_sections(&self, chunk_id: &str) -> Result<Vec<super::chunk_view::Section>> {
-        let guard = self
-            .entries
-            .read()
-            .map_err(|e| anyhow!("ChunkStore 读锁失败: {}", e))?;
-
-        let entry = guard
-            .get(chunk_id)
-            .ok_or_else(|| anyhow!("未找到分片数据: {}", chunk_id))?;
-
-        Ok(entry.sections.clone())
-    }
-
     // ── 判定 ────────────────────────────────────────
 
     /// 判断文本是否应该分片。
-    pub fn should_chunk(&self, text: &str) -> bool {
+    fn should_chunk(&self, text: &str) -> bool {
         text.len() > self.config.chunk_threshold
     }
 
@@ -301,69 +339,66 @@ impl ChunkStore {
 
     /// 处理工具输出：大文本自动分片存储并返回 ChunkedView，小文本原样透传。
     ///
-    /// `handle_generic_tool` 的唯一调用入口，内部封装阈值判断、存储、视图构建。
-    pub async fn handle(&self, content: Value) -> Result<Value> {
+    /// `tool_name` 用于标记来源（日志/调试），同时可据此做条件逻辑。
+    pub async fn handle(&self, content: Value, tool_name: &str) -> Result<Value> {
         let raw_text = serde_json::to_string(&content).unwrap_or_default();
 
         if !self.should_chunk(&raw_text) {
             return Ok(content);
         }
 
-        let source = ChunkSource::ToolOutput {
-            tool_name: "output".to_string(),
-        };
-        let chunk_id = self.store(&raw_text, source).await?;
+        let chunk_id = self.store(&raw_text, tool_name).await?;
 
         let view = self.read_view(&chunk_id, 0, self.config.window_size)?;
         Ok(view.to_observation_json())
     }
 
-    pub fn expand_threshold(&self) -> usize {
-        self.config.expand_threshold
+    /// 使用 crw-extract 的 Topic/Sentence 策略将文本切分为语义块，
+    /// 返回每个块的 (start_byte, end_byte) 偏移，用于 BM25 搜索定位。
+    fn build_semantic_chunks(&self, text: &str, ct: ContentType) -> Vec<(usize, usize)> {
+        let strategy = match ct {
+            ContentType::Markdown | ContentType::Html => ChunkStrategy::Topic {
+                max_chars: Some(2000),
+                overlap_chars: Some(200),
+                dedupe: Some(true),
+            },
+            _ => ChunkStrategy::Sentence {
+                max_chars: Some(2000),
+                overlap_chars: Some(100),
+                dedupe: None,
+            },
+        };
+
+        let chunks = crw_extract::chunking::chunk_text(text, &strategy);
+
+        // 将 chunk 字符串映射回原文本的字节偏移
+        let mut offsets = Vec::with_capacity(chunks.len());
+        let mut search_from = 0usize;
+
+        for chunk in &chunks {
+            if let Some(pos) = text[search_from..].find(chunk.as_str()) {
+                let start = search_from + pos;
+                let end = start + chunk.len();
+                offsets.push((start, end));
+                search_from = start + chunk.len().max(1);
+            }
+        }
+
+        offsets
     }
 
-    pub fn chunk_threshold(&self) -> usize {
-        self.config.chunk_threshold
-    }
-
-    pub fn window_size(&self) -> usize {
-        self.config.window_size
-    }
-
-    /// 判断 chunk_id 是否存在。
-    pub fn exists(&self, chunk_id: &str) -> bool {
-        self.entries
-            .read()
-            .map(|g| g.contains_key(chunk_id))
-            .unwrap_or(false)
-    }
-
-    /// 当前缓存的条目数。
-    pub fn len(&self) -> usize {
-        self.entries.read().map(|g| g.len()).unwrap_or(0)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    // ── 元数据 ──────────────────────────────────────
-
-    /// 根据 chunk_id 获取来源信息（用于日志）。
-    pub fn source_info(&self, chunk_id: &str) -> Option<String> {
-        self.entries
-            .read()
-            .ok()
-            .and_then(|g| {
-                g.get(chunk_id).map(|e| match &e.source {
-                    ChunkSource::ToolOutput { tool_name } => format!("tool:{}", tool_name),
-                    ChunkSource::Reference { ref_id } => format!("ref:{}", ref_id),
-                })
-            })
-    }
 }
 
 // ── 工具函数 ──────────────────────────────────────────
+
+/// 在 sections 中查找包含 byte_pos 的最近 section 标题。
+fn find_section_title(sections: &[super::chunk_view::Section], byte_pos: usize) -> Option<String> {
+    sections
+        .iter()
+        .rev()
+        .find(|s| s.start_byte <= byte_pos)
+        .map(|s| s.title.clone())
+}
 
 fn short_uuid() -> String {
     Uuid::new_v4()

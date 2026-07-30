@@ -16,12 +16,6 @@ pub enum ContentType {
 
 // ── 入口 ──────────────────────────────────────────────
 
-/// 自动检测内容类型并生成结构索引。
-pub fn build_index(text: &str) -> Vec<Section> {
-    let ct = detect_content_type(text);
-    build_index_for(text, ct)
-}
-
 /// 按已知类型构建索引。
 pub fn build_index_for(text: &str, ct: ContentType) -> Vec<Section> {
     match ct {
@@ -92,13 +86,11 @@ fn index_html(text: &str) -> Vec<Section> {
                         let title_raw = &text[byte_offset + content_start
                             ..byte_offset + content_start + close_pos];
                         let title = strip_tags(title_raw).trim().to_string();
-                        let abs_end = byte_offset + content_start + close_pos + close_tag.len();
 
                         if !title.is_empty() {
                             sections.push(Section {
                                 title,
                                 start_byte: abs_start,
-                                end_byte: abs_end,
                             });
                         }
                     }
@@ -159,7 +151,6 @@ fn index_markdown(text: &str) -> Vec<Section> {
                     sections.push(Section {
                         title: title.to_string(),
                         start_byte: byte_offset,
-                        end_byte: byte_offset + line_bytes,
                     });
                 }
             }
@@ -169,16 +160,6 @@ fn index_markdown(text: &str) -> Vec<Section> {
 
     if sections.is_empty() {
         return index_plain_text(text);
-    }
-
-    // 补全 end_byte：每个 section 的结束为下一个的开始
-    for i in 0..sections.len() {
-        let end = if i + 1 < sections.len() {
-            sections[i + 1].start_byte
-        } else {
-            text.len()
-        };
-        sections[i].end_byte = end;
     }
 
     sections
@@ -218,7 +199,6 @@ fn index_json(text: &str) -> Vec<Section> {
                 sections.push(Section {
                     title: desc,
                     start_byte: offset,
-                    end_byte: offset + val_str.len(),
                 });
                 offset += val_str.len();
             }
@@ -227,7 +207,6 @@ fn index_json(text: &str) -> Vec<Section> {
             sections.push(Section {
                 title: format!("Array ({} items)", arr.len()),
                 start_byte: 0,
-                end_byte: text.len(),
             });
         }
         _ => {
@@ -263,7 +242,6 @@ fn index_plain_text(text: &str) -> Vec<Section> {
         sections.push(Section {
             title,
             start_byte: byte_offset,
-            end_byte: byte_offset + block_trimmed.len(),
         });
 
         byte_offset += block.len() + 2;
@@ -274,7 +252,6 @@ fn index_plain_text(text: &str) -> Vec<Section> {
         sections.push(Section {
             title: "全文".to_string(),
             start_byte: 0,
-            end_byte: text.len(),
         });
     }
 
@@ -367,7 +344,7 @@ mod tests {
     #[test]
     fn plain_text_index_uses_first_lines() {
         let text = "First block line 1\nline 2\n\nSecond block\ncontent\n\nThird";
-        let sections = build_index(text);
+        let sections = build_index_for(text, detect_content_type(text));
         assert!(!sections.is_empty());
         assert!(sections.iter().any(|s| s.title.contains("First block")));
     }

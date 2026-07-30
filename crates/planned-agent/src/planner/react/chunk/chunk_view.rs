@@ -13,6 +13,8 @@ pub struct ChunkedView {
     pub chunk_id: String,
     pub total_bytes: usize,
     pub total_windows: usize,
+    /// 语义分块总数（0 表示未构建语义分块，回退字节窗口）
+    pub total_chunks: usize,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sections: Vec<Section>,
     pub current_window: String,
@@ -25,7 +27,6 @@ pub struct ChunkedView {
 pub struct Section {
     pub title: String,
     pub start_byte: usize,
-    pub end_byte: usize,
 }
 
 /// 关键词搜索结果。
@@ -42,6 +43,7 @@ impl ChunkedView {
     pub fn new(
         chunk_id: String,
         total_bytes: usize,
+        total_chunks: usize,
         sections: Vec<Section>,
         current_window: String,
         current_offset: usize,
@@ -50,12 +52,13 @@ impl ChunkedView {
         let total_windows = if total_bytes == 0 {
             0
         } else {
-            (total_bytes + window_size - 1) / window_size
+            (total_bytes + window_size.max(1) - 1) / window_size.max(1)
         };
         Self {
             chunk_id,
             total_bytes,
             total_windows,
+            total_chunks,
             sections,
             current_window,
             current_offset,
@@ -65,10 +68,35 @@ impl ChunkedView {
 
     /// 序列化为 Observation 可用的 JSON。
     pub fn to_observation_json(&self) -> Value {
+        let page_info = if self.total_chunks > 0 {
+            format!("共{}个语义块, 当前第{}块", self.total_chunks, self.current_offset / self.window_size.max(1) + 1)
+        } else {
+            format!("共{}页, 当前第{}页", self.total_windows, self.current_offset / self.window_size.max(1) + 1)
+        };
+
+        let nav_hint = if self.total_chunks > 0 {
+            format!(
+                "- builtin_chunk_read(\"{}\", chunk=N) → 跳到第 N 个语义块\n\
+                 - builtin_chunk_read(\"{}\", offset=N) → 按字节跳到指定位置\n\
+                 - builtin_chunk_search(\"{}\", \"关键词\") → 搜索\n\
+                 - builtin_chunk_summary(\"{}\") → 重新查看结构索引",
+                self.chunk_id, self.chunk_id, self.chunk_id, self.chunk_id,
+            )
+        } else {
+            format!(
+                "- builtin_chunk_read(\"{}\") → 翻到下一页\n\
+                 - builtin_chunk_read(\"{}\", offset=N) → 跳到指定位置\n\
+                 - builtin_chunk_search(\"{}\", \"关键词\") → 搜索\n\
+                 - builtin_chunk_summary(\"{}\") → 重新查看结构索引",
+                self.chunk_id, self.chunk_id, self.chunk_id, self.chunk_id,
+            )
+        };
+
         json!({
             "chunk_id": self.chunk_id,
             "total_bytes": self.total_bytes,
             "total_windows": self.total_windows,
+            "total_chunks": self.total_chunks,
             "window_size": self.window_size,
             "current_offset": self.current_offset,
             "sections": self.sections.iter().map(|s| json!({
@@ -77,19 +105,12 @@ impl ChunkedView {
             })).collect::<Vec<_>>(),
             "current_window": self.current_window,
             "hint": format!(
-                "📋 分片视图 (ID: {}, 共{}页, 当前第{}页)\n\
+                "📋 分片视图 (ID: {}, {})\n\
                  可操作:\n\
-                 - builtin_chunk_read(\"{}\") → 翻到下一页\n\
-                 - builtin_chunk_read(\"{}\", offset=N) → 跳到指定位置\n\
-                 - builtin_chunk_search(\"{}\", \"关键词\") → 搜索\n\
-                 - builtin_chunk_summary(\"{}\") → 重新查看结构索引",
+                 {}",
                 self.chunk_id,
-                self.total_windows,
-                self.current_offset / self.window_size.max(1) + 1,
-                self.chunk_id,
-                self.chunk_id,
-                self.chunk_id,
-                self.chunk_id,
+                page_info,
+                nav_hint,
             ),
         })
     }
