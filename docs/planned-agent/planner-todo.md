@@ -70,7 +70,27 @@
 
 ## 🟡 中优先级：健壮性与工程质量
 
-### 4. ReAct Agent 单元测试
+### 4. Skill Execution 组件
+
+**当前状态**：仅有设计文档 [`docs/planned-agent/skill-execution.md`](skill-execution.md)，未实现。
+
+**问题**：当前只能通过"Plan → Execute"流水线执行任务，缺少预制的、可复用的任务模板（Skill），每次都需要 LLM 先生成计划再执行。
+
+**建议实现**：
+- 新建 `SkillRegistry`：存储 skill 定义（name, description, keywords, prompt_template, allowed_tools）
+- `DefaultReActAgent` 新增 `new_for_skill()` 构造路径：注入 skill 专用 System prompt
+- `Agent` 新增 `route_and_execute()`：优先匹配 skill，否则回退 Plan-and-Execute
+- `prompts/skills/` 目录：每 skill 一个 Tera 模板
+
+**涉及文件**：
+- 新建 `crates/planned-agent/src/planner/react/skill_registry.rs`
+- 修改 `crates/planned-agent/src/planner/react/default_react_agent.rs`
+- 修改 `crates/planned-agent/src/agent.rs`
+- 新建 `prompts/skills/` 目录
+
+---
+
+### 5. ReAct Agent 单元测试
 
 **当前状态**：`coarse/llm_planner.rs` 有完善的 mock 测试和 E2E 测试，但 `default_react_agent.rs`（607 行）零测试覆盖。
 
@@ -87,7 +107,7 @@
 
 ---
 
-### 5. 统一重试与配置生效
+### 6. 统一重试与配置生效
 
 **当前状态**：
 - `ReActAgentConfig.retry_delay_ms` 预留字段，未在任何重试逻辑中使用
@@ -105,7 +125,7 @@
 
 ---
 
-### 6. 消息上下文膨胀控制
+### 7. 消息上下文膨胀控制
 
 **当前状态**：ReAct 循环多轮时 `AgentContext.messages` 持续增长，无截断机制，可能超出模型 token 限制。
 
@@ -125,7 +145,7 @@
 
 ## 🟢 低优先级：体验与扩展
 
-### 7. 流水线完成后的结果合成
+### 8. 流水线完成后的结果合成
 
 **当前状态**：`PlanAndExecuteAgent.execute()` 完成后只返回 `HashMap<String, StepResult>`，没有对全部结果做最终摘要。
 
@@ -136,7 +156,7 @@
 
 ---
 
-### 8. 并行步骤执行（可选）
+### 9. 并行步骤执行（可选）
 
 **当前状态**：步骤严格串行执行。当多个步骤 `dependencies` 为空时理论上可并行。
 
@@ -147,7 +167,7 @@
 
 ---
 
-### 9. Sub-agent 扩展
+### 10. Sub-agent 扩展
 
 **当前状态**：只有 `html_clean_subagent` 一个子 Agent。
 
@@ -157,7 +177,7 @@
 
 ---
 
-### 10. 可观测性提升
+### 11. 可观测性提升
 
 **当前状态**：仅使用 `info!`/`warn!`/`error!` 宏记录日志，无结构化 metrics。
 
@@ -171,7 +191,7 @@
 
 ---
 
-### 11. Coarse Planner 原子动作检查升级
+### 12. Coarse Planner 原子动作检查升级
 
 **当前状态**：`validate_atomic_steps` 基于中文关键词启发式检查，可能误报/漏报。
 
@@ -185,7 +205,7 @@
 
 ---
 
-### 12. 配置外部化
+### 13. 配置外部化
 
 **当前状态**：temperature（0.3）、max_tokens（4000/8000）硬编码在多处。
 
@@ -200,12 +220,13 @@
 | 1 | Replanner 实现 | 🔴 高 | ⬜ 待开始 | |
 | 2 | tool_result_handler | 🔴 高 | ⬜ 待开始 | |
 | 3 | Plan Validation 升级 | 🔴 高 | ⬜ 待开始 | |
-| 4 | ReAct Agent 测试 | 🟡 中 | ⬜ 待开始 | |
-| 5 | 统一重试配置 | 🟡 中 | ⬜ 待开始 | |
-| 6 | 消息上下文截断 | 🟡 中 | ⬜ 待开始 | |
-| 7 | 结果合成 | 🟢 低 | ⬜ 待开始 | |
-| 8 | 并行步骤执行 | 🟢 低 | ⬜ 待开始 | |
-| 9 | Sub-agent 扩展 | 🟢 低 | ⬜ 待开始 | |
-| 10 | 可观测性 | 🟢 低 | ⬜ 待开始 | |
-| 11 | 原子动作检查升级 | 🟢 低 | ⬜ 待开始 | |
-| 12 | 配置外部化 | 🟢 低 | ⬜ 待开始 | |
+| 4 | Skill Execution 组件 | 🟡 中 | ⬜ 待开始 | |
+| 5 | ReAct Agent 测试 | 🟡 中 | ⬜ 待开始 | |
+| 6 | 统一重试配置 | 🟡 中 | ⬜ 待开始 | |
+| 7 | 消息上下文截断 | 🟡 中 | ⬜ 待开始 | |
+| 8 | 结果合成 | 🟢 低 | ⬜ 待开始 | |
+| 9 | 并行步骤执行 | 🟢 低 | ⬜ 待开始 | |
+| 10 | Sub-agent 扩展 | 🟢 低 | ⬜ 待开始 | |
+| 11 | 可观测性 | 🟢 低 | ⬜ 待开始 | |
+| 12 | 原子动作检查升级 | 🟢 低 | ⬜ 待开始 | |
+| 13 | 配置外部化 | 🟢 低 | ⬜ 待开始 | |

@@ -87,7 +87,7 @@ async fn main() -> Result<()> {
         match command {
             cli::Commands::TestExecute { input } => {
                 // 运行完整的 Plan-and-Execute 测试流程
-                run_test_execute(&agent, &input).await?;
+                run_test_execute(&agent, &config, &input).await?;
             }
         }
     } else if cli.interactive {
@@ -109,8 +109,10 @@ async fn main() -> Result<()> {
 }
 
 /// 运行完整的 Plan-and-Execute 测试流程
-async fn run_test_execute(agent: &Agent, input: &str) -> Result<()> {
+async fn run_test_execute(agent: &Agent, app_config: &AppConfig, input: &str) -> Result<()> {
+    use std::sync::Arc;
     use planner::react::{PlanAndExecuteAgent, PlanAndExecuteConfig};
+    use planner::trace::{TraceRecorder, recorder::TraceRecorderConfig};
     use planned_agent_core::planner::react::ReActAgentConfig;
     
     println!("=== Plan-and-Execute 测试 ===\n");
@@ -120,7 +122,7 @@ async fn run_test_execute(agent: &Agent, input: &str) -> Result<()> {
     let tool_registry = agent.get_tool_registry();
     let exec_ctx = agent.get_exec_ctx();
     
-    // 获取 AI 客户端和 Prompt 管理器
+    // 获取 AI 管理器 和 Prompt 管理器
     let ai_manager = agent.get_ai_manager()
         .ok_or_else(|| anyhow::anyhow!("AI管理器未初始化"))?;
     let ai_client = ai_manager.default()?;
@@ -149,6 +151,25 @@ async fn run_test_execute(agent: &Agent, input: &str) -> Result<()> {
         },
     };
     
+    // 创建 TraceRecorder（轨迹泛化 + JSON 存储）
+    let trace_model = if app_config.trace.generalization_model.is_empty() {
+        None
+    } else {
+        Some(app_config.trace.generalization_model.clone())
+    };
+    let trace_config = TraceRecorderConfig {
+        enabled: app_config.trace.enabled,
+        storage_dir: std::path::PathBuf::from(&app_config.trace.storage_dir),
+        max_iterations_for_record: app_config.trace.max_iterations_for_record,
+        use_llm_generalization: app_config.trace.use_llm_generalization,
+        trace_model,
+    };
+    let trace_recorder = TraceRecorder::new(
+        trace_config,
+        Some(Arc::new(ai_manager.clone())),
+        Some(prompt_manager.clone()),
+    );
+
     // 创建并执行
     let mut pae_agent = PlanAndExecuteAgent::new(
         ai_client.clone(),
@@ -156,6 +177,7 @@ async fn run_test_execute(agent: &Agent, input: &str) -> Result<()> {
         tool_registry.clone(),
         exec_ctx.clone(),
         config,
+        trace_recorder,
     );
     
     let result = pae_agent.execute(input, &plan_context).await?;

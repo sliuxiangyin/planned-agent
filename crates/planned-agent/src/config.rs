@@ -10,16 +10,56 @@ pub struct AppConfig {
     /// 新版多AI提供商配置
     #[serde(default)]
     pub ai_providers: Vec<AiProviderConfig>,
-    
+
     /// 新版多MCP服务器配置
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
-    
+
     /// Prompt管理器配置
     #[serde(default)]
     pub prompt_manager: PromptManagerConfig,
-    
+
+    /// 轨迹记录系统配置
+    #[serde(default)]
+    pub trace: TraceConfig,
+
     pub logging: LoggingConfig,
+}
+
+/// 轨迹记录系统配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceConfig {
+    /// 是否启用
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 存储目录
+    #[serde(default = "default_trace_dir")]
+    pub storage_dir: String,
+    /// 入库质量门槛
+    #[serde(default = "default_max_iter")]
+    pub max_iterations_for_record: usize,
+    /// 是否使用 LLM 泛化
+    #[serde(default = "default_true")]
+    pub use_llm_generalization: bool,
+    /// 泛化使用的模型名称（空 = 默认 AI）
+    #[serde(default)]
+    pub generalization_model: String,
+}
+
+fn default_true() -> bool { true }
+fn default_trace_dir() -> String { "./traces".to_string() }
+fn default_max_iter() -> usize { 5 }
+
+impl Default for TraceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            storage_dir: "./traces".to_string(),
+            max_iterations_for_record: 5,
+            use_llm_generalization: true,
+            generalization_model: String::new(),
+        }
+    }
 }
 
 /// 日志配置
@@ -105,6 +145,7 @@ impl AppConfig {
                 },
             ],
             prompt_manager: PromptManagerConfig::default(),
+            trace: TraceConfig::default(),
             logging: LoggingConfig {
                 level: "info".to_string(),
                 format: "pretty".to_string(),

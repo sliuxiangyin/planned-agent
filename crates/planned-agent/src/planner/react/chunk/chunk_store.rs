@@ -165,7 +165,6 @@ impl ChunkStore {
             entry.sections.clone(),
             window,
             offset,
-            effective_size,
         ))
     }
 
@@ -198,7 +197,6 @@ impl ChunkStore {
                 entry.sections.clone(),
                 window,
                 start,
-                end - start,
             ));
         }
 
@@ -349,7 +347,7 @@ impl ChunkStore {
 
         let chunk_id = self.store(&raw_text, tool_name).await?;
 
-        let view = self.read_view(&chunk_id, 0, self.config.window_size)?;
+        let view = self.read_chunk(&chunk_id, 0)?;
         Ok(view.to_observation_json())
     }
 

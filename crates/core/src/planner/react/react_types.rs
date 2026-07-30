@@ -1,13 +1,5 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
-
-/// 共享的步骤结果存储（Arc<RwLock<HashMap>>）
-///
-/// 用于 Plan-And-Execute 流水线中步骤间的数据传递：
-/// - PlanAndExecuteAgent 持有写端，每步完成后更新
-/// - fetch_step_result 工具执行器持有读端，AI 调用时读取
-pub type StepResultStore = std::sync::Arc<std::sync::RwLock<HashMap<String, Value>>>;
 
 /// ReAct 步骤
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +105,8 @@ pub struct ReActExecutionResult {
     pub success: bool,
     /// 最终输出（原始工具输出）
     pub output: Value,
+    /// observe 阶段的执行摘要（步骤完成时填充）
+    pub observe_summary: Option<String>,
     /// 错误信息（如果有）
     pub error: Option<String>,
     /// 执行历史
@@ -125,11 +119,12 @@ pub struct ReActExecutionResult {
 
 impl ReActExecutionResult {
     /// 创建成功的执行结果
-    pub fn success(step_id: String, output: Value, history: Vec<ReActStep>, iterations: usize, total_duration_ms: u64) -> Self {
+    pub fn success(step_id: String, output: Value, observe_summary: Option<String>, history: Vec<ReActStep>, iterations: usize, total_duration_ms: u64) -> Self {
         Self {
             step_id,
             success: true,
             output,
+            observe_summary,
             error: None,
             history,
             iterations,
@@ -143,6 +138,7 @@ impl ReActExecutionResult {
             step_id,
             success: false,
             output: Value::Null,
+            observe_summary: None,
             error: Some(error),
             history,
             iterations,

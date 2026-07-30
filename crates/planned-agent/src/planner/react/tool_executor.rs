@@ -17,7 +17,7 @@ use tracing::{info, warn};
 
 use planned_agent_core::ai::AiClient;
 use planned_agent_core::planner::coarse::CoarseGrainedStep;
-use planned_agent_core::planner::react::{Observation, StepResultStore};
+use planned_agent_core::planner::react::Observation;
 use planned_agent_core::tool_registry::ToolCategory;
 use planned_agent_core::types::{
     ChatCompletionRequest, FunctionDefinition, Message, MessageContent, MessageRole, Tool,
@@ -27,6 +27,7 @@ use planned_agent_tool_manager::ToolRegistry;
 
 use super::agent_context::AgentContext;
 use super::chunk::ChunkStore;
+use super::step_store::StepStore;
 
 /// 工具输出保存到 logs 的阈值：超过 5KB 视为"大文件"
 const TOOL_OUTPUT_SAVE_THRESHOLD: usize = 5 * 1024;
@@ -292,7 +293,7 @@ pub(crate) async fn handle_ai_process(
 pub(crate) async fn handle_generic_tool(
     tool_registry: &Arc<ToolRegistry>,
     chunk_store: &Arc<ChunkStore>,
-    store: &Option<StepResultStore>,
+    store: &Option<StepStore>,
     tool_name: &str,
     mut parameters: Value,
     call_id: &str,
@@ -303,7 +304,7 @@ pub(crate) async fn handle_generic_tool(
         if let Some(ref store) = store {
             let guard = store
                 .read()
-                .map_err(|e| anyhow::anyhow!("StepResultStore 读锁失败: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("StepStore 读锁失败: {}", e))?;
             let results_map = serde_json::to_value(&*guard)?;
             if let Some(obj) = parameters.as_object_mut() {
                 obj.insert("results".to_string(), results_map);

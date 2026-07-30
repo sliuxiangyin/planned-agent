@@ -5,6 +5,7 @@ use planned_agent_core::types::AiProviderConfig;
 use planned_agent_ai_openai::{OpenAiClient, OpenAiClientConfig};
 
 /// AI客户端管理器
+#[derive(Clone)]
 pub struct AiManager {
     clients: HashMap<String, Arc<dyn AiClient>>,
     default_name: Option<String>,

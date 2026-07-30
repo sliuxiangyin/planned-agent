@@ -114,7 +114,7 @@ impl Agent {
     
     /// 处理用户输入（使用默认 AI 提供商）
     pub async fn process_input(&mut self, input: &str) -> Result<String> {
-        self.process_input_with_provider(input, None).await
+        self.process_input_with_provider(input, Some("siliconflow-Qwen3.5-4B")).await
     }
     
     /// 处理用户输入（指定 AI 提供商）

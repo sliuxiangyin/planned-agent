@@ -78,7 +78,6 @@ impl StepIntent {
 // =====================================================================
 
 const BROWSER_HINT: &str = r#"
-- 浏览器工具返回的 HTML / 原始 DOM 严禁直接进入下一步；必须经过 builtin_clean_html 工具清洗为纯文本后再传递
 - 浏览器操作可以一次返回多个 tool_call 形成连续操作链（如 snapshot → type → click），充分利用一次对话完成多步交互，减少等待轮次"#;
 
 const TEXT_HINT: &str = r#"- 当前聚焦文本处理：优先使用 text_grep / text_transform / text_count 等文本类工具
@@ -86,7 +85,7 @@ const TEXT_HINT: &str = r#"- 当前聚焦文本处理：优先使用 text_grep /
 - 如需语义理解（分类、摘要、改写），可使用 ai_process 工具"#;
 
 const DATA_HINT: &str = r#"- 当前聚焦数据处理：输入通常是结构化数据（JSON / CSV / 数据库结果）
-- 排序、聚合、过滤、字段映射等转换优先使用 ai_process 工具
+-b 排序、聚合、过滤、字段映射等转换优先使用 ai_process 工具
 - 输出必须保持 JSON 结构，禁止混入 Markdown 或解释性文本"#;
 
 const FILE_HINT: &str = r#"- 当前聚焦文件操作：严格保留用户原始输入中的文件路径与文件名，禁止泛化或缩写

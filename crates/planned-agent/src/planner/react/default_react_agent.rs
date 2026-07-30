@@ -7,14 +7,15 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use chrono::Utc;
 use serde_json::Value;
+use std::fs;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{error, info, warn};
 
 use planned_agent_core::ai::AiClient;
 use planned_agent_core::planner::coarse::CoarseGrainedStep;
-use planned_agent_core::planner::react::StepResultStore;
 use planned_agent_core::planner::react::*;
 use planned_agent_core::prompt::{PromptContext, PromptManager};
 use planned_agent_core::types::{Message, MessageContent, PlanContext};
@@ -24,6 +25,7 @@ use super::agent_context::AgentContext;
 use super::chunk::ChunkStore;
 use super::chunk::executor_context::ExecutorContext;
 use super::ref_expander::expand_refs;
+use super::step_store::StepStore;
 use super::tool_executor;
 
 /// 默认 ReAct Agent 实现
@@ -39,7 +41,7 @@ pub struct DefaultReActAgent<PM: PromptManager> {
     /// 消息上下文（对话历史 + 意图缓存）
     ctx: AgentContext,
     /// 步骤结果存储（由 PlanAndExecuteAgent 传入）
-    store: Option<StepResultStore>,
+    store: Option<StepStore>,
     /// 分片缓存（工具输出大文本自动分片）
     chunk_store: Arc<ChunkStore>,
 }
@@ -68,8 +70,44 @@ impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
     }
 
     /// 设置步骤结果存储（由 PlanAndExecuteAgent 调用）
-    pub fn set_store(&mut self, store: StepResultStore) {
+    pub fn set_store(&mut self, store: StepStore) {
         self.store = Some(store);
+    }
+
+    /// 保存完整对话历史到 logs/ 目录
+    fn save_messages_to_log(step_id: &str, result: &ReActExecutionResult, messages: &[Message]) {
+        let timestamp = Utc::now().format("%Y%m%dT%H%M%S");
+        let filename = format!("logs/messages_{}_{}.json", step_id, timestamp);
+
+        // 确保目录存在
+        if let Err(e) = fs::create_dir_all("logs") {
+            warn!("无法创建 logs 目录: {}", e);
+            return;
+        }
+
+        let record = serde_json::json!({
+            "step_id": step_id,
+            "timestamp": timestamp.to_string(),
+            "success": result.success,
+            "iterations": result.iterations,
+            "duration_ms": result.total_duration_ms,
+            "observe_summary": result.observe_summary,
+            "error": result.error,
+            "messages": messages,
+        });
+
+        match serde_json::to_string_pretty(&record) {
+            Ok(json) => {
+                if let Err(e) = fs::write(&filename, &json) {
+                    warn!("保存 messages 到 {} 失败: {}", filename, e);
+                } else {
+                    info!("[SAVE] 对话历史已保存 → {} ({}条消息)", filename, messages.len());
+                }
+            }
+            Err(e) => {
+                warn!("序列化 messages 失败: {}", e);
+            }
+        }
     }
 
     // ── 消息初始化 ────────────────────────────────────────
@@ -103,32 +141,24 @@ impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
         // 读取前序步骤结果（从共享 store），生成摘要避免系统提示膨胀
         let previous_results_str = match &self.store {
             Some(store) => {
-                let guard = store
-                    .read()
-                    .map_err(|e| anyhow::anyhow!("StepResultStore 读锁获取失败: {}", e))?;
-                if guard.is_empty() {
+                let entries = store.list_entries().unwrap_or_default();
+                if entries.is_empty() {
                     "（暂无前序步骤结果）".to_string()
                 } else {
                     let mut lines: Vec<String> = Vec::new();
-                    for (k, v) in guard.iter() {
-                        if v.get("error").and_then(|e| e.as_bool()).unwrap_or(false) {
-                            lines.push(format!("- {}: ❌ 失败 — 跳过此引用", k));
+                    for e in &entries {
+                        if e.is_error {
+                            lines.push(format!("  - {}: ❌ 失败 — 此步骤无可用数据", e.ref_id));
                         } else {
-                            let size = serde_json::to_string(v)
-                                .map(|s| s.len())
-                                .unwrap_or(0);
+                            let size = AgentContext::format_size(e.data_size);
+                            let summary = e.summary.as_deref().unwrap_or("[摘要待补充]");
                             lines.push(format!(
-                                "- {}: ✓ ({})",
-                                k,
-                                AgentContext::format_size(size)
+                                "  - {}: ✅ {} — 执行摘要：{}",
+                                e.ref_id, size, summary
                             ));
                         }
                     }
-                    if lines.is_empty() {
-                        "（暂无可用前序结果）".to_string()
-                    } else {
-                        lines.join("\n")
-                    }
+                    lines.join("\n")
                 }
             }
             None => "（无步骤结果存储）".to_string(),
@@ -340,12 +370,13 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
 
                 // ── 2. 检查 DONE ──
                 if actions.is_empty() {
-                    let done_text =
+                    let done_text: String =
                         tool_executor::extract_text_content(&assistant_msg).unwrap_or_default();
                     self.ctx.push_assistant_message_raw(assistant_msg);
                     break Ok(ReActExecutionResult::success(
                         coarse_step.id.clone(),
                         serde_json::json!({"status": "done", "content": done_text}),
+                        None,  // DONE 场景无 observe 摘要
                         history,
                         iteration + 1,
                         start_time.elapsed().as_millis() as u64,
@@ -460,9 +491,11 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
 
                 // ── 5. observe 完成处理 ──
                 if observe_result.is_complete {
+                    let summary = Some(observe_result.summary.clone());
                     break Ok(ReActExecutionResult::success(
                         coarse_step.id.clone(),
                         final_obs.output.clone(),
+                        summary,
                         history,
                         iteration + 1,
                         start_time.elapsed().as_millis() as u64,
@@ -472,6 +505,12 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
                 iteration += 1;
             }
         };
+
+        // 保存完整对话历史到 logs/
+        if let Ok(ref exec_result) = result {
+            Self::save_messages_to_log(&coarse_step.id, exec_result, self.ctx.messages());
+        }
+
         result
     }
 
@@ -500,7 +539,7 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
                 if let Some(ref store) = self.store {
                     let guard = store
                         .read()
-                        .map_err(|e| anyhow::anyhow!("StepResultStore 读锁失败: {}", e))?;
+                        .map_err(|e| anyhow::anyhow!("StepStore 读锁失败: {}", e))?;
                     expand_refs(&mut parameters, &guard);
                 }
                 tool_executor::handle_ai_process(&self.ai_client, &parameters, start_time).await
@@ -511,7 +550,7 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
                     if let Some(ref store) = self.store {
                         let guard = store
                             .read()
-                            .map_err(|e| anyhow::anyhow!("StepResultStore 读锁失败: {}", e))?;
+                            .map_err(|e| anyhow::anyhow!("StepStore 读锁失败: {}", e))?;
                         expand_refs(&mut parameters, &guard);
                     }
                 }
