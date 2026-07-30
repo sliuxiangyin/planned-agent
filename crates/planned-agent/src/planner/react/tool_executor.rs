@@ -10,10 +10,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, Result};
-use chrono::Utc;
 use serde_json::Value;
-use std::fs;
-use tracing::{info, warn};
+use tracing::info;
 
 use planned_agent_core::ai::AiClient;
 use planned_agent_core::planner::coarse::CoarseGrainedStep;
@@ -28,9 +26,6 @@ use planned_agent_tool_manager::ToolRegistry;
 use super::agent_context::AgentContext;
 use super::chunk::ChunkStore;
 use super::step_store::StepStore;
-
-/// 工具输出保存到 logs 的阈值：超过 5KB 视为"大文件"
-const TOOL_OUTPUT_SAVE_THRESHOLD: usize = 5 * 1024;
 
 // ═══════════════════════════════════════════════════════════
 // 工具解析
@@ -105,67 +100,6 @@ pub(crate) fn build_tool_definitions(
             })
             .collect(),
     )
-}
-
-// ═══════════════════════════════════════════════════════════
-// 日志
-// ═══════════════════════════════════════════════════════════
-
-/// 将大工具输出保存到 logs/tool_outputs/ 目录，供后续清洗测试使用。
-///
-/// 文件名格式：`{tool_name}_{timestamp}_{short_hash}.json`
-pub(crate) fn save_tool_output_to_log(
-    tool_name: &str,
-    parameters: &Value,
-    raw_output: &Value,
-    call_id: &str,
-) {
-    let output_str = serde_json::to_string(raw_output).unwrap_or_default();
-    let output_len = output_str.len();
-
-    if output_len <= TOOL_OUTPUT_SAVE_THRESHOLD {
-        return;
-    }
-
-    // 确保目录存在
-    let log_dir = "logs/tool_outputs";
-    if let Err(e) = fs::create_dir_all(log_dir) {
-        warn!("无法创建工具输出日志目录 {}: {}", log_dir, e);
-        return;
-    }
-
-    // 构建文件名：工具名 + 时间戳 + call_id 前8位
-    let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
-    let short_id: String = call_id.chars().take(8).collect();
-    let filename = format!("{}/{}_{}_{}.json", log_dir, tool_name, timestamp, short_id);
-
-    // 构建保存内容：含元数据和原始输出
-    let record = serde_json::json!({
-        "tool_name": tool_name,
-        "timestamp": timestamp.to_string(),
-        "call_id": call_id,
-        "output_size": output_len,
-        "output_size_human": AgentContext::format_size(output_len),
-        "parameters": parameters,
-        "raw_output": raw_output,
-    });
-
-    match serde_json::to_string_pretty(&record) {
-        Ok(pretty_json) => {
-            if let Err(e) = fs::write(&filename, &pretty_json) {
-                warn!("保存工具输出到 {} 失败: {}", filename, e);
-            } else {
-                info!(
-                    "[DUMP] 大工具输出已保存 → {} ({})",
-                    filename,
-                    AgentContext::format_size(output_len)
-                );
-            }
-        }
-        Err(e) => {
-            warn!("序列化工具输出失败: {}", e);
-        }
-    }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -343,9 +277,6 @@ pub(crate) async fn handle_generic_tool(
         error: error_msg,
         duration_ms,
     };
-
-    // 大文件保存
-    save_tool_output_to_log(tool_name, &parameters, &raw_obs.output, call_id);
 
     Ok(raw_obs)
 }
