@@ -7,8 +7,10 @@ use tracing::info;
 use planned_agent_core::types::Tool;
 use planned_agent_core::tool_registry::{ToolSource, ToolCategory, ToolExecutor};
 use crate::types::{ToolMetadata, ToolRegistryStats, ToolOutcome};
-use crate::mcp_adapter::McpManagerTrait;
 use crate::validator::ToolValidator;
+// McpManagerTrait 已下沉到 core；这里通过 mcp_adapter 模块重新导出
+// （保持向后兼容，未来可以直接 `use planned_agent_core::tool_registry::traits::McpManagerTrait`）
+use crate::mcp_adapter::McpManagerTrait;
 
 /// 统一工具注册表（线程安全）
 pub struct ToolRegistry {

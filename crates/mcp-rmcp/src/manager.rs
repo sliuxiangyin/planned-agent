@@ -7,7 +7,8 @@ use tracing::{info, error};
 use async_trait::async_trait;
 use crate::client::McpClientImpl;
 use crate::tools::ToolManager;
-use planned_agent_tool_manager::McpManagerTrait;
+// McpManagerTrait 已下沉到 core，避免 mcp-rmcp 反向依赖 tool-manager
+use planned_agent_core::tool_registry::traits::McpManagerTrait;
 
 /// MCP 管理器，管理多个 MCP 服务器
 pub struct McpManager {

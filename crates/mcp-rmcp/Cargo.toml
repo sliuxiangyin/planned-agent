@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 planned-agent-core = { path = "../core" }
-planned-agent-tool-manager = { path = "../tool-manager" }
 rmcp = { version = "0.16", features = ["client", "transport-child-process"] }
 tokio.workspace = true
 serde.workspace = true

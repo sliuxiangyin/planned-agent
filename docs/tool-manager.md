@@ -168,15 +168,21 @@ pub trait CustomTool: Send + Sync {
 
 ### McpManagerTrait
 
-MCP 管理器 trait，用于解耦现有的 McpManager：
+> **位置变更（依赖反转）**：`McpManagerTrait` 已下沉到 `planned-agent-core::tool_registry::traits::McpManagerTrait`，
+> `tool-manager` 仅做 `pub use` 重新导出。这样 `mcp-rmcp` 不再反向依赖 `tool-manager`，
+> 三个 crate 的依赖方向是 `core ← tool-manager` 和 `core ← mcp-rmcp`，互不交叉。
+
+MCP 管理器 trait，用于解耦 `ToolRegistry` 与具体 MCP 实现（`mcp-rmcp`）：
 
 ```rust
+// 定义在 core（planned-agent-core/src/tool_registry/traits.rs）
 #[async_trait]
 pub trait McpManagerTrait: Send + Sync {
     async fn call_tool(&self, tool_name: &str, arguments: Value) -> Result<ToolResult>;
     fn get_all_tools(&self) -> Vec<Tool>;
     fn find_server_for_tool(&self, tool_name: &str) -> Option<String>;
     fn get_server_names(&self) -> Vec<String>;
+    fn get_server_categories(&self, server_name: &str) -> Option<Vec<String>>;
 }
 ```
 
@@ -370,10 +376,10 @@ planned-agent-tool-manager = { path = "../tool-manager" }
 
 ### 2. 为 McpManager 实现 McpManagerTrait
 
-在 `crates/mcp-rmcp/src/manager.rs` 中：
+在 `crates/mcp-rmcp/src/manager.rs` 中（注意：现在从 core 导入，不再需要 `tool-manager`）：
 
 ```rust
-use planned_agent_tool_manager::McpManagerTrait;
+use planned_agent_core::tool_registry::traits::McpManagerTrait;
 
 #[async_trait]
 impl McpManagerTrait for McpManager {

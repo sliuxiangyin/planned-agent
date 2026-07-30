@@ -8,14 +8,16 @@ pub mod builtin;
 
 // 重新导出主要类型（来自 core）
 pub use planned_agent_core::tool_registry::{
-    ToolSource, 
-    ToolCategory, 
-    ToolExecutor, 
+    ToolSource,
+    ToolCategory,
+    ToolExecutor,
     BuiltinToolProvider,
 };
+// McpManagerTrait 已下沉到 core；为兼容旧调用方式继续从本 crate 重新导出
+pub use planned_agent_core::tool_registry::traits::McpManagerTrait;
 
 // 导出本 crate 的类型
 pub use types::{ToolMetadata, ToolRegistryStats, ToolOutcome};
 pub use registry::ToolRegistry;
 pub use custom_tool::CustomToolExecutor;
-pub use mcp_adapter::{McpManagerTrait, McpManagerAdapter};
+pub use mcp_adapter::McpManagerAdapter;
