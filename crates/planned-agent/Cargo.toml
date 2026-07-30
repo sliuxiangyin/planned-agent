@@ -14,6 +14,7 @@ planned-agent-ai-manager = { path = "../ai-manager" }
 planned-agent-mcp-rmcp = { path = "../mcp-rmcp" }
 planned-agent-prompt-manager = { path = "../prompt-manager" }
 planned-agent-tool-manager = { path = "../tool-manager" }
+planned-agent-rag = { path = "../rag" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

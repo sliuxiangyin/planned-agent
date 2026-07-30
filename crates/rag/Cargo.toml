@@ -1,0 +1,18 @@
+[package]
+name = "planned-agent-rag"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+
+# PolarisDB 向量存储（纯 Rust，嵌入式，零外部依赖）
+polarisdb = { version = "0.1", features = ["async"] }
+
+# HTTP 客户端（OpenAI Embedding API）
+reqwest = { version = "0.12", features = ["json"] }
