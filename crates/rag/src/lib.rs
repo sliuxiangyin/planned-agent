@@ -11,5 +11,8 @@
 //! ```
 
 pub mod embedder;
-pub mod store;
 pub mod retriever;
+pub mod store;
+
+// 重新导出常用类型，方便外部调用
+pub use crate::store::polaris::PolarisDbStore;

@@ -9,6 +9,7 @@ members = [
     "crates/tool-manager",
     "crates/planned-agent",
     "crates/rag",
+    "crates/agent-gui",
 ]
 resolver = "2"
 
@@ -25,3 +26,4 @@ chrono = { version = "0.4", features = ["serde"] }
 once_cell = "1"
 crw-extract = "0.3"
 crw-core = "0.3"
+dioxus = { version = "0.7", features = ["desktop"] }

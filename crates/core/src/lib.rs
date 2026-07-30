@@ -1,8 +1,21 @@
-pub mod ai;
-pub mod mcp;
-pub mod planner;
-pub mod prompt;
-pub mod types;
-pub mod tool_registry;
-pub mod errors;
-pub mod events;
+//! planned-agent-core
+//!
+//! Agent 核心库，提供 AI 交互、规划、工具执行等抽象接口。
+
+// ═══════════════════════════════════════════════════════════
+// 公共接口模块（对外暴露）
+// ═══════════════════════════════════════════════════════════
+
+pub mod ai;       // AI 交互抽象（未来支持多 SDK）
+pub mod prompt;   // Prompt 管理抽象
+pub mod types;    // 全局共享类型
+
+// ═══════════════════════════════════════════════════════════
+// 内部实现模块（不对外暴露内部类型）
+// ═══════════════════════════════════════════════════════════
+
+pub mod tool_registry;  // 工具注册与执行
+pub mod planner;        // 规划器（Coarse/ReAct/RePlanner）
+pub mod mcp;           // MCP 协议
+pub mod errors;        // 错误类型
+pub mod events;        // 事件系统

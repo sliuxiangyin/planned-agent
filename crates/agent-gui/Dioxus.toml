@@ -1,0 +1,12 @@
+[application]
+name = "Planned Agent"
+default_platform = "desktop"
+
+[web.app]
+title = "Planned Agent"
+
+[web.resource]
+style = []
+
+[web.resource.dev]
+style = []

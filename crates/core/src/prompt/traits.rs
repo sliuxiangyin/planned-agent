@@ -1,36 +1,142 @@
+//! Prompt trait 定义
+
 use async_trait::async_trait;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use super::{PromptTemplate, PromptContext, PromptInfo};
+use std::collections::HashMap;
+
+// ═══════════════════════════════════════════════════════════
+// Prompt 相关类型（与 PromptManager trait 一起定义）
+// ═══════════════════════════════════════════════════════════
+
+/// 输出格式枚举
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputFormat {
+    Json,
+    Text,
+    Markdown,
+    Yaml,
+    Xml,
+}
+
+/// 输出格式定义
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputSchema {
+    /// 输出类型：json, text, markdown等
+    pub format: OutputFormat,
+    /// JSON Schema（当format为json时）
+    pub json_schema: Option<Value>,
+    /// 示例输出
+    pub example: Option<String>,
+    /// 输出约束说明（会添加到prompt中）
+    pub constraints: Option<String>,
+}
+
+/// Prompt模板
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptTemplate {
+    pub name: String,
+    pub content: String,
+    pub metadata: PromptMetadata,
+    pub output_schema: Option<OutputSchema>,
+}
+
+/// Prompt元数据
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptMetadata {
+    pub description: Option<String>,
+    pub version: Option<String>,
+    pub variables: Vec<PromptVariable>,
+    pub tags: Vec<String>,
+}
+
+/// Prompt变量定义
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptVariable {
+    pub name: String,
+    pub description: Option<String>,
+    pub required: bool,
+    pub default_value: Option<Value>,
+}
+
+/// Prompt上下文（用于渲染）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptContext {
+    pub variables: HashMap<String, Value>,
+    pub metadata: HashMap<String, Value>,
+}
+
+/// Prompt信息（用于列表）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptInfo {
+    pub name: String,
+    pub description: Option<String>,
+    pub variables: Vec<String>,
+    pub has_output_schema: bool,
+}
+
+impl PromptContext {
+    /// 创建新的空上下文
+    pub fn new() -> Self {
+        Self {
+            variables: HashMap::new(),
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// 添加变量
+    pub fn with_variable(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.variables.insert(key.into(), value);
+        self
+    }
+
+    /// 添加元数据
+    pub fn with_metadata(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.metadata.insert(key.into(), value);
+        self
+    }
+}
+
+impl Default for PromptContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
+// PromptManager trait
+// ═══════════════════════════════════════════════════════════
 
 /// Prompt管理器 trait
 #[async_trait]
 pub trait PromptManager: Send + Sync {
     /// 加载prompt模板
     async fn load_template(&self, name: &str) -> Result<PromptTemplate>;
-    
+
     /// 渲染prompt模板
     async fn render(&self, name: &str, context: &PromptContext) -> Result<String>;
-    
+
     /// 列出所有可用prompt
     async fn list_prompts(&self) -> Result<Vec<PromptInfo>>;
-    
+
     /// 检查prompt是否存在
     async fn exists(&self, name: &str) -> Result<bool>;
-    
+
     /// 重新加载所有prompt（用于热更新）
     async fn reload(&self) -> Result<()>;
-    
+
     /// 获取prompt的输出schema（如果定义了）
     async fn get_output_schema(&self, name: &str) -> Result<Option<Value>>;
-    
+
     /// 将LLM结果转换为结构化类型
     async fn parse_response<T: serde::de::DeserializeOwned>(
-        &self, 
-        name: &str, 
-        response: &str
+        &self,
+        name: &str,
+        response: &str,
     ) -> Result<T>;
-    
+
     /// 验证LLM结果是否符合schema
     async fn validate_response(&self, name: &str, response: &str) -> Result<bool>;
 }

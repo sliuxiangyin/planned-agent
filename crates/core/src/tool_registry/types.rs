@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use crate::types::Tool;
 
 /// 工具来源类型
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
