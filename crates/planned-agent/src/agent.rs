@@ -12,7 +12,6 @@ use planned_agent_tool_manager::builtin::system_tools::SystemToolsProvider;
 use planned_agent_tool_manager::builtin::data_tools::DataToolsProvider;
 use planned_agent_tool_manager::builtin::ai_tools::AiToolsProvider;
 use planned_agent_tool_manager::builtin::web_tools::WebToolsProvider;
-use planned_agent_tool_manager::builtin::step_result_tools::StepResultToolsProvider;
 use crate::planner::react::chunk::ChunkToolsProvider;
 use crate::planner::react::chunk::executor_context::ExecutorContext;
 use anyhow::Result;
@@ -42,7 +41,6 @@ impl Agent {
         tool_registry.register_builtin_provider(&DataToolsProvider);
         tool_registry.register_builtin_provider(&AiToolsProvider);
         tool_registry.register_builtin_provider(&WebToolsProvider);
-        tool_registry.register_builtin_provider(&StepResultToolsProvider);
         let chunk_provider = ChunkToolsProvider::new(exec_ctx.clone());
         tool_registry.register_builtin_provider(&chunk_provider);
 

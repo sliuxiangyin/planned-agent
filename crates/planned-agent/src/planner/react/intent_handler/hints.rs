@@ -49,7 +49,6 @@ impl StepIntent {
             StepIntent::DevFocus => "开发",
             StepIntent::DeviceFocus => "设备",
             StepIntent::UtilityFocus => "工具",
-            StepIntent::ReferenceFocus => "引用",
             StepIntent::MixedFocus => "",
         }
     }
@@ -65,7 +64,6 @@ impl StepIntent {
             StepIntent::DevFocus => DEV_HINT,
             StepIntent::DeviceFocus => DEVICE_HINT,
             StepIntent::UtilityFocus => UTILITY_HINT,
-            StepIntent::ReferenceFocus => REFERENCE_HINT,
             StepIntent::MixedFocus => "",
         }
     }
@@ -108,9 +106,7 @@ const UTILITY_HINT: &str = r#"- 当前聚焦工具 / 内置操作：使用工具
 - 选择最匹配意图的专用工具，避免用通用工具替代专业工具
 - 注意工具的输入约束，必要时拆分多次调用"#;
 
-const REFERENCE_HINT: &str = r##"- 当前步骤存在前序步骤结果，需要引用前序步骤产出的数据
-- 使用 builtin_fetch_step_result 工具获取引用数据
-"##;
+ 
 
 #[cfg(test)]
 mod tests {
@@ -165,7 +161,6 @@ mod tests {
             StepIntent::DevFocus,
             StepIntent::DeviceFocus,
             StepIntent::UtilityFocus,
-            StepIntent::ReferenceFocus,
         ] {
             assert!(!intent.label().is_empty(), "label 应非空: {:?}", intent);
             assert!(!intent.hint().is_empty(), "hint 应非空: {:?}", intent);
@@ -198,16 +193,14 @@ mod tests {
         assert_eq!(StepIntent::DeviceFocus.hint(), DEVICE_HINT);
         assert_eq!(StepIntent::UtilityFocus.label(), "工具");
         assert_eq!(StepIntent::UtilityFocus.hint(), UTILITY_HINT);
-        assert_eq!(StepIntent::ReferenceFocus.label(), "引用");
-        assert_eq!(StepIntent::ReferenceFocus.hint(), REFERENCE_HINT);
     }
 
     #[test]
     fn merged_intents_concatenate_label_and_hint() {
-        // BrowserFocus + ReferenceFocus → 标签用 " + " 连接，hint 合并
+        // BrowserFocus + FileFocus → 标签用 " + " 连接，hint 合并
         let flags = IntentHandler::handle(vec![
             StepIntent::BrowserFocus,
-            StepIntent::ReferenceFocus,
+            StepIntent::FileFocus,
         ]);
         assert_eq!(
             flags.get("has_intent_hint").and_then(|v| v.as_bool()),
@@ -215,9 +208,9 @@ mod tests {
         );
         assert_eq!(
             flags.get("intent_label").and_then(|v| v.as_str()),
-            Some("浏览器 + 引用")
+            Some("浏览器 + 文件")
         );
-        let expected_hint = format!("{}\n{}", BROWSER_HINT, REFERENCE_HINT);
+        let expected_hint = format!("{}\n{}", BROWSER_HINT, FILE_HINT);
         assert_eq!(
             flags.get("intent_hint").and_then(|v| v.as_str()),
             Some(expected_hint.as_str())

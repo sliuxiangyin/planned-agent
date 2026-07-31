@@ -41,8 +41,10 @@ pub struct Action {
 /// 观察
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Observation {
-    /// 工具输出
+    /// 工具处理后输出输出
     pub output: Value,
+    //原始输出
+    pub raw_output: Value,
     /// 是否完成目标
     pub is_complete: bool,
     /// 错误信息（如果有）

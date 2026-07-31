@@ -75,7 +75,7 @@ impl AgentContext {
         match steps {
             Some(steps) if !steps.is_empty() => steps
                 .iter()
-                .map(|s| format!("- 步骤{}: {}", s.order, s.intent))
+                .map(|s| format!("- 步骤{} ({}): {}", s.order, s.result_reference, s.intent))
                 .collect::<Vec<_>>()
                 .join("\n"),
             _ => "无".to_string(),

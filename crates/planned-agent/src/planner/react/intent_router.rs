@@ -17,7 +17,7 @@
 use planned_agent_core::planner::coarse::CoarseGrainedStep;
 use planned_agent_core::tool_registry::types::ToolCategory;
 
-/// 步骤主导意图（按行为焦点划分，与 `ToolCategory` 一一对应 + 兜底变体 + 引用意图）。
+/// 步骤主导意图（按行为焦点划分，与 `ToolCategory` 一一对应 + 兜底变体）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StepIntent {
     BrowserFocus,
@@ -28,8 +28,6 @@ pub enum StepIntent {
     DevFocus,
     DeviceFocus,
     UtilityFocus,
-    /// 多步骤间数据引用：当前步骤存在前序步骤结果，应提示 AI 使用引用工具。
-    ReferenceFocus,
     /// 多个 ToolCategory 同时出现 / 推荐列表为空 / 解析失败 —— 兜底。
     MixedFocus,
 }
@@ -44,16 +42,11 @@ impl IntentRouter {
     /// 由 `IntentHandler` 合并为单一提示文案。
     ///
     /// 解析策略：
-    /// 1. 若 `has_previous_results` 为 true → 追加 `ReferenceFocus`
-    /// 2. 若 `recommended_tool_categories` 存在 → 按优先级映射到对应 `StepIntent`
-    /// 3. 若无任何意图 → 返回 `[MixedFocus]`
+    /// 1. 若 `recommended_tool_categories` 存在 → 按优先级映射到对应 `StepIntent`
+    /// 2. 若无任何意图 → 返回 `[MixedFocus]`
     pub fn route(step: &CoarseGrainedStep ) -> Vec<StepIntent> {
         let mut intents = Vec::new();
 
-        // 引用意图优先级最高，始终排在第一位
-        if !step.dependencies.is_empty() {
-            intents.push(StepIntent::ReferenceFocus);
-        }
 
         // 类别意图（取优先级最高的一个）
         if let Some(cats) = &step.recommended_tool_categories {
@@ -191,28 +184,6 @@ mod tests {
                 ToolCategory::System,
             ]))),
             vec![StepIntent::SystemFocus]
-        );
-    }
-
-    #[test]
-    fn dependencies_trigger_reference_focus() {
-        // 有依赖 → ReferenceFocus + 类别意图并存
-        assert_eq!(
-            IntentRouter::route(&make_step_with_deps(
-                Some(vec![ToolCategory::Browser]),
-                vec!["#E1".into()]
-            )),
-            vec![StepIntent::ReferenceFocus, StepIntent::BrowserFocus]
-        );
-        // 有依赖但无类别 → 仅 ReferenceFocus
-        assert_eq!(
-            IntentRouter::route(&make_step_with_deps(None, vec!["#E1".into()])),
-            vec![StepIntent::ReferenceFocus]
-        );
-        // 无依赖（首步）→ 不触发 ReferenceFocus
-        assert_eq!(
-            IntentRouter::route(&make_step(Some(vec![ToolCategory::Browser]))),
-            vec![StepIntent::BrowserFocus]
         );
     }
 }

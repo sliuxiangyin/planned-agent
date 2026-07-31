@@ -32,10 +32,74 @@ impl Clone for FilePromptManager {
 }
 
 impl FilePromptManager {
+    /// 修复 JSON 字符串值中 LLM 常犯的错误：未转义的双引号。
+    ///
+    /// 问题示例：
+    ///   `"reasoning": "...section中的"某某标题"..."` 
+    ///   → 内层 `"` 会提前终止字符串，导致 JSON 解析失败。
+    ///
+    /// 策略：状态机扫描，当处于字符串内部时，若遇到 `"` 且后邻字符
+    /// 不是 JSON 结构符（`,` `}` `]` `:` 或空白），则判定为需转义的
+    /// 内容引号，自动在前面插入 `\`。
+    fn repair_json_string_quotes(json_str: &str) -> String {
+        let chars: Vec<char> = json_str.chars().collect();
+        // 预分配，避免反复扩容
+        let mut result = String::with_capacity(json_str.len() + json_str.len() / 20);
+        let mut i = 0;
+        let mut in_string = false;
+
+        while i < chars.len() {
+            let ch = chars[i];
+
+            // 已转义序列 → 原样透传两个字符
+            if ch == '\\' && in_string && i + 1 < chars.len() {
+                result.push(ch);
+                result.push(chars[i + 1]);
+                i += 2;
+                continue;
+            }
+
+            if ch == '"' {
+                if !in_string {
+                    // 进入字符串
+                    in_string = true;
+                    result.push(ch);
+                } else {
+                    // 字符串内遇到 `"`：判断是真正的结束引号还是需修复的内容引号
+                    let is_terminator = {
+                        let rest: String = chars[i + 1..].iter().take(50).collect();
+                        let t = rest.trim_start();
+                        t.is_empty()
+                            || t.starts_with(',')
+                            || t.starts_with('}')
+                            || t.starts_with(']')
+                            || t.starts_with(':')
+                    };
+
+                    if is_terminator {
+                        in_string = false;
+                        result.push(ch);
+                    } else {
+                        // 内容引号 → 转义
+                        result.push('\\');
+                        result.push(ch);
+                    }
+                }
+                i += 1;
+                continue;
+            }
+
+            result.push(ch);
+            i += 1;
+        }
+
+        result
+    }
+
     /// 清理LLM响应，去掉markdown代码块标记和多余文本
     fn clean_json_response(&self, response: &str) -> String {
         let trimmed = response.trim();
-        
+
         // 去掉 ```json 和 ``` 标记
         if trimmed.starts_with("```json") && trimmed.ends_with("```") {
             return trimmed[7..trimmed.len()-3].trim().to_string();
@@ -43,7 +107,7 @@ impl FilePromptManager {
         if trimmed.starts_with("```") && trimmed.ends_with("```") {
             return trimmed[3..trimmed.len()-3].trim().to_string();
         }
-        
+
         // 尝试提取JSON部分
         // 查找第一个 { 或 [
         if let Some(start) = trimmed.find('{').or_else(|| trimmed.find('[')) {
@@ -55,10 +119,18 @@ impl FilePromptManager {
                     if serde_json::from_str::<serde_json::Value>(json_part).is_ok() {
                         return json_part.to_string();
                     }
+                    // 原始 JSON 无效，尝试修复未转义引号后重试
+                    let repaired = Self::repair_json_string_quotes(json_part);
+                    if repaired != json_part {
+                        if serde_json::from_str::<serde_json::Value>(&repaired).is_ok() {
+                            tracing::warn!("JSON 已自动修复未转义引号");
+                            return repaired;
+                        }
+                    }
                 }
             }
         }
-        
+
         // 如果以上都不匹配，返回原始响应
         trimmed.to_string()
     }

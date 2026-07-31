@@ -3,7 +3,7 @@
 //! 核心职责：
 //! - 维护 Agent 生命周期（配置、依赖注入）
 //! - ReAct 主循环（think+act → execute → observe）
-//! - 委托给子模块：消息管理（agent_context）、工具执行（tool_executor）、引用展开（ref_expander）
+//! - 委托给子模块：消息管理（agent_context）、工具执行（tool_executor）
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -18,15 +18,28 @@ use planned_agent_core::ai::AiClient;
 use planned_agent_core::planner::coarse::CoarseGrainedStep;
 use planned_agent_core::planner::react::*;
 use planned_agent_core::prompt::{PromptContext, PromptManager};
+use planned_agent_core::tool_registry::ToolCategory;
 use planned_agent_core::types::{Message, MessageContent, PlanContext};
 use planned_agent_tool_manager::ToolRegistry;
 
 use super::agent_context::AgentContext;
 use super::chunk::ChunkStore;
 use super::chunk::executor_context::ExecutorContext;
-use super::ref_expander::expand_refs;
 use super::step_store::StepStore;
 use super::tool_executor;
+
+/// 引用数据自动展开的上限（字节），超过此大小走 chunk_store 分片
+const MAX_EXPAND_BYTES: usize = 800;
+
+/// 检测工具输出中是否包含 MCP 文件引用
+///
+/// 识别模式如 `[Evaluation result](./xxx.html)`、`[File](./xxx)`
+fn has_file_output(output: &Value) -> bool {
+    output
+        .as_str()
+        .map(|s| s.contains("./") || s.contains("]/"))
+        .unwrap_or(false)
+}
 
 /// 默认 ReAct Agent 实现
 pub struct DefaultReActAgent<PM: PromptManager> {
@@ -44,6 +57,8 @@ pub struct DefaultReActAgent<PM: PromptManager> {
     store: Option<StepStore>,
     /// 分片缓存（工具输出大文本自动分片）
     chunk_store: Arc<ChunkStore>,
+    /// 运行时增强后的工具分类（根据依赖产出动态补充，如依赖产出含文件引用则补 File）
+    augmented_categories: Option<Vec<ToolCategory>>,
 }
 
 impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
@@ -66,6 +81,7 @@ impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
             ctx: AgentContext::new(),
             store: None,
             chunk_store,
+            augmented_categories: None,
         }
     }
 
@@ -127,42 +143,106 @@ impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
             .unwrap_or("无")
             .to_string();
 
-        // 构建工具名称列表（文本形式注入 System prompt）
+        // ── 先处理依赖，构建前序结果 + 检测文件引用 ──
         let step_categories = coarse_step
             .recommended_tool_categories
             .as_deref()
             .unwrap_or(&[]);
-        let tool_names =
-            tool_executor::get_tools_description(&self.tool_registry, step_categories);
+        let mut has_file_ref = false;
 
-        // 构建后续步骤摘要
-        let remaining_steps_str = AgentContext::build_remaining_steps_str(remaining_steps);
-
-        // 读取前序步骤结果（从共享 store），生成摘要避免系统提示膨胀
         let previous_results_str = match &self.store {
             Some(store) => {
-                let entries = store.list_entries().unwrap_or_default();
-                if entries.is_empty() {
+                if coarse_step.dependencies.is_empty() {
                     "（暂无前序步骤结果）".to_string()
                 } else {
-                    let mut lines: Vec<String> = Vec::new();
-                    for e in &entries {
-                        if e.is_error {
-                            lines.push(format!("  - {}: ❌ 失败 — 此步骤无可用数据", e.ref_id));
-                        } else {
-                            let size = AgentContext::format_size(e.data_size);
-                            let summary = e.summary.as_deref().unwrap_or("[摘要待补充]");
-                            lines.push(format!(
-                                "  - {}: ✅ {} — 执行摘要：{}",
-                                e.ref_id, size, summary
-                            ));
+                    let mut blocks: Vec<String> = Vec::new();
+                    let mut has_chunked = false;
+                    for dep_ref in &coarse_step.dependencies {
+                        let output = match store.get_output(dep_ref) {
+                            Some(v) => v,
+                            None => {
+                                blocks.push(format!("步骤 {}: ⚠️ 引用数据未找到", dep_ref));
+                                continue;
+                            }
+                        };
+
+                        // 检测依赖产出是否包含文件引用（运行时动态补充 File 分类）
+                        if has_file_output(&output) {
+                            has_file_ref = true;
                         }
+
+                        let is_error = output
+                            .get("error")
+                            .and_then(|e| e.as_bool())
+                            .unwrap_or(false);
+
+                        if is_error {
+                            blocks.push(format!("步骤 {}: ❌ 失败 — 此步骤无可用数据", dep_ref));
+                            continue;
+                        }
+
+                        let summary = store
+                            .get_summary(dep_ref)
+                            .unwrap_or_else(|| "[摘要待补充]".to_string());
+
+                        let size = serde_json::to_string(&output)
+                            .map(|s| s.len())
+                            .unwrap_or(0);
+
+                        let result_display = if size <= MAX_EXPAND_BYTES {
+                            // 小数据：直接序列化展示
+                            serde_json::to_string_pretty(&output)
+                                .unwrap_or_else(|_| format!("{:?}", output))
+                        } else {
+                            // 大数据：送 chunk_store 转为分片视图
+                            has_chunked = true;
+                            match self
+                                .chunk_store
+                                .handle(output.clone(), &format!("prev_{}", dep_ref))
+                                .await
+                            {
+                                Ok(view) => serde_json::to_string_pretty(&view)
+                                    .unwrap_or_else(|_| format!("{:?}", view)),
+                                Err(e) => format!("(分片处理失败: {})", e),
+                            }
+                        };
+
+                        blocks.push(format!(
+                            "步骤 {}\n- 执行摘要: {}\n- 执行结果:\n{}",
+                            dep_ref, summary, result_display
+                        ));
                     }
-                    lines.join("\n")
+                    let results = blocks.join("\n\n");
+                    if has_chunked {
+                        format!("（部分数据较大已转为分片视图，可通过 chunk_read / chunk_search 导航）\n\n{}", results)
+                    } else {
+                        results
+                    }
                 }
             }
             None => "（无步骤结果存储）".to_string(),
         };
+
+        // ── 运行时增强工具分类：依赖产出含文件引用时补 File ──
+        let effective_categories: Option<Vec<ToolCategory>> = if has_file_ref
+            && !step_categories.iter().any(|c| matches!(c, ToolCategory::File))
+        {
+            let mut cats: Vec<ToolCategory> = step_categories.to_vec();
+            cats.push(ToolCategory::File);
+            Some(cats)
+        } else {
+            None
+        };
+        self.augmented_categories = effective_categories.clone();
+
+        let tool_categories = effective_categories
+            .as_deref()
+            .unwrap_or(step_categories);
+        let tool_names =
+            tool_executor::get_tools_description(&self.tool_registry, tool_categories);
+
+        // 构建后续步骤摘要
+        let remaining_steps_str = AgentContext::build_remaining_steps_str(remaining_steps);
 
         // 动态渲染 System prompt（注入 step 上下文 + 工具名称 + intent_hints）
         let prompt_context = self.ctx.with_intent_flags(
@@ -200,8 +280,12 @@ impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
         &mut self,
         coarse_step: &CoarseGrainedStep,
     ) -> Result<(Vec<Action>, Message)> {
-        // 按 step 构建 tools 定义（含类别工具 + 引用工具）
-        let tools = tool_executor::build_tool_definitions(&self.tool_registry, coarse_step);
+        // 按 step 构建 tools 定义（含运行时增强的分类）
+        let tools = tool_executor::build_tool_definitions(
+            &self.tool_registry,
+            coarse_step,
+            self.augmented_categories.as_deref(),
+        );
 
         // 调用 LLM（带 tools），LLM 自主决策：输出 tool_calls 或回复 DONE
         let assistant_msg =
@@ -426,6 +510,7 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
                             error!("Execute tool failed: {}", e);
                             Observation {
                                 output: Value::Null,
+                                raw_output: Value::Null,
                                 is_complete: false,
                                 error: Some(e.to_string()),
                                 duration_ms: 0,
@@ -458,6 +543,7 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
                 // ── 4. OBSERVE（范围守卫：每次 ACT 后检查是否越界）──
                 let final_obs = last_observation.unwrap_or(Observation {
                     output: Value::Null,
+                    raw_output: Value::Null,
                     is_complete: false,
                     error: Some("No actions executed".to_string()),
                     duration_ms: 0,
@@ -492,9 +578,10 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
                 // ── 5. observe 完成处理 ──
                 if observe_result.is_complete {
                     let summary = Some(observe_result.summary.clone());
+                    //最后完成 output 输出原始数据
                     break Ok(ReActExecutionResult::success(
                         coarse_step.id.clone(),
-                        final_obs.output.clone(),
+                        final_obs.raw_output.clone(),
                         summary,
                         history,
                         iteration + 1,
@@ -535,25 +622,9 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
         // ── 路由到对应处理器 ──
         match tool_name.as_str() {
             "ai_process" => {
-                // 先展开引用再调用 AI 子流程
-                if let Some(ref store) = self.store {
-                    let guard = store
-                        .read()
-                        .map_err(|e| anyhow::anyhow!("StepStore 读锁失败: {}", e))?;
-                    expand_refs(&mut parameters, &guard);
-                }
                 tool_executor::handle_ai_process(&self.ai_client, &parameters, start_time).await
             }
             _ => {
-                // expand_refs：对标识符类工具（reference 用于查找，非数据展开）跳过
-                if tool_name != "builtin_fetch_step_result" {
-                    if let Some(ref store) = self.store {
-                        let guard = store
-                            .read()
-                            .map_err(|e| anyhow::anyhow!("StepStore 读锁失败: {}", e))?;
-                        expand_refs(&mut parameters, &guard);
-                    }
-                }
                 tool_executor::handle_generic_tool(
                     &self.tool_registry,
                     &self.chunk_store,

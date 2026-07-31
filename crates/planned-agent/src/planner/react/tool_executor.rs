@@ -63,25 +63,19 @@ pub(crate) fn get_tools_description(
     desc
 }
 
-/// 根据 step 构建 ToolDefinition 列表（含类别工具 + 引用工具）
+/// 根据 step 构建 ToolDefinition 列表（含类别工具）
+///
+/// `override_categories` 允许调用方替换 step 的静态分类（如运行时根据依赖产出动态补充）。
 ///
 /// 返回 None 表示无可用工具。
 pub(crate) fn build_tool_definitions(
     tool_registry: &Arc<ToolRegistry>,
     step: &CoarseGrainedStep,
+    override_categories: Option<&[ToolCategory]>,
 ) -> Option<Vec<ToolDefinition>> {
-    let categories = step.recommended_tool_categories.as_deref().unwrap_or(&[]);
-    let mut tools = resolve_tools(tool_registry, categories);
-
-    if !step.dependencies.is_empty() {
-        // 只在分类解析结果中不存在时才添加 fetch_step_result，避免重复
-        let already_has = tools.iter().any(|t| t.name == "builtin_fetch_step_result");
-        if !already_has {
-            if let Some(fetch_tool) = tool_registry.get_tool("builtin_fetch_step_result") {
-                tools.push(fetch_tool);
-            }
-        }
-    }
+    let categories = override_categories
+        .unwrap_or(step.recommended_tool_categories.as_deref().unwrap_or(&[]));
+    let tools = resolve_tools(tool_registry, categories);
 
     if tools.is_empty() {
         return None;
@@ -194,7 +188,8 @@ pub(crate) async fn handle_ai_process(
 
                 let duration_ms = start_time.elapsed().as_millis() as u64;
                 return Ok(Observation {
-                    output,
+                    output:output.clone(),
+                    raw_output:output,
                     is_complete: false,
                     error: None,
                     duration_ms,
@@ -211,6 +206,7 @@ pub(crate) async fn handle_ai_process(
     let duration_ms = start_time.elapsed().as_millis() as u64;
     Ok(Observation {
         output: Value::Null,
+        raw_output: Value::Null,
         is_complete: false,
         error: Some(format!(
             "AI处理失败（重试{}次后）: {}",
@@ -227,25 +223,12 @@ pub(crate) async fn handle_ai_process(
 pub(crate) async fn handle_generic_tool(
     tool_registry: &Arc<ToolRegistry>,
     chunk_store: &Arc<ChunkStore>,
-    store: &Option<StepStore>,
+    _store: &Option<StepStore>,
     tool_name: &str,
     mut parameters: Value,
     call_id: &str,
     start_time: Instant,
 ) -> Result<Observation> {
-    // fetch_step_result：将 StepResultStore 注入 parameters，让 executor 自行查找
-    if tool_name == "builtin_fetch_step_result" {
-        if let Some(ref store) = store {
-            let guard = store
-                .read()
-                .map_err(|e| anyhow::anyhow!("StepStore 读锁失败: {}", e))?;
-            let results_map = serde_json::to_value(&*guard)?;
-            if let Some(obj) = parameters.as_object_mut() {
-                obj.insert("results".to_string(), results_map);
-            }
-        }
-    }
-
     let outcome_result = tool_registry.call_tool(tool_name, parameters.clone()).await;
 
     let duration_ms = start_time.elapsed().as_millis() as u64;
@@ -255,6 +238,7 @@ pub(crate) async fn handle_generic_tool(
         Err(e) => {
             return Ok(Observation {
                 output: Value::Null,
+                raw_output: Value::Null,
                 is_complete: false,
                 error: Some(e.to_string()),
                 duration_ms,
@@ -263,7 +247,7 @@ pub(crate) async fn handle_generic_tool(
     };
 
     // 通过 ChunkStore 处理输出：大文本自动分片，小文本原样透传
-    let processed_output = chunk_store.handle(outcome.result.content, tool_name).await?;
+    let processed_output = chunk_store.handle(outcome.result.content.clone(), tool_name).await?;
 
     let error_msg = if outcome.result.is_error {
         Some(extract_error_content(&processed_output))
@@ -273,6 +257,7 @@ pub(crate) async fn handle_generic_tool(
 
     let raw_obs = Observation {
         output: processed_output,
+        raw_output: outcome.result.content,
         is_complete: false,
         error: error_msg,
         duration_ms,
