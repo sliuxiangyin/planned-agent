@@ -1,1 +1,0 @@
-"{\"title\":\"DeepSeek-V4-Flash正式版API上线公测\",\"content\":\"7月31日消息，DeepSeek-V4-Flash正式版API上线公测。据介绍，本次仅升级了DeepSeek-V4-Flash的API接口，DeepSeek-V4-ProAPI及APP/WEB端模型未做更改。DeepSeek-V4-Pro正式版将会尽快发布。\\n\\n特别声明：以上文章内容仅代表作者本人观点，不代表新浪网观点或立场。如有关于作品内容、版权或其它问题请于作品发表后的30日内与新浪网联系。\"}"

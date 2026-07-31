@@ -1,5 +1,7 @@
 use anyhow::Result;
 use config::Config;
+use planned_agent_core::types::ThinkingConfig;
+use planned_agent_prompt_manager::PromptManagerConfig;
 use serde::{Deserialize, Serialize};
 
 /// agent-gui 完整配置
@@ -12,6 +14,10 @@ pub struct GuiConfig {
     /// MCP 服务器列表
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+
+    /// Prompt 管理器配置
+    #[serde(default)]
+    pub prompt_manager: PromptManagerConfig,
 
     /// 日志配置
     #[serde(default)]
@@ -42,6 +48,9 @@ pub struct AiProviderConfig {
     pub base_url: Option<String>,
     #[serde(default)]
     pub is_default: bool,
+    /// 思考模式配置（适用于支持思考模式的 AI 模型）
+    #[serde(default)]
+    pub thinking_config: Option<ThinkingConfig>,
 }
 
 /// MCP 服务器配置
@@ -61,6 +70,9 @@ pub struct McpServerConfig {
     pub is_default: bool,
     #[serde(default)]
     pub categories: Option<Vec<String>>,
+    /// 工具过滤器（仅加载指定工具）
+    #[serde(default)]
+    pub tools_filter: Option<Vec<String>>,
 }
 
 fn default_transport() -> String {
@@ -131,6 +143,7 @@ impl Default for GuiConfig {
         Self {
             ai_providers: Vec::new(),
             mcp_servers: Vec::new(),
+            prompt_manager: PromptManagerConfig::default(),
             logging: LoggingConfig::default(),
             gui: GuiSettings::default(),
             rag: RagConfig::default(),

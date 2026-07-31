@@ -1,0 +1,55 @@
+/* ========================================================================
+ * resizable_panel.css — ResizablePanel 组件样式
+ * ===================================================================== */
+
+.resizable-panel {
+    display: flex;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+}
+
+.resizable-panel__left {
+    height: 100%;
+    overflow: hidden;
+    flex-shrink: 0;
+}
+
+.resizable-panel__divider {
+    width: 6px;
+    height: 100%;
+    cursor: col-resize;
+    flex-shrink: 0;
+    display: flex;
+    align-items: stretch;
+    justify-content: center;
+    background: transparent;
+    transition: background-color 150ms;
+}
+
+.resizable-panel__divider:hover,
+.resizable-panel--dragging .resizable-panel__divider {
+    background-color: var(--primary-color-7);
+}
+
+/* 覆盖 separator 组件的 1px 宽度，继承主题色 */
+.resizable-panel__divider .dx-separator[data-orientation="vertical"] {
+    background-color: var(--primary-color-6);
+}
+
+.resizable-panel__right {
+    flex: 1;
+    height: 100%;
+    overflow: hidden;
+    min-width: 0;
+}
+
+.resizable-panel__overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 9999;
+    cursor: col-resize;
+}

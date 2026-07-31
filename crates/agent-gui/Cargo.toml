@@ -11,7 +11,14 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-appender = "0.2"
 chrono = { workspace = true }
 config = "0.13"
 anyhow = "1"
+planned-agent-core = { path = "../core" }
+planned-agent-ai-manager = { path = "../ai-manager" }
+planned-agent-mcp-rmcp = { path = "../mcp-rmcp" }
+planned-agent-prompt-manager = { path = "../prompt-manager" }
+planned-agent-tool-manager = { path = "../tool-manager" }
 planned-agent-rag = { path = "../rag" }
+dioxus-primitives = { git = "https://github.com/DioxusLabs/components", version = "0.0.1", default-features = false }
