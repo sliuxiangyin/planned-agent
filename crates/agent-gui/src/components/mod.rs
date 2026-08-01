@@ -7,3 +7,4 @@ pub mod scroll_area;
 pub mod separator;
 pub mod textarea;
 pub mod todo;
+pub mod select;

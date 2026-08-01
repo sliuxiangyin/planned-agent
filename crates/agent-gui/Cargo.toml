@@ -27,3 +27,4 @@ planned-agent-tool-manager = { path = "../tool-manager" }
 planned-agent-rag = { path = "../rag" }
 planned-agent = { path = "../planned-agent" }
 dioxus-primitives = { git = "https://github.com/DioxusLabs/components", version = "0.0.1", default-features = false }
+dioxus-icons = { version = "0.1.0", default-features = false }
