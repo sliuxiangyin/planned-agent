@@ -1,0 +1,68 @@
+/* ── ReasoningView 组件样式 ─────────────────────────────────────────── */
+
+.reasoning-view {
+    margin-bottom: 8px;
+    border-radius: 8px;
+    background: rgba(255, 200, 80, 0.06);
+    border-left: 2px solid var(--secondary-color-3);
+    overflow: hidden;
+    transition: background 0.3s ease;
+}
+
+/* 流式思考中：呼吸 / 脉冲动画 */
+.reasoning-view[data-active="true"] {
+    animation: reasoning-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes reasoning-pulse {
+    0%, 100% {
+        background: rgba(255, 200, 80, 0.06);
+        box-shadow: 0 0 0 0 rgba(255, 200, 80, 0);
+    }
+    50% {
+        background: rgba(255, 200, 80, 0.20);
+        box-shadow: 0 0 0 3px rgba(255, 200, 80, 0.25);
+    }
+}
+
+.reasoning-view__header {
+    padding: 6px 10px;
+    cursor: pointer;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.8rem;
+    color: var(--secondary-color-3);
+}
+
+.reasoning-view__header:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.reasoning-view__chevron {
+    flex-shrink: 0;
+    transition: transform 0.2s ease;
+}
+
+/* 展开时 chevron 旋转 */
+.reasoning-view[data-open="true"] .reasoning-view__chevron {
+    transform: rotate(180deg);
+}
+
+.reasoning-view__status {
+    font-variant-numeric: tabular-nums;
+}
+
+.reasoning-view__body {
+    padding: 6px 12px 10px;
+    border-top: 1px dashed rgba(255, 255, 255, 0.08);
+    font-size: 0.85em;
+    opacity: 0.9;
+    max-height: 280px;
+    overflow-y: auto;
+}
+
+.reasoning-view__body .markdown {
+    opacity: 0.85;
+}

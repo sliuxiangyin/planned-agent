@@ -41,6 +41,7 @@ pub(super) fn send_message(
     chat_signal: ChatServiceSignal,
     mut input_text: Signal<String, SyncStorage>,
     mut messages: Signal<Vec<Message>, SyncStorage>,
+    mut reasoning_texts: Signal<Vec<Option<String>>, SyncStorage>,
     mut streaming_idx: Signal<Option<usize>, SyncStorage>,
     mut pending_ui: Signal<Option<PendingUIState>, SyncStorage>,
 ) {
@@ -53,6 +54,7 @@ pub(super) fn send_message(
     pending_ui.set(None);
 
     // 1. 推入 User 消息 + Assistant 占位，并记录 Assistant 的下标
+    //    同时在 reasoning_texts 中对齐占位：user → None；assistant → Some("")
     let user_msg: Message = Message {
         role: MessageRole::User,
         content: Some(MessageContent::Text { text: text.clone() }),
@@ -67,8 +69,11 @@ pub(super) fn send_message(
     {
         let mut msgs = messages.write();
         msgs.push(user_msg);
+        reasoning_texts.write().push(None);
         asst_idx = msgs.len();
         msgs.push(asst_msg);
+        // assistant 占位配一个空 reasoning buffer；后续 ReasoningDelta 累积到这里
+        reasoning_texts.write().push(Some(String::new()));
     }
     streaming_idx.set(Some(asst_idx));
     input_text.set(String::new());
@@ -85,7 +90,13 @@ pub(super) fn send_message(
     };
 
     // 3. 转发到异步消费（在 spawn 里把 messages / streaming_idx / pending_ui 移交给 future）
-    spawn(run_chat_stream(chat, messages, streaming_idx, pending_ui));
+    spawn(run_chat_stream(
+        chat,
+        messages,
+        reasoning_texts,
+        streaming_idx,
+        pending_ui,
+    ));
 }
 
 /// 异步消费 ChatEvent：实时写 signal 到 Dioxus runtime，立即 yield。
@@ -96,6 +107,7 @@ pub(super) fn send_message(
 async fn run_chat_stream(
     chat: Arc<ChatService<FilePromptManager>>,
     mut messages: Signal<Vec<Message>, SyncStorage>,
+    mut reasoning_texts: Signal<Vec<Option<String>>, SyncStorage>,
     mut streaming_idx: Signal<Option<usize>, SyncStorage>,
     mut pending_ui: Signal<Option<PendingUIState>, SyncStorage>,
 ) {
@@ -109,6 +121,14 @@ async fn run_chat_stream(
                         if let Some(t) = display_text_mut(msg) {
                             t.push_str(&chunk);
                         }
+                    }
+                }
+            }
+            ChatEvent::ReasoningDelta(chunk) => {
+                // 实时追加 chunk 到当前 streaming 的 Assistant 的 reasoning buffer
+                if let Some(idx) = *streaming_idx.read() {
+                    if let Some(Some(buf)) = reasoning_texts.write().get_mut(idx) {
+                        buf.push_str(&chunk);
                     }
                 }
             }
@@ -152,8 +172,10 @@ async fn run_chat_stream(
 /// 3. 继续 chat_with_callback 获取 LLM 后续响应
 pub(super) fn handle_user_action(
     action: UIAction,
+    choice: String,
     pending: PendingUIState,
     mut messages: Signal<Vec<Message>, SyncStorage>,
+    mut reasoning_texts: Signal<Vec<Option<String>>, SyncStorage>,
     mut streaming_idx: Signal<Option<usize>, SyncStorage>,
     mut pending_ui: Signal<Option<PendingUIState>, SyncStorage>,
     chat_signal: ChatServiceSignal,
@@ -168,7 +190,7 @@ pub(super) fn handle_user_action(
                 *content = serde_json::to_string(&serde_json::json!({
                     "action_id": action.id,
                     "action_type": serde_json::to_value(&action.action_type).unwrap_or_default(),
-                    "choice": action.label,
+                    "choice": choice,
                 }))
                 .unwrap_or_default();
                 break;
@@ -178,6 +200,13 @@ pub(super) fn handle_user_action(
 
     // 3. 更新 UI messages（展示用户选择）
     messages.set(history.clone());
+
+    // 同步 reasoning_texts：history 中历史消息都没有正在 streaming 的 reasoning
+    {
+        let mut r = reasoning_texts.write();
+        r.clear();
+        r.resize(history.len(), None);
+    }
 
     // 4. 清除 pending 状态
     pending_ui.set(None);
@@ -194,6 +223,7 @@ pub(super) fn handle_user_action(
             }),
             ..Default::default()
         });
+        reasoning_texts.write().push(Some(String::new()));
     }
     streaming_idx.set(Some(asst_idx));
 
@@ -217,6 +247,13 @@ pub(super) fn handle_user_action(
                             if let Some(t) = display_text_mut(msg) {
                                 t.push_str(&chunk);
                             }
+                        }
+                    }
+                }
+                ChatEvent::ReasoningDelta(chunk) => {
+                    if let Some(idx) = *streaming_idx.read() {
+                        if let Some(Some(buf)) = reasoning_texts.write().get_mut(idx) {
+                            buf.push_str(&chunk);
                         }
                     }
                 }

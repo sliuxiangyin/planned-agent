@@ -14,11 +14,17 @@ use crate::context::{InitStatus, ModuleState};
 use crate::services::chat_service::use_chat_service;
 use planned_agent::ChatConfig;
 
+use super::components::chat_ui_actions_view::ChatUIActionsView;
+use super::components::reasoning_view::ReasoningView;
+
 use super::chat::{handle_user_action, send_message};
 use super::types::{display_text, role_css_class, PendingUIState};
 
 #[component]
-pub fn PlanPage() -> Element {
+pub fn PlanPage(
+    plan_id: Option<String>,
+    on_back: EventHandler<()>,
+) -> Element {
     // ── 全局 Context（main.rs 注入） ──
     let init_status = use_context::<Memo<InitStatus>>();
 
@@ -32,11 +38,16 @@ pub fn PlanPage() -> Element {
     // 待处理的 UI 交互（Agent 请求用户确认/选择/输入）
     let pending_ui = use_signal_sync(|| None::<PendingUIState>);
 
+    // ── 深度思考侧 state ──
+    // 与 messages 一一对应；None 表示该消息没有 reasoning（user/tool）
+    let reasoning_texts = use_signal_sync(|| Vec::<Option<String>>::new());
+
     // ── Chat Service 缓存（委托给 services::chat_service） ──
     // 显式传入 ChatConfig：system_prompt_template 指向 prompts/chat/system.toml
     // （当前值与 ChatConfig::default() 相同，但走显式路径便于将来按页面切模板）。
     let chat_signal = use_chat_service(ChatConfig {
         system_prompt_template: Some("chat/system".to_string()),
+        enable_thinking:true,
         ..Default::default()
     });
 
@@ -95,12 +106,33 @@ pub fn PlanPage() -> Element {
                                     role_css_class(&msg.role),
                                     if is_streaming { "chat-message--streaming" } else { "" }
                                 );
+
+                                // reasoning_texts 与 messages 一一对位：
+                                // user/tool 行 → None（unwrap 后是空串）
+                                let r_text: String = reasoning_texts
+                                    .read()
+                                    .get(idx)
+                                    .and_then(|o| o.clone())
+                                    .unwrap_or_default();
+                                let has_reasoning = !r_text.is_empty();
+                                // 流式光标仅在还没有可显示的 reasoning 时出现
+                                let show_streaming_cursor =
+                                    is_streaming && text.is_empty() && !has_reasoning;
+
                                 rsx! {
                                     div {
                                         class: "{class}",
-                                        if is_streaming && text.is_empty() {
+                                        // ── 深度思考折叠面板（无 reasoning 时不渲染）──
+                                        if has_reasoning {
+                                            ReasoningView {
+                                                text: r_text,
+                                                is_streaming: is_streaming,
+                                            }
+                                        }
+                                        // ── 正文 ──
+                                        if show_streaming_cursor {
                                             "▍"
-                                        } else {
+                                        } else if !text.is_empty() {
                                             // Markdown 渲染：pulldown-cmark + ammonia sanitize
                                             Markdown { text: text.to_string() }
                                         }
@@ -116,38 +148,23 @@ pub fn PlanPage() -> Element {
             {
                 let ui = pending_ui.read();
                 if let Some(ref pending) = *ui {
+                    let p = pending.clone();
                     rsx! {
-                        div { class: "chat-ui-actions",
-                            p { class: "chat-ui-actions__message", "{pending.message}" }
-                            div { class: "chat-ui-actions__buttons",
-                                for action in &pending.actions {
-                                    {
-                                        let action = action.clone();
-                                        let action_for_handler = action.clone();
-                                        let desc = action.description.clone().unwrap_or_default();
-                                        let label = action.label.clone();
-                                        let type_class = format!("chat-ui-action-btn chat-ui-action-btn--{:?}", action.action_type);
-                                        let p = pending.clone();
-                                        rsx! {
-                                            button {
-                                                class: "{type_class}",
-                                                onclick: move |_| {
-                                                    handle_user_action(
-                                                        action_for_handler.clone(),
-                                                        p.clone(),
-                                                        messages,
-                                                        streaming_idx,
-                                                        pending_ui,
-                                                        chat_signal,
-                                                    );
-                                                },
-                                                title: "{desc}",
-                                                "{label}"
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                        ChatUIActionsView {
+                            message: p.message.clone(),
+                            actions: p.actions.clone(),
+                            on_action: move |(action, choice)| {
+                                handle_user_action(
+                                    action,
+                                    choice,
+                                    p.clone(),
+                                    messages,
+                                    reasoning_texts,
+                                    streaming_idx,
+                                    pending_ui,
+                                    chat_signal,
+                                );
+                            },
                         }
                     }
                 } else {
@@ -166,7 +183,14 @@ pub fn PlanPage() -> Element {
                         if e.data.key() == keyboard_types::Key::Enter && !e.data.modifiers().shift() {
                             e.prevent_default();
                             if can_create {
-                                send_message(chat_signal, input_text, messages, streaming_idx, pending_ui);
+                                send_message(
+                                    chat_signal,
+                                    input_text,
+                                    messages,
+                                    reasoning_texts,
+                                    streaming_idx,
+                                    pending_ui,
+                                );
                             }
                         }
                     },
@@ -178,7 +202,14 @@ pub fn PlanPage() -> Element {
                     title: if !can_create { Some("AI 与 Prompt 初始化完成后才能创建") } else { None },
                     onclick: move |_: MouseEvent| {
                         if can_create {
-                            send_message(chat_signal, input_text, messages, streaming_idx, pending_ui);
+                            send_message(
+                                chat_signal,
+                                input_text,
+                                messages,
+                                reasoning_texts,
+                                streaming_idx,
+                                pending_ui,
+                            );
                         }
                     },
                     "创建"
@@ -195,8 +226,25 @@ pub fn PlanPage() -> Element {
                 max_left_percent: 75.0,
                 left: rsx! {
                     div { class: "plan-left-panel",
+                        // ── 返回按钮 + 计划标题 ──
+                        div { class: "plan-left-panel__header",
+                            button {
+                                class: "plan-back-btn",
+                                onclick: move |_| on_back.call(()),
+                                title: "返回指挥中心",
+                                "← 返回"
+                            }
+                            div { class: "plan-left-panel__title",
+                                if let Some(ref id) = plan_id {
+                                    span { class: "plan-left-panel__plan-id", "计划 #{id}" }
+                                } else {
+                                    span { class: "plan-left-panel__plan-id", "新建计划" }
+                                }
+                            }
+                        }
+                        div { class: "plan-left-panel__divider" }
                         span { class: "plan-left-panel__label",
-                            "左侧区域（待开发）"
+                            "计划详情（待开发）"
                         }
                     }
                 },

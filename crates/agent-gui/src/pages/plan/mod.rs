@@ -8,6 +8,7 @@
 //! 仅 `PlanPage` 通过 `pub use` 对外暴露，保持内部 API 收敛。
 
 mod chat;
+mod components;
 mod page;
 mod types;
 

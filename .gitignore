@@ -1,5 +1,6 @@
 # Rust / Cargo 构建产物
 target/
+target-verify/
 
 # IDE 与工具产物
 .playwright-mcp/

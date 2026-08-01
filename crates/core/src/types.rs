@@ -34,7 +34,7 @@ impl Default for MessageContent {
 ///
 /// 当 `ChatService` 检测到 `request_user_action` tool call 时，
 /// 会将其参数解析为此结构，并通过 `ChatEvent::UIActionRequest` 下发到前端。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UIAction {
     /// 动作唯一标识（如 "generate_plan", "add_more_detail"）
     pub id: String,
@@ -49,7 +49,7 @@ pub struct UIAction {
 }
 
 /// UI 交互动作类型。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UIActionType {
     /// 确认按钮——用于"是/否"或多选一场景（如"生成计划"/"我再想想"）

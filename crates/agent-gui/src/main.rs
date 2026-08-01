@@ -7,6 +7,7 @@ mod services;
 use config::GuiConfig;
 use context::{AiContext, InitStatus, McpContext, PromptContext, RagContext, ToolsContext};
 use dioxus::{desktop::Config, prelude::*};
+use pages::home::{HomePage, PageRoute};
 use pages::plan::PlanPage;
 use std::sync::{Arc, OnceLock};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -23,6 +24,7 @@ const RESET_CSS: Asset = asset!("/assets/reset.css");
 const THEME_CSS: Asset = asset!("/assets/dx-components-theme.css");
 const RESIZABLE_CSS: Asset = asset!("/assets/resizable_panel.css");
 const PLAN_CSS: Asset = asset!("/assets/plan.css");
+const HOME_CSS: Asset = asset!("/assets/home.css");
 
 fn main() {
     init_logging();
@@ -166,6 +168,33 @@ fn app() -> Element {
         document::Stylesheet { href: THEME_CSS }
         document::Stylesheet { href: RESIZABLE_CSS }
         document::Stylesheet { href: PLAN_CSS }
-        PlanPage {}
+        document::Stylesheet { href: HOME_CSS }
+        AppRouter {}
+    }
+}
+
+/// 顶层路由组件：根据 `PageRoute` 切换 HomePage / PlanPage。
+#[component]
+fn AppRouter() -> Element {
+    let mut page = use_signal(|| PageRoute::Home);
+
+    let mut navigate = move |route: PageRoute| {
+        page.set(route);
+    };
+
+    rsx! {
+        match page.read().clone() {
+            PageRoute::Home => rsx! {
+                HomePage {
+                    on_navigate: move |r: PageRoute| navigate(r),
+                }
+            },
+            PageRoute::Plan(plan_id) => rsx! {
+                PlanPage {
+                    plan_id: plan_id.clone(),
+                    on_back: move |_| navigate(PageRoute::Home),
+                }
+            },
+        }
     }
 }

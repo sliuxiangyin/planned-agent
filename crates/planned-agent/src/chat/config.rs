@@ -39,7 +39,7 @@ impl Default for ChatConfig {
             temperature: None,
             max_tokens: None,
             max_tool_rounds: 10,
-            enable_thinking: false,
+            enable_thinking: true,
         }
     }
 }

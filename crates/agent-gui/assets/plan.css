@@ -48,7 +48,7 @@
 }
 
 .chat-messages__list {
-    padding: 16px;
+    padding: 10px;
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -269,67 +269,3 @@
     font-style: italic;
 }
 
-/* ── UI 交互按钮（Agent 请求用户确认/选择/输入时渲染） ─────────────── */
-.chat-ui-actions {
-    padding: 10px 16px;
-    border-top: 1px solid var(--primary-color-4);
-    background: var(--primary-color-2);
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-}
-
-.chat-ui-actions__message {
-    margin: 0;
-    font-size: 0.85rem;
-    color: var(--secondary-color-4);
-    line-height: 1.4;
-    white-space: pre-wrap;
-}
-
-.chat-ui-actions__buttons {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-}
-
-.chat-ui-action-btn {
-    padding: 6px 14px;
-    border: 1px solid var(--secondary-color-2);
-    border-radius: 6px;
-    background: var(--secondary-color-2);
-    color: var(--primary-color);
-    font-size: 0.85rem;
-    cursor: pointer;
-    transition: background 0.15s, border-color 0.15s;
-    white-space: nowrap;
-}
-
-.chat-ui-action-btn:hover {
-    background: var(--secondary-color-3);
-    border-color: var(--secondary-color-3);
-}
-
-.chat-ui-action-btn:active {
-    background: var(--secondary-color-4);
-}
-
-/* 类型差异化 */
-.chat-ui-action-btn--Confirm {
-    /* 默认样式即可 */
-}
-
-.chat-ui-action-btn--Select {
-    border-style: dashed;
-}
-
-.chat-ui-action-btn--Input {
-    background: transparent;
-    border-color: var(--primary-color-6);
-    color: var(--secondary-color-4);
-}
-
-.chat-ui-action-btn--Input:hover {
-    border-color: var(--secondary-color-5);
-    color: var(--secondary-color-3);
-}
