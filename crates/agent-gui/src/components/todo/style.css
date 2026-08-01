@@ -14,7 +14,7 @@
   flex-direction: column;
   padding: 0.5rem ;
   border: 1px solid var(--light, var(--primary-color-6)) var(--dark, var(--primary-color-5));
-  border-radius: 1rem;
+  border-radius: 0.5rem;
   background-color: var(--light, var(--primary-color-2)) var(--dark, var(--primary-color-3));
   box-shadow: 0 2px 10px rgb(0 0 0 / 10%);
   color: var(--secondary-color-4);
@@ -67,11 +67,19 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  height: 1.2rem;
+  width: 1.2rem;
 }
 
 .dx-todo__collapse-icon {
   color: var(--secondary-color-4);
   transition: transform 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.dx_todo__run_btn{
+  height: 1.2rem;
+  width: 1.2rem;
+  cursor: pointer;
 }
 
 /* 展开态：chevron 旋转 180° */

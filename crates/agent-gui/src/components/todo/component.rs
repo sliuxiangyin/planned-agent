@@ -159,6 +159,32 @@ pub fn Todo(
     let mut expanded = use_signal(|| false);
     let is_open = *expanded.read();
 
+    // 运行状态：控制开始/暂停图标的切换
+    let mut is_running = use_signal(|| false);
+
+    // 播放图标
+    let play_icon = rsx! {
+        svg {
+            view_box: "0 0 16 16",
+            width: "14",
+            height: "14",
+            fill: "currentColor",
+            path { d: "M 4 2.5 L 13 8 L 4 13.5 Z" }
+        }
+    };
+
+    // 暂停图标
+    let pause_icon = rsx! {
+        svg {
+            view_box: "0 0 16 16",
+            width: "14",
+            height: "14",
+            fill: "currentColor",
+            rect { x: "3", y: "2.5", width: "3.5", height: "11" }
+            rect { x: "9.5", y: "2.5", width: "3.5", height: "11" }
+        }
+    };
+
     rsx! {
         div {
             class: Styles::dx_todo,
@@ -181,21 +207,23 @@ pub fn Todo(
                 div {
                     class: Styles::dx_todo__actions,
                     Button {
-                        class: Styles::dx_todo__empty,
-                        variant: ButtonVariant::Primary,
-                        size: ButtonSize::Sm,
+                        class: Styles::dx_todo__run_btn,
+                        variant: if *is_running.read() { ButtonVariant::Destructive } else { ButtonVariant::Primary },
+                        size: ButtonSize::IconXs,
                         disabled: items.is_empty(),
+                        title: if *is_running.read() { "暂停执行" } else { "开始执行" },
+                        aria_label: if *is_running.read() { "暂停执行" } else { "开始执行" },
                         onclick: move |e| {
+                            is_running.toggle();
                             if let Some(f) = &on_execute {
                                 f.call(e);
                             }
                         },
-                        "执行计划"
+                        if *is_running.read() { {pause_icon} } else { {play_icon} }
                     }
                     Button {
                         class: Styles::dx_todo__collapse_btn,
                         variant: ButtonVariant::Ghost,
-                        size: ButtonSize::IconSm,
                         title: if is_open { "折叠计划" } else { "展开计划" },
                         aria_label: if is_open { "折叠计划" } else { "展开计划" },
                         onclick: move |_| {
