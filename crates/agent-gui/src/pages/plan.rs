@@ -3,6 +3,7 @@ use crate::components::markdown::Markdown;
 use crate::components::resizable_panel::ResizablePanel;
 use crate::components::scroll_area::ScrollArea;
 use crate::components::textarea::Textarea;
+use crate::components::todo::{Todo, TodoItemData, TodoStatus};
 use dioxus::prelude::*;
 
 use crate::context::{InitStatus, ModuleState};
@@ -56,13 +57,7 @@ pub fn PlanPage() -> Element {
 
     // ── 聊天状态（SyncStorage：Send + Sync，可在 spawn 异步任务中持有） ──
     let messages = use_signal_sync(|| {
-        vec![Message {
-            role: MessageRole::Assistant,
-            content: Some(MessageContent::Text {
-                text: "欢迎来到 Plan 页面！".into(),
-            }),
-            ..Default::default()
-        }]
+        vec![]
     });
     let mut input_text = use_signal_sync(String::new);
     // 当前正在流式输出的消息下标（None = 没有消息在流式输出）
@@ -88,6 +83,37 @@ pub fn PlanPage() -> Element {
     // ── 右侧聊天面板 ──
     let chat_panel = rsx! {
         div { class: "chat-panel",
+            // Todo 计划区，固定 200px（当前使用 mock 数据，后续接 AI 计划）
+            div {
+                style : "padding:0px",
+                Todo {
+                items: vec![
+                    TodoItemData::new(
+                        TodoStatus::Completed,
+                        "分析当前项目结构与依赖关系",
+                        "读取 Cargo.toml 与 crate 目录结构，识别已实现的核心模块（core、planned-agent、agent-gui 等），确认本次改动边界。",
+                    ),
+                    TodoItemData::new(
+                        TodoStatus::Running,
+                        "创建 Todo UI 组件",
+                        "在 crates/agent-gui/src/components/todo/ 下新增 mod.rs、component.rs、style.css，复用 dioxus_primitives::accordion 行为，自定义 trigger / content 样式。",
+                    ),
+                    TodoItemData::new(
+                        TodoStatus::Queued,
+                        "在 Plan 页面接入 Todo 组件",
+                        "在 pages/plan.rs 的右侧聊天面板顶部插入 Todo，固定 200px 高度，列表区支持展开收起，底部执行按钮暂不接业务。",
+                    ),
+                    TodoItemData::new(
+                        TodoStatus::Pending,
+                        "后续接入 AI 计划数据流",
+                        "从 Assistant 回复中解析计划条目，同步填充 Todo；执行计划时按状态机更新 TodoStatus；本轮仅完成 UI，不实现数据流。",
+                    ),
+                ],
+                on_execute: move |_| {
+                    // TODO(后续): 触发 Agent 执行计划
+                },
+            }
+            }
 
             // 消息展示区
             div { class: "chat-messages",
