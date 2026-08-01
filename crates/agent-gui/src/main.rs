@@ -2,6 +2,7 @@ mod components;
 mod config;
 mod context;
 mod pages;
+mod services;
 
 use config::GuiConfig;
 use context::{AiContext, InitStatus, McpContext, PromptContext, RagContext, ToolsContext};

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use async_trait::async_trait;
 use anyhow::{Result, anyhow};
+use futures::StreamExt;
 use serde_json::json;
 
 use planned_agent_core::planner::coarse::{
@@ -123,76 +124,112 @@ impl<PM: PromptManager> LlmCoarsePlanner<PM> {
         
         Ok(prompt_context)
     }
-}
 
-#[async_trait]
-impl<PM: PromptManager + Send + Sync> CoarsePlanner for LlmCoarsePlanner<PM> {
-    /// 从用户输入生成粗粒度计划
-    async fn generate_coarse_plan(
+    /// 流式生成粗粒度计划
+    ///
+    /// 与 [`CoarsePlanner::generate_coarse_plan`] 返回相同的 `CoarseGrainedPlan`，
+    /// 区别在于 LLM 调用走 `chat_completion_stream`，每个增量文本片段通过
+    /// `on_chunk` 回调（同步 `FnMut`）实时下发给调用方，便于 GUI 边收边显。
+    ///
+    /// 内部仍按现有 `parse_response` 流程解析完整文本，因此 `CoarseGrainedPlan`
+    /// 的结构、字段、验证逻辑与同步路径完全一致。
+    ///
+    /// # 参数
+    /// - `input`: 用户原始输入（与同步版本语义一致，原样透传到 Prompt）
+    /// - `context`: 计划上下文
+    /// - `on_chunk`: 每收到一段增量文本片段即调用一次，片段可能为单 token 或多 token 块
+    pub async fn generate_coarse_plan_stream<F>(
         &self,
         input: &str,
         context: &PlanContext,
-    ) -> Result<CoarseGrainedPlan> {
-        // 1. 构建提示上下文
+        mut on_chunk: F,
+    ) -> Result<CoarseGrainedPlan>
+    where
+        F: FnMut(&str) + Send,
+    {
+        // 1. 构建提示上下文（复用同步路径逻辑）
         let prompt_context = self.build_prompt_context(input, context)?;
 
         // 2. 渲染提示模板（复用 PromptManager）
         let prompt = self.prompt_manager
             .render("planning/coarse_plan", &prompt_context)
             .await?;
-        debug!("===========planning/coarse_plan: {} \r\n ================== \n\r ",prompt);
-        // 3. 调用LLM生成计划（复用 AiClient）
+        debug!(
+            "===========planning/coarse_plan: {} \r\n ================== \n\r ",
+            prompt
+        );
+
+        // 3. 构造 stream=true 请求
         let request = ChatCompletionRequest {
             model: self.ai_client.model_name().to_string(),
-            messages: vec![
-                Message {
-                    role: MessageRole::User,
-                    content: Some(MessageContent::Text {
-                        text: prompt,
-                    }),
-                    tool_calls: None,
-                    tool_call_id: None,
-                    name: None,
-                    reasoning_content: None,
-                }
-            ],
+            messages: vec![Message {
+                role: MessageRole::User,
+                content: Some(MessageContent::Text { text: prompt }),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+                reasoning_content: None,
+            }],
             tools: None,
-            temperature: Some(0.3),  // 允许更多创造性
+            temperature: Some(0.3),
             max_tokens: Some(8000),
-            stream: false,
+            stream: true,
             extra: std::collections::HashMap::new(),
         };
 
-        let response = self.ai_client.chat_completion(request).await?;
-        
-        // 提取响应内容
-        let response_text = if let Some(choice) = response.choices.first() {
-            if let Some(content) = &choice.message.content {
-                match content {
-                    MessageContent::Text { text } => text.clone(),
-                    _ => return Err(anyhow!("不支持的响应内容类型")),
-                }
-            } else {
-                return Err(anyhow!("无法从LLM响应中提取内容"));
-            }
-        } else {
-            return Err(anyhow!("无法从LLM响应中提取内容"));
-        };
+        // 4. 调用流式接口
+        let response_stream = self.ai_client.chat_completion_stream(request).await?;
 
-        // 4. 解析响应为粗粒度计划（复用 PromptManager）
+        // 5. 拉取 chunk，回调 + 累积
+        let mut full_text = String::new();
+        let mut stream = response_stream.stream;
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result?;
+            if let Some(choice) = chunk.choices.first() {
+                if let Some(content) = &choice.delta.content {
+                    if !content.is_empty() {
+                        on_chunk(content);
+                        full_text.push_str(content);
+                    }
+                }
+            }
+        }
+
+        if full_text.is_empty() {
+            return Err(anyhow!("LLM 流式响应为空，未产出任何文本片段"));
+        }
+
+        // 6. 解析完整文本（复用 PromptManager 的 markdown 围栏剥离 / 引号修复）
         let plan: CoarseGrainedPlan = self.prompt_manager
-            .parse_response("planning/coarse_plan", &response_text)
+            .parse_response("planning/coarse_plan", &full_text)
             .await?;
 
-        // 5. 验证步骤是否符合原子动作要求
+        // 7. 验证步骤是否符合原子动作要求
         let validation_warnings = self.validate_atomic_steps(&plan);
         if !validation_warnings.is_empty() {
             debug!("步骤验证警告: {:?}", validation_warnings);
-            // 可以选择返回警告或直接返回计划
-            // 这里选择记录警告并返回计划
         }
 
         Ok(plan)
+    }
+}
+
+#[async_trait]
+impl<PM: PromptManager + Send + Sync> CoarsePlanner for LlmCoarsePlanner<PM> {
+    /// 从用户输入生成粗粒度计划
+    ///
+    /// 委托给 [`LlmCoarsePlanner::generate_coarse_plan_stream`]，丢弃回调，
+    /// 仅保留完整解析后的 [`CoarseGrainedPlan`]。返回值与原同步实现完全一致。
+    async fn generate_coarse_plan(
+        &self,
+        input: &str,
+        context: &PlanContext,
+    ) -> Result<CoarseGrainedPlan> {
+        let mut full_text = String::new();
+        self.generate_coarse_plan_stream(input, context, |chunk| {
+            full_text.push_str(chunk);
+        })
+        .await
     }
 
     /// 验证粗粒度计划的合法性
@@ -362,9 +399,78 @@ mod tests {
 
         async fn chat_completion_stream(
             &self,
-            _request: ChatCompletionRequest,
+            request: ChatCompletionRequest,
         ) -> Result<planned_agent_core::ai::ChatCompletionStream> {
-            unimplemented!()
+            // 复用 chat_completion 的硬编码响应，作为单 chunk 推流
+            let _ = self.chat_completion(request).await?;
+            let text = r##"{
+                "id": "plan-anren",
+                "title": "搜索安仁乡",
+                "description": "打开百度搜索安仁乡并整理前三条结果",
+                "steps": [
+                    {
+                        "id": "step-1",
+                        "order": 1,
+                        "intent": "打开百度首页",
+                        "expected_output": "百度首页加载完成",
+                        "result_reference": "#E1",
+                        "dependencies": [],
+                        "data_requirements": [],
+                        "recommended_tool_categories": ["Browser"]
+                    },
+                    {
+                        "id": "step-2",
+                        "order": 2,
+                        "intent": "在百度搜索框输入'安仁乡'并执行搜索",
+                        "expected_output": "搜索结果页面，包含与'安仁乡'相关的结果",
+                        "result_reference": "#E2",
+                        "dependencies": ["#E1"],
+                        "data_requirements": [
+                            {
+                                "name": "search_keyword",
+                                "description": "搜索关键词",
+                                "required": true,
+                                "source_hint": "用户原始输入：搜索安仁乡"
+                            }
+                        ],
+                        "recommended_tool_categories": ["Browser"]
+                    },
+                    {
+                        "id": "step-3",
+                        "order": 3,
+                        "intent": "提取安仁乡搜索结果的前三条",
+                        "expected_output": "前三条安仁乡相关搜索结果",
+                        "result_reference": "#E3",
+                        "dependencies": ["#E2"],
+                        "data_requirements": [],
+                        "recommended_tool_categories": ["Browser", "Data"]
+                    }
+                ],
+                "complexity": "simple",
+                "risk_level": "low"
+            }"##;
+            use futures::stream;
+            let chunk = planned_agent_core::types::ChatCompletionChunk {
+                id: "capture-mock".to_string(),
+                object: "chat.completion.chunk".to_string(),
+                created: 0,
+                model: "mock-model".to_string(),
+                choices: vec![planned_agent_core::types::ChunkChoice {
+                    index: 0,
+                    delta: planned_agent_core::types::DeltaMessage {
+                        role: None,
+                        content: Some(text.to_string()),
+                        tool_calls: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                }],
+                system_fingerprint: None,
+                usage: None,
+            };
+            let s = stream::iter(std::iter::once(Ok::<_, anyhow::Error>(chunk)));
+            Ok(planned_agent_core::ai::ChatCompletionStream::new(Box::new(s)))
         }
 
         fn provider_name(&self) -> &str {
@@ -430,7 +536,45 @@ mod tests {
         }
 
         async fn chat_completion_stream(&self, _request: ChatCompletionRequest) -> Result<planned_agent_core::ai::ChatCompletionStream> {
-            unimplemented!()
+            // 复用 chat_completion 的硬编码响应，作为单 chunk 推流
+            let text = r##"{
+                "title": "测试计划",
+                "description": "这是一个测试计划",
+                "steps": [
+                    {
+                        "id": "step-1",
+                        "intent": "获取用户信息",
+                        "expected_output": "用户信息JSON",
+                        "result_reference": "#E1",
+                        "dependencies": [],
+                        "data_requirements": []
+                    }
+                ],
+                "complexity": "simple",
+                "risk_level": "low"
+            }"##;
+            use futures::stream;
+            let chunk = planned_agent_core::types::ChatCompletionChunk {
+                id: "mock".to_string(),
+                object: "chat.completion.chunk".to_string(),
+                created: 0,
+                model: "mock-model".to_string(),
+                choices: vec![planned_agent_core::types::ChunkChoice {
+                    index: 0,
+                    delta: planned_agent_core::types::DeltaMessage {
+                        role: None,
+                        content: Some(text.to_string()),
+                        tool_calls: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                }],
+                system_fingerprint: None,
+                usage: None,
+            };
+            let s = stream::iter(std::iter::once(Ok::<_, anyhow::Error>(chunk)));
+            Ok(planned_agent_core::ai::ChatCompletionStream::new(Box::new(s)))
         }
 
         fn provider_name(&self) -> &str {
@@ -672,9 +816,9 @@ mod tests {
     async fn test_validate_coarse_plan() {
         let ai_client = Arc::new(MockAiClient);
         let prompt_manager = Arc::new(MockPromptManager);
-        
+
         let planner = LlmCoarsePlanner::new(ai_client, prompt_manager);
-        
+
         // 创建测试计划
         let plan = CoarseGrainedPlan::new(
             "test-plan".to_string(),
@@ -692,12 +836,174 @@ mod tests {
             planned_agent_core::planner::coarse::PlanComplexity::Simple,
             planned_agent_core::planner::coarse::RiskLevel::Low,
         );
-        
+
         let result = planner.validate_coarse_plan(&plan).await;
         assert!(result.is_ok());
-        
+
         let validation = result.unwrap();
         assert!(validation.valid);
         assert!(validation.errors.is_empty());
+    }
+
+    // ─── 流式 Mock：按预设片段序列推流 ──────────────────────────
+
+    /// 推流式 Mock AI 客户端：忽略 prompt 内容，按 chunks 顺序逐片段推流
+    struct StreamingMockAiClient {
+        chunks: Vec<String>,
+    }
+
+    #[async_trait]
+    impl AiClient for StreamingMockAiClient {
+        async fn chat_completion(
+            &self,
+            _request: ChatCompletionRequest,
+        ) -> Result<planned_agent_core::types::ChatCompletionResponse> {
+            unimplemented!("streaming mock 仅实现 chat_completion_stream")
+        }
+
+        async fn chat_completion_stream(
+            &self,
+            _request: ChatCompletionRequest,
+        ) -> Result<planned_agent_core::ai::ChatCompletionStream> {
+            use futures::stream;
+            let items: Vec<planned_agent_core::types::ChatCompletionChunk> = self
+                .chunks
+                .iter()
+                .map(|text| planned_agent_core::types::ChatCompletionChunk {
+                    id: "stream-mock".to_string(),
+                    object: "chat.completion.chunk".to_string(),
+                    created: 0,
+                    model: "mock-stream".to_string(),
+                    choices: vec![planned_agent_core::types::ChunkChoice {
+                        index: 0,
+                        delta: planned_agent_core::types::DeltaMessage {
+                            role: None,
+                            content: Some(text.clone()),
+                            tool_calls: None,
+                            reasoning_content: None,
+                        },
+                        finish_reason: None,
+                        logprobs: None,
+                    }],
+                    system_fingerprint: None,
+                    usage: None,
+                })
+                .collect();
+            let s = stream::iter(items.into_iter().map(Ok::<_, anyhow::Error>));
+            Ok(planned_agent_core::ai::ChatCompletionStream::new(Box::new(s)))
+        }
+
+        fn provider_name(&self) -> &str {
+            "mock-stream"
+        }
+
+        fn model_name(&self) -> &str {
+            "mock-stream-model"
+        }
+
+        fn default_config(&self) -> ChatCompletionRequest {
+            unimplemented!()
+        }
+    }
+
+    /// 流式端到端测试：
+    /// 1) 推流 N 个片段 → 回调被调 N 次
+    /// 2) 片段按序拼接 == 完整 JSON
+    /// 3) parse_response 真实解析 → 最终 CoarseGrainedPlan 字段正确
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_generate_coarse_plan_stream_emits_chunks_and_parses_plan() {
+        // 完整 JSON（将被切成片段推流）
+        let full_json = r##"{"id":"plan-stream","title":"流式测试计划","description":"验证流式回调与解析","steps":[{"id":"step-1","order":1,"intent":"获取用户信息","expected_output":"用户信息JSON","result_reference":"#E1","dependencies":[],"data_requirements":[]}],"complexity":"simple","risk_level":"low"}"##;
+
+        // 拆分为片段（模拟 LLM token-level 流式输出）
+        // 使用 r##"..."## 双 # 定界以避免 "#E1" 内的 # 误闭合
+        let chunks: Vec<String> = vec![
+            r##"{"id":"##.to_string(),
+            r##""plan-stream","##.to_string(),
+            r##""title":"流式测试计划","description":"##.to_string(),
+            r##""验证流式回调与解析","steps":[{"id":"step-1","order":1,"##.to_string(),
+            r##""intent":"获取用户信息","expected_output":"##.to_string(),
+            r##""用户信息JSON","result_reference":"#E1","dependencies":[],"##.to_string(),
+            r##""data_requirements":[]}],"complexity":"simple","##.to_string(),
+            r##""risk_level":"low"}"##.to_string(),
+        ];
+
+        let ai_client = Arc::new(StreamingMockAiClient {
+            chunks: chunks.clone(),
+        });
+        let prompt_manager = build_real_prompt_manager_async().await;
+
+        let planner = LlmCoarsePlanner::new(ai_client, prompt_manager);
+
+        let context = PlanContext {
+            user_id: Some("test-user".to_string()),
+            session_id: Some("test-session".to_string()),
+            history: vec![],
+            metadata: std::collections::HashMap::new(),
+        };
+
+        let collected: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let plan = planner
+            .generate_coarse_plan_stream("测试任务", &context, |chunk| {
+                collected.lock().unwrap().push(chunk.to_string());
+            })
+            .await
+            .expect("流式计划生成失败");
+
+        // 1. 回调次数 == 片段数
+        let chunks_received = collected.lock().unwrap();
+        assert_eq!(
+            chunks_received.len(),
+            chunks.len(),
+            "回调次数与片段数不一致"
+        );
+
+        // 2. 累积文本 == 完整 JSON
+        let reconstructed: String = chunks_received.join("");
+        assert_eq!(
+            reconstructed, full_json,
+            "累积文本与原始 JSON 不一致: got={}",
+            reconstructed
+        );
+
+        // 3. 最终 plan 解析正确
+        assert_eq!(plan.id, "plan-stream");
+        assert_eq!(plan.title, "流式测试计划");
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].id, "step-1");
+        assert_eq!(plan.steps[0].intent, "获取用户信息");
+        assert_eq!(plan.steps[0].result_reference, "#E1");
+    }
+
+    /// 空流响应必须报错，不得 panic / 返回空 plan
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_generate_coarse_plan_stream_empty_response_errors() {
+        let ai_client = Arc::new(StreamingMockAiClient { chunks: vec![] });
+        let prompt_manager = build_real_prompt_manager_async().await;
+
+        let planner = LlmCoarsePlanner::new(ai_client, prompt_manager);
+
+        let context = PlanContext {
+            user_id: None,
+            session_id: None,
+            history: vec![],
+            metadata: std::collections::HashMap::new(),
+        };
+
+        let result = planner
+            .generate_coarse_plan_stream("测试任务", &context, |_chunk| {})
+            .await;
+
+        assert!(
+            result.is_err(),
+            "空流响应必须返回 Err，但得到了 {:?}",
+            result.as_ref().map(|p| &p.title)
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("为空") || err_msg.contains("empty"),
+            "错误消息应说明流式响应为空，实际: {}",
+            err_msg
+        );
     }
 }

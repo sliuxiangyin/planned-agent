@@ -34,7 +34,16 @@
 /* ── 消息区 ────────────────────────────────────────────────────────── */
 .chat-messages {
     flex: 1;
+    display: flex;
+    flex-direction: column;
     overflow: hidden;
+    min-height: 0;
+}
+
+/* 让 ScrollArea（dx-scroll-area-auto-hide / -always-show）拿到父级高度约束 */
+.chat-messages > .dx-scroll-area-auto-hide,
+.chat-messages > .dx-scroll-area-always-show {
+    flex: 1;
     min-height: 0;
 }
 
@@ -83,17 +92,244 @@
     padding: 12px;
     border-top: 1px solid var(--primary-color-6);
     display: flex;
+    flex-direction: column;
     gap: 8px;
-    align-items: flex-end;
 }
 
 .chat-input-area textarea {
-    flex: 1;
-    resize: none;
+    width: 100%;
+    resize: vertical;
     min-height: 40px;
-    max-height: 120px;
+    max-height: 240px;
+    cursor: text;
 }
 
-.chat-input-area button {
+.chat-input-area textarea::-webkit-resizer {
+    /* 使用自定义 grip 视觉替代默认的拉伸手柄，保证在无边框 textarea 上也可见 */
+    background-image:
+        linear-gradient(135deg,
+            transparent 0,
+            transparent 60%,
+            var(--primary-color-7) 60%,
+            var(--primary-color-7) 65%,
+            transparent 65%,
+            transparent 80%,
+            var(--primary-color-7) 80%,
+            var(--primary-color-7) 85%,
+            transparent 85%
+        );
+    background-position: bottom right;
+    background-repeat: no-repeat;
+    cursor: ns-resize;
+}
+
+.chat-input-area__submit {
+    width: 100%;
     flex-shrink: 0;
+}
+
+/* ── Markdown 内容（套用在 .chat-message 内的 .markdown 子树） ──────── */
+.chat-message .markdown {
+    /* 子元素 margin 由具体标签样式控制，这里清零让 .markdown 容器本身无 padding/margin */
+}
+
+.chat-message .markdown > :first-child {
+    margin-top: 0;
+}
+
+.chat-message .markdown > :last-child {
+    margin-bottom: 0;
+}
+
+/* 段落 */
+.chat-message .markdown p {
+    margin: 6px 0;
+    line-height: 1.5;
+}
+
+/* 行内代码 */
+.chat-message .markdown code {
+    background: rgba(0, 0, 0, 0.18);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: ui-monospace, "SF Mono", "Consolas", "Monaco", monospace;
+    font-size: 0.85em;
+}
+
+/* 代码块 */
+.chat-message .markdown pre {
+    background: rgba(0, 0, 0, 0.28);
+    padding: 8px 10px;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 6px 0;
+    line-height: 1.4;
+}
+
+.chat-message .markdown pre code {
+    background: none;
+    padding: 0;
+    font-size: 0.85em;
+}
+
+/* 列表 */
+.chat-message .markdown ul,
+.chat-message .markdown ol {
+    margin: 6px 0;
+    padding-left: 22px;
+}
+
+.chat-message .markdown li {
+    margin: 2px 0;
+}
+
+.chat-message .markdown li > p {
+    margin: 2px 0;
+}
+
+/* 任务列表 */
+.chat-message .markdown input[type="checkbox"] {
+    margin-right: 6px;
+    vertical-align: middle;
+}
+
+/* 链接 */
+.chat-message .markdown a {
+    color: #6cb6ff;
+    text-decoration: underline;
+}
+
+.chat-message .markdown a:hover {
+    color: #8ec6ff;
+}
+
+/* 标题 */
+.chat-message .markdown h1,
+.chat-message .markdown h2,
+.chat-message .markdown h3,
+.chat-message .markdown h4,
+.chat-message .markdown h5,
+.chat-message .markdown h6 {
+    margin: 10px 0 4px;
+    font-weight: 600;
+    line-height: 1.3;
+}
+
+.chat-message .markdown h1 { font-size: 1.2em; }
+.chat-message .markdown h2 { font-size: 1.1em; }
+.chat-message .markdown h3 { font-size: 1.0em; }
+.chat-message .markdown h4 { font-size: 0.95em; }
+.chat-message .markdown h5 { font-size: 0.9em; }
+.chat-message .markdown h6 { font-size: 0.85em; }
+
+/* 引用 */
+.chat-message .markdown blockquote {
+    border-left: 3px solid var(--secondary-color-5);
+    margin: 6px 0;
+    padding-left: 12px;
+    opacity: 0.85;
+}
+
+/* 分隔线 */
+.chat-message .markdown hr {
+    border: none;
+    border-top: 1px solid var(--primary-color-6);
+    margin: 8px 0;
+}
+
+/* 表格 */
+.chat-message .markdown table {
+    border-collapse: collapse;
+    margin: 6px 0;
+    font-size: 0.85em;
+}
+
+.chat-message .markdown th,
+.chat-message .markdown td {
+    border: 1px solid var(--primary-color-6);
+    padding: 4px 8px;
+}
+
+.chat-message .markdown th {
+    background: rgba(255, 255, 255, 0.05);
+    font-weight: 600;
+}
+
+/* 删除线 */
+.chat-message .markdown del {
+    opacity: 0.6;
+}
+
+/* 加粗 / 斜体 */
+.chat-message .markdown strong {
+    font-weight: 600;
+}
+
+.chat-message .markdown em {
+    font-style: italic;
+}
+
+/* ── UI 交互按钮（Agent 请求用户确认/选择/输入时渲染） ─────────────── */
+.chat-ui-actions {
+    padding: 10px 16px;
+    border-top: 1px solid var(--primary-color-4);
+    background: var(--primary-color-2);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.chat-ui-actions__message {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--secondary-color-4);
+    line-height: 1.4;
+    white-space: pre-wrap;
+}
+
+.chat-ui-actions__buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.chat-ui-action-btn {
+    padding: 6px 14px;
+    border: 1px solid var(--secondary-color-2);
+    border-radius: 6px;
+    background: var(--secondary-color-2);
+    color: var(--primary-color);
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+    white-space: nowrap;
+}
+
+.chat-ui-action-btn:hover {
+    background: var(--secondary-color-3);
+    border-color: var(--secondary-color-3);
+}
+
+.chat-ui-action-btn:active {
+    background: var(--secondary-color-4);
+}
+
+/* 类型差异化 */
+.chat-ui-action-btn--Confirm {
+    /* 默认样式即可 */
+}
+
+.chat-ui-action-btn--Select {
+    border-style: dashed;
+}
+
+.chat-ui-action-btn--Input {
+    background: transparent;
+    border-color: var(--primary-color-6);
+    color: var(--secondary-color-4);
+}
+
+.chat-ui-action-btn--Input:hover {
+    border-color: var(--secondary-color-5);
+    color: var(--secondary-color-3);
 }

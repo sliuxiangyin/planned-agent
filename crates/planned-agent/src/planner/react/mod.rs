@@ -8,4 +8,6 @@ pub mod step_store;
 // pub mod sub_agents;  // TODO: 文件尚未创建
 pub mod tool_executor;
 
+pub use default_react_agent::DefaultReActAgent;
 pub use plan_execute_agent::*;
+pub use step_store::StepStore;

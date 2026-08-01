@@ -8,6 +8,12 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use anyhow::Result;
+use serde_json::{json, Value};
+
+use planned_agent_core::tool_registry::{ToolCategory, ToolExecutor};
+use planned_agent_core::types::{Tool, ToolResult};
 use planned_agent_mcp_rmcp::McpManager;
 use planned_agent_tool_manager::builtin::{
     ai_tools::AiToolsProvider, data_tools::DataToolsProvider, file_tools::FileToolsProvider,
@@ -39,6 +45,13 @@ impl ToolsContext {
         registry.register_builtin_provider(&AiToolsProvider);
         registry.register_builtin_provider(&WebToolsProvider);
 
+        // 注册 UI 交互工具 `request_user_action`（前端拦截，不实际执行）
+        registry.register_custom_tool(
+            request_user_action_tool(),
+            vec![ToolCategory::Utility],
+            Arc::new(NoopExecutor),
+        );
+
         let stats = registry.get_stats();
         tracing::info!(
             "ToolRegistry 初始化完成（仅内置）: {} builtin tools",
@@ -63,5 +76,81 @@ impl ToolsContext {
             stats.builtin_count,
             stats.mcp_count
         );
+    }
+}
+
+// ── UI 交互工具定义 ─────────────────────────────────────────────────────────
+
+/// 空操作执行器——`request_user_action` 工具由前端拦截处理，后端永不实际执行。
+struct NoopExecutor;
+
+#[async_trait]
+impl ToolExecutor for NoopExecutor {
+    async fn execute(&self, _tool_name: &str, _arguments: Value) -> Result<ToolResult> {
+        Ok(ToolResult {
+            call_id: String::new(),
+            content: Value::String("ok".into()),
+            is_error: false,
+        })
+    }
+
+    fn name(&self) -> &str {
+        "NoopExecutor"
+    }
+
+    fn description(&self) -> &str {
+        "No-op executor for frontend-intercepted tools"
+    }
+
+    fn supported_tools(&self) -> Vec<String> {
+        vec!["request_user_action".into()]
+    }
+}
+
+/// 构造 `request_user_action` 工具定义
+fn request_user_action_tool() -> Tool {
+    Tool {
+        name: "request_user_action".into(),
+        description:
+            "当需要用户确认、选择或补充信息时调用。用于引导用户完善需求、确认计划生成等交互场景。\
+             调用后等待用户操作，不要自行假设用户选择。"
+                .into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "展示给用户的引导文本，应清晰说明需要用户做什么决定"
+                },
+                "actions": {
+                    "type": "array",
+                    "description": "用户可选的动作列表（按钮/选项）",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "description": "动作唯一标识"
+                            },
+                            "type": {
+                                "type": "string",
+                                "enum": ["confirm", "select", "input"],
+                                "description": "动作类型：confirm=确认按钮, select=单选列表, input=文本输入提示"
+                            },
+                            "label": {
+                                "type": "string",
+                                "description": "展示文本"
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": "补充说明，可选"
+                            }
+                        },
+                        "required": ["id", "type", "label"]
+                    }
+                }
+            },
+            "required": ["message", "actions"]
+        }),
     }
 }

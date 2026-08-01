@@ -14,3 +14,4 @@ target/
 Thumbs.db
 config.toml
 logs/
+data/

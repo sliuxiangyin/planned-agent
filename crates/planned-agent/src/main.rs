@@ -1,15 +1,18 @@
 mod agent;
 mod cli;
 mod config;
-mod planner;
 use agent::Agent;
 use anyhow::Result;
 use cli::Cli;
 use config::AppConfig;
+use planned_agent::planner::{
+    coarse::LlmCoarsePlanner,
+    react::{PlanAndExecuteAgent, PlanAndExecuteConfig},
+    trace::{recorder::TraceRecorderConfig, TraceRecorder},
+};
 use planned_agent_core::prompt::{PromptContext, PromptManager};
 use planned_agent_core::types::PlanContext;
 use planned_agent_core::planner::coarse::CoarsePlanner;
-use planner::coarse::LlmCoarsePlanner;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{debug, error, info};
@@ -111,8 +114,7 @@ async fn main() -> Result<()> {
 /// 运行完整的 Plan-and-Execute 测试流程
 async fn run_test_execute(agent: &Agent, app_config: &AppConfig, input: &str) -> Result<()> {
     use std::sync::Arc;
-    use planner::react::{PlanAndExecuteAgent, PlanAndExecuteConfig};
-    use planner::trace::{TraceRecorder, recorder::TraceRecorderConfig};
+    use planned_agent_core::ai::AiClient;
     use planned_agent_core::planner::react::ReActAgentConfig;
     
     println!("=== Plan-and-Execute 测试 ===\n");
@@ -125,7 +127,7 @@ async fn run_test_execute(agent: &Agent, app_config: &AppConfig, input: &str) ->
     // 获取 AI 管理器 和 Prompt 管理器
     let ai_manager = agent.get_ai_manager()
         .ok_or_else(|| anyhow::anyhow!("AI管理器未初始化"))?;
-    let ai_client = ai_manager.default()?;
+    let ai_client: Arc<dyn AiClient> = ai_manager.default()?;
     let prompt_manager = agent.get_prompt_manager_arc()
         .ok_or_else(|| anyhow::anyhow!("提示管理器未初始化"))?;
     

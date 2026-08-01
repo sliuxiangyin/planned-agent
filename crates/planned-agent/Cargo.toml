@@ -7,6 +7,10 @@ edition = "2021"
 name = "planned-agent"
 path = "src/main.rs"
 
+[lib]
+name = "planned_agent"
+path = "src/lib.rs"
+
 [dependencies]
 planned-agent-core = { path = "../core" }
 planned-agent-ai-openai = { path = "../ai-openai" }
