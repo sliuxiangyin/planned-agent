@@ -14,5 +14,10 @@ target-verify/
 .DS_Store
 Thumbs.db
 config.toml
+
+# 运行期易膨胀产物：日志、轨迹、嵌入式数据库
 logs/
+traces/
+*.log
+*.pdb
 data/
