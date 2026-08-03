@@ -9,7 +9,7 @@
 use dioxus::prelude::*;
 use planned_agent_core::types::{UIAction, UIActionType};
 
-use crate::components::button::{Button, ButtonVariant};
+use crate::components::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::input::Input;
 
 #[css_module("/src/pages/plan/components/chat_ui_actions_view/style.css")]

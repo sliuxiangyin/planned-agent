@@ -3,7 +3,7 @@
 name = "deepseek"
 provider = "openai"
 base_url = "https://api.deepseek.com/v1"
-api_key = "sk-606b34c5dcce476aaf85314d0b8c38fa"
+api_key = "sk-11111111111111111111"
 model = "deepseek-v4-flash"
 max_tokens = 4096
 temperature = 0.7
@@ -15,7 +15,7 @@ thinking_config = { enabled = true, effort = "high" }
 name = "siliconflow-Qwen3.5-4B"
 provider = "openai"
 base_url = "https://api.siliconflow.cn/v1"
-api_key = "sk-xaslayhorfsiemfizeohplhjxksyfnphopamzqkukktchgcu"
+api_key = "sk-2222222222222222"
 model = "Qwen/Qwen3.5-4B"
 is_default = false
 
@@ -115,7 +115,7 @@ generalization_model = "siliconflow-Qwen3.5-4B"
 embedding_provider = "openai"
 embedding_model = "siliconflow-BAAI/bge-m3"
 embedding_base_url = "https://api.siliconflow.cn/v1"
-embedding_api_key = "sk-xaslayhorfsiemfizeohplhjxksyfnphopamzqkukktchgcu"
+embedding_api_key = "sk-333333333333333333333333"
 
 # 向量存储
 [rag.store]
