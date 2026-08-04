@@ -46,7 +46,7 @@ impl StorageContext {
 
         // 应用全部 pending 迁移（幂等）
         Migrator::up(&db, None).await?;
-        tracing::info!("Storage 迁移完成");
+        tracing::info!("Storage SQLite 迁移完成");
 
         Ok(Self {
             test_repo: Arc::new(TestRepo::new(db.clone())),

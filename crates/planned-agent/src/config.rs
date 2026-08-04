@@ -140,7 +140,8 @@ impl AppConfig {
                     server_command: "npx".to_string(),
                     server_args: vec!["@playwright/mcp@latest".to_string()],
                     transport: "stdio".to_string(),
-                    timeout_secs: Some(30),
+                    // 覆盖完整冷启动链：spawn npx → 首次拉包（可达数十秒）→ MCP initialize 握手
+                    timeout_secs: Some(120),
                     max_retries: Some(3),
                     is_default: true,
                     tools_filter: None,

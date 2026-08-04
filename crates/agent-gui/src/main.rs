@@ -1,3 +1,4 @@
+mod cache;
 mod components;
 mod config;
 mod context;
@@ -7,13 +8,15 @@ mod storage;
 
 use config::GuiConfig;
 use context::{
-    AiContext, InitStatus, McpContext, PromptContext, RagContext, StorageContext, ToolsContext,
+    AiContext, InitStatus, KvContext, McpChangeNotifier, McpContext, PromptContext, RagContext,
+    StorageContext, ToolsContext,
 };
 use dioxus::{desktop::Config, prelude::*};
 use pages::home::{HomePage, PageRoute};
 use pages::plan::PlanPage;
 use pages::settings::SettingsPage;
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 
@@ -105,9 +108,33 @@ fn app() -> Element {
     });
     use_context_provider(|| prompt);
 
-    // 3. MCP 管理器（异步 init：从 mcp-config.json 读取配置，连接所有 server，10s 超时）
+    // 3. KV 缓存（异步 init：spawn_blocking 内打开 sled）
+    //    必须在 MCP 之前声明：MCP 的 use_resource 闭包会捕获 `kv`。
+    let kv: Resource<Option<Arc<KvContext>>> = use_resource(move || {
+        let cache_cfg = config.read().cache.clone();
+        async move {
+            match KvContext::init(&cache_cfg).await {
+                Ok(ctx) => Some(Arc::new(ctx)),
+                Err(e) => {
+                    tracing::warn!("KV 缓存不可用，应用将无法使用本地 KV 缓存: {}", e);
+                    None
+                }
+            }
+        }
+    });
+    use_context_provider(|| kv);
+
+    // 3.5 MCP 变更通知器（与 McpContext 解耦的轻量 Dioxus context）
+    //     任何对 MCP 数据的写入后都 bump()，让 list_page 等 UI 重新加载视图
+    let mcp_change_signal = use_signal(|| 0u64);
+    use_context_provider(|| McpChangeNotifier::from_signal(mcp_change_signal));
+
+    // 4. MCP 管理器（异步 init：按场景选择 KV / 文件存储，10s 超时）
     let mcp: Resource<Option<Arc<McpContext>>> = use_resource(move || async move {
-        match McpContext::init().await {
+        // 等 kv Resource 就绪后再 init（mcp 与 kv 并发，mcp 可能先跑）。
+        // 最多等 500ms，每 50ms 检查一次；超时则降级到文件存储。
+        let kv_arc = wait_for_kv_ready(&kv, Duration::from_millis(500)).await;
+        match McpContext::init(kv_arc).await {
             Ok(ctx) => Some(Arc::new(ctx)),
             Err(e) => {
                 tracing::warn!("MCP 不可用: {}", e);
@@ -117,7 +144,7 @@ fn app() -> Element {
     });
     use_context_provider(|| mcp);
 
-    // 4. Tool Registry（同步 init：仅注册内置 provider；MCP 后续延后注入）
+    // 5. Tool Registry（同步 init：仅注册内置 provider；MCP 后续延后注入）
     let tools: Resource<Option<Arc<ToolsContext>>> = use_resource(move || async move {
         match ToolsContext::init() {
             Ok(ctx) => Some(Arc::new(ctx)),
@@ -129,7 +156,7 @@ fn app() -> Element {
     });
     use_context_provider(|| tools);
 
-    // 5. RAG（异步 init：既有逻辑）
+    // 6. RAG（异步 init：既有逻辑）
     let rag: Resource<Option<Arc<RagContext>>> = use_resource(move || {
         let rag_cfg = config.read().rag.clone();
         async move {
@@ -144,7 +171,7 @@ fn app() -> Element {
     });
     use_context_provider(|| rag);
 
-    // 6. Storage（异步 init：打开 SQLite + 跑 migration）
+    // 7. Storage（异步 init：打开 SQLite + 跑 migration）
     let storage: Resource<Option<Arc<StorageContext>>> = use_resource(move || {
         let storage_cfg = config.read().storage.clone();
         async move {
@@ -159,9 +186,11 @@ fn app() -> Element {
     });
     use_context_provider(|| storage);
 
-    // ── InitStatus 快照（响应式：随 6 个 Resource 变化自动重算） ──
+    // 8. KV 缓存（异步 init：spawn_blocking 内打开 sled）—— 已上移到第 3 位供 mcp 引用
+
+    // ── InitStatus 快照（响应式：随 7 个 Resource 变化自动重算） ──
     let init_status = use_memo(move || {
-        InitStatus::from_resources(&ai, &prompt, &mcp, &tools, &rag, &storage)
+        InitStatus::from_resources(&ai, &prompt, &mcp, &tools, &rag, &storage, &kv)
     });
     use_context_provider(|| init_status);
 
@@ -216,5 +245,26 @@ fn AppRouter() -> Element {
                 }
             },
         }
+    }
+}
+
+/// 轮询等待 KV Resource 就绪（最多等 `max_wait`），返回 `Arc<KvContext>` 或 `None`
+///
+/// 用途：mcp 与 kv 两个 Resource 并发 init 时，mcp 可能先跑。
+/// 这里在调用 [`McpContext::init`] 前先等一会 kv，超时则降级到文件存储。
+async fn wait_for_kv_ready(
+    kv: &Resource<Option<Arc<KvContext>>>,
+    max_wait: Duration,
+) -> Option<Arc<KvContext>> {
+    let start = Instant::now();
+    let interval = Duration::from_millis(50);
+    loop {
+        if let Some(Some(arc)) = kv.read().as_ref() {
+            return Some(arc.clone());
+        }
+        if start.elapsed() >= max_wait {
+            return None;
+        }
+        tokio::time::sleep(interval).await;
     }
 }

@@ -32,6 +32,10 @@ pub struct GuiConfig {
     /// 本地持久化配置（SQLite via SeaORM）
     #[serde(default)]
     pub storage: GuiStorageConfig,
+
+    /// 本地 KV 缓存配置（sled 后端）
+    #[serde(default)]
+    pub cache: GuiCacheConfig,
 }
 
 /// AI 提供商配置
@@ -123,6 +127,7 @@ impl Default for GuiConfig {
             gui: GuiSettings::default(),
             rag: RagConfig::default(),
             storage: GuiStorageConfig::default(),
+            cache: GuiCacheConfig::default(),
         }
     }
 }
@@ -264,6 +269,48 @@ impl Default for RagStoreConfig {
     }
 }
 
+// ── 本地 KV 缓存配置（sled 后端） ──
+
+/// 本地 KV 缓存配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuiCacheConfig {
+    /// sled 数据目录（启动时若不存在则自动创建）
+    #[serde(default = "default_cache_path")]
+    pub path: String,
+
+    /// 内存缓存字节数（透传 `sled::Config::cache_capacity`；越大热点越快，OOM 风险越高）
+    #[serde(default = "default_cache_capacity")]
+    pub cache_capacity: u64,
+
+    /// 自动 flush 间隔（毫秒；0 = 关闭后台 flush，依赖 drop 时 flush）
+    #[serde(default = "default_cache_flush_interval_ms")]
+    pub flush_interval_ms: u64,
+}
+
+fn default_cache_path() -> String {
+    "./data/kv_store".to_string()
+}
+
+fn default_cache_capacity() -> u64 {
+    128 * 1024 * 1024 // 128 MiB
+}
+
+fn default_cache_flush_interval_ms() -> u64 {
+    1000
+}
+
+impl Default for GuiCacheConfig {
+    fn default() -> Self {
+        Self {
+            path: default_cache_path(),
+            cache_capacity: default_cache_capacity(),
+            flush_interval_ms: default_cache_flush_interval_ms(),
+        }
+    }
+}
+
+// ── Default impls ──
+
 impl Default for RagRetrievalConfig {
     fn default() -> Self {
         Self {
@@ -283,9 +330,12 @@ impl GuiConfig {
     pub fn load() -> Self {
         match Self::try_load() {
             Ok(cfg) => {
-                tracing::info!("配置加载成功: {} 个 AI provider, RAG api_key={}",
+                tracing::info!(
+                    "配置加载成功: {} 个 AI provider, RAG api_key={}, KV cache path={}",
                     cfg.ai_providers.len(),
-                    if cfg.rag.embedding_api_key.is_empty() { "未配置" } else { "已配置" });
+                    if cfg.rag.embedding_api_key.is_empty() { "未配置" } else { "已配置" },
+                    cfg.cache.path
+                );
                 cfg
             }
             Err(e) => {

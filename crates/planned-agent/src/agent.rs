@@ -3,7 +3,7 @@ use planned_agent_core::{
     types::{ChatCompletionRequest, Message, MessageRole, MessageContent, ToolCall, ToolType, ToolDefinition, FunctionDefinition, AiProviderConfig, McpServerConfig},
 };
 use planned_agent_ai_manager::AiManager;
-use planned_agent_mcp_rmcp::McpManager;
+use planned_agent_mcp_rmcp::{McpConfigManager, McpManager};
 use planned_agent_prompt_manager::{FilePromptManager, PromptManagerConfig};
 use planned_agent_tool_manager::ToolRegistry;
 use planned_agent_tool_manager::builtin::file_tools::FileToolsProvider;
@@ -15,7 +15,7 @@ use planned_agent_tool_manager::builtin::web_tools::WebToolsProvider;
 use planned_agent::planner::react::chunk::ChunkToolsProvider;
 use planned_agent::planner::react::chunk::executor_context::ExecutorContext;
 use anyhow::Result;
-use tracing::{info, error};
+use tracing::info;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -80,44 +80,58 @@ impl Agent {
         Ok(())
     }
     
-    /// 连接到多个 MCP 服务器
-    pub async fn connect_mcp_servers(&mut self, configs: Vec<McpServerConfig>) -> Result<()> {
-        // 创建 MCP 管理器并连接服务器（带超时）
-        let mut mcp_manager = McpManager::new();
-        
-        // 使用 tokio::time::timeout 添加超时
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            mcp_manager.connect_all(configs)
-        ).await {
-            Ok(result) => result?,
-            Err(_) => {
-                error!("MCP connection timeout after 10 seconds");
-                return Err(anyhow::anyhow!("MCP connection timeout"));
+    /// 初始化 MCP：从配置文件加载缓存工具，实际调用时再懒连接服务器
+    ///
+    /// 保留 `configs` 参数以兼容现有调用方；MCP 配置与工具缓存统一以
+    /// `McpConfigManager` 管理的配置文件为准。
+    pub async fn connect_mcp_servers(&mut self, _configs: Vec<McpServerConfig>) -> Result<()> {
+        let config_manager = McpConfigManager::new(&String::from("/home/code/planned-agent/crates/agent-gui/data/mcp-config.json"));
+        let config = config_manager.load_config()?;
+        let mcp_manager = McpManager::new();
+
+        let mut cached_tool_count = 0usize;
+        for server in config.servers {
+            let tools = server
+                .cached_tools
+                .iter()
+                .map(|entry| entry.to_tool())
+                .collect::<Vec<_>>();
+
+            if tools.is_empty() {
+                info!(
+                    "MCP server '{}': no cached tools, skipping registration",
+                    server.name
+                );
+                continue;
             }
+
+            cached_tool_count += tools.len();
+            mcp_manager.set_server_tools_with_config(
+                &server.name,
+                tools,
+                server.to_core_config(),
+            );
         }
-        
-        // 获取连接状态
-        let stats = mcp_manager.get_connection_status().await;
-        for (name, status) in stats {
-            info!("MCP server '{}': {}", name, status);
-        }
-        
-        // 将 MCP 管理器注入到工具注册表
-        let mcp_manager_arc = Arc::new(mcp_manager);
-        self.tool_registry.set_mcp_manager(mcp_manager_arc);
-        
+
+        // set_mcp_manager 会将 McpManager 中的缓存工具同步到 ToolRegistry。
+        self.tool_registry.set_mcp_manager(Arc::new(mcp_manager));
+        info!(
+            "Initialized MCP from cache: {} tools loaded from {}",
+            cached_tool_count,
+            McpConfigManager::DEFAULT_PATH
+        );
+
         Ok(())
     }
     
     /// 处理用户输入（使用默认 AI 提供商）
     pub async fn process_input(&mut self, input: &str) -> Result<String> {
-        self.process_input_with_provider(input, Some("siliconflow-Qwen3.5-4B")).await
+        self.process_input_with_provider(input, Some("deepseek")).await
     }
     
     /// 处理用户输入（指定 AI 提供商）
     pub async fn process_input_with_provider(&mut self, input: &str, provider_name: Option<&str>) -> Result<String> {
-        info!("Processing input: {}", input);
+        info!("Processing input: {}-{:?}", input,provider_name);
         
         // 1. 获取 AI 客户端
         let ai_client = self.get_ai_client(provider_name)?;

@@ -533,6 +533,33 @@
     color: #10b981;
 }
 
+/* 三态变化 */
+.settings-mcp-card__status--ok {
+    color: #10b981;
+}
+
+.settings-mcp-card__status--loading {
+    color: #6b7280;
+    animation: mcp-status-pulse 1.2s ease-in-out infinite;
+}
+
+.settings-mcp-card__status--error {
+    color: #ef4444;
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-underline-offset: 3px;
+}
+
+.settings-mcp-card__status--error:hover {
+    color: #f87171;
+}
+
+@keyframes mcp-status-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
 .settings-mcp-card__command {
     font-size: 0.72rem;
     color: var(--secondary-color-4);
@@ -650,6 +677,63 @@
     max-width: 140px;
 }
 
+/* ── 必填字段红星 + 校验提示 ── */
+.settings-mcp-form__required {
+    color: var(--error-color, #ff6b6b);
+    margin-left: 2px;
+    font-weight: 600;
+}
+
+.settings-mcp-form__hint {
+    font-size: 0.68rem;
+    color: var(--error-color, #ff6b6b);
+    margin-top: 2px;
+    min-height: 0; /* 占位防抖动 */
+}
+
+.settings-mcp-form__hint--ok {
+    color: var(--secondary-color-5);
+}
+
+/* ── 分类多选 chip 组 ── */
+.settings-mcp-chip-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 4px 0 2px;
+}
+
+.settings-mcp-chip {
+    font-size: 0.72rem;
+    padding: 5px 12px;
+    border-radius: 14px;
+    background: var(--primary-color-5);
+    color: var(--secondary-color-5);
+    border: 1px solid var(--primary-color-6);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    font-family: inherit;
+    line-height: 1;
+}
+
+.settings-mcp-chip:hover:not(:disabled):not(.settings-mcp-chip--selected) {
+    background: var(--primary-color-6);
+    color: var(--secondary-color-2);
+    border-color: rgba(108, 182, 255, 0.3);
+}
+
+.settings-mcp-chip--selected {
+    background: rgba(108, 182, 255, 0.18);
+    color: #6cb6ff;
+    border-color: rgba(108, 182, 255, 0.5);
+    font-weight: 500;
+}
+
+.settings-mcp-chip:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 .settings-mcp-form__actions {
     display: flex;
     gap: 8px;
@@ -723,4 +807,59 @@
     gap: 12px;
     margin-bottom: 10px;
 
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * MCP 错误详情弹窗（AlertDialog）
+ * ═══════════════════════════════════════════════════════════════════════ */
+.mcp-error-dialog {
+    background: var(--primary-color-3);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    border-radius: 12px;
+    padding: 20px 24px;
+    max-width: 520px;
+    width: 90vw;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.mcp-error-dialog__meta {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 12px;
+}
+
+.mcp-error-dialog__row {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    margin: 0;
+}
+
+.mcp-error-dialog__label {
+    font-size: 0.75rem;
+    color: var(--secondary-color-5);
+    min-width: 48px;
+}
+
+.mcp-error-dialog__value {
+    font-size: 0.82rem;
+    color: var(--secondary-color-2);
+    font-weight: 500;
+}
+
+.mcp-error-dialog__detail {
+    margin-top: 4px;
+    padding: 12px;
+    background: var(--primary-color-5);
+    border: 1px solid var(--primary-color-6);
+    border-radius: 8px;
+    max-height: 240px;
+    overflow-y: auto;
+    font-family: ui-monospace, "SF Mono", "Consolas", monospace;
+    font-size: 0.68rem;
+    color: var(--secondary-color-4);
+    white-space: pre-wrap;
+    word-break: break-all;
+    line-height: 1.5;
 }

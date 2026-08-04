@@ -3,7 +3,7 @@
 use dioxus::prelude::{ReadableExt, Resource};
 use std::sync::Arc;
 
-use super::{AiContext, McpContext, PromptContext, RagContext, StorageContext, ToolsContext};
+use super::{AiContext, KvContext, McpContext, PromptContext, RagContext, StorageContext, ToolsContext};
 
 /// 模块生命周期状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,9 +45,9 @@ impl ModuleStatus {
     }
 }
 
-/// 6 个模块的统一状态快照
+/// 7 个模块的统一状态快照
 ///
-/// 在 `app()` 中 6 个 Resource 都 settle 后构造一次，通过 `use_context_provider` 注入。
+/// 在 `app()` 中 7 个 Resource 都 settle 后构造一次，通过 `use_context_provider` 注入。
 /// `tools` 的 Ready 仅表示内置工具就绪，**不**反映 MCP 注入状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InitStatus {
@@ -57,10 +57,11 @@ pub struct InitStatus {
     pub tools: ModuleStatus,
     pub rag: ModuleStatus,
     pub storage: ModuleStatus,
+    pub kv: ModuleStatus,
 }
 
 impl InitStatus {
-    /// 从 6 个 Resource 构造状态快照
+    /// 从 7 个 Resource 构造状态快照
     pub fn from_resources(
         ai: &Resource<Option<Arc<AiContext>>>,
         prompt: &Resource<Option<Arc<PromptContext>>>,
@@ -68,6 +69,7 @@ impl InitStatus {
         tools: &Resource<Option<Arc<ToolsContext>>>,
         rag: &Resource<Option<Arc<RagContext>>>,
         storage: &Resource<Option<Arc<StorageContext>>>,
+        kv: &Resource<Option<Arc<KvContext>>>,
     ) -> Self {
         fn map_status<T>(r: &Resource<Option<Arc<T>>>) -> ModuleStatus {
             match r.read().as_ref() {
@@ -84,6 +86,7 @@ impl InitStatus {
             tools: map_status(tools),
             rag: map_status(rag),
             storage: map_status(storage),
+            kv: map_status(kv),
         }
     }
 
@@ -95,6 +98,7 @@ impl InitStatus {
             && self.tools.state != ModuleState::Init
             && self.rag.state != ModuleState::Init
             && self.storage.state != ModuleState::Init
+            && self.kv.state != ModuleState::Init
     }
 
     /// 是否所有 settle 的模块都 Ready
@@ -106,5 +110,6 @@ impl InitStatus {
             && self.tools.state == ModuleState::Ready
             && self.rag.state == ModuleState::Ready
             && self.storage.state == ModuleState::Ready
+            && self.kv.state == ModuleState::Ready
     }
 }
