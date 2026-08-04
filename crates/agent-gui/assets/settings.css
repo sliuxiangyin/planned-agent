@@ -543,6 +543,10 @@
     animation: mcp-status-pulse 1.2s ease-in-out infinite;
 }
 
+.settings-mcp-card__status--pending {
+    color: #9ca3af;
+}
+
 .settings-mcp-card__status--error {
     color: #ef4444;
     cursor: pointer;

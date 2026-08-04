@@ -12,13 +12,12 @@
 //!
 //! 保存成功后：
 //! 1. 同步执行 `add_server` / `update_server`（持久化配置）
-//! 2. **异步**触发 `McpContext::refresh_tools` 拉取该 server 的工具列表
-//! 3. 立即调用 `on_saved` 让用户回到列表（看到 "连接中..." 状态）
-//! 4. 后台 refresh 完成后 `bump()` 通知器，让 list_page 重新加载视图
+//! 2. 标记状态为 `Pending`（等待连接），用户回到列表看到"等待连接"
+//! 3. 用户需手动点击"刷新工具"触发首次连接
 //!
 //! ## 刷新中禁用交互
 //!
-//! 整个保存+刷新期间 (`is_saving = true`)：
+//! 保存期间 (`is_saving = true`)：
 //! - 所有按钮（保存 / 取消 / 返回）禁用
 //! - 所有输入框禁用
 //! - 保存按钮文字变为 "保存中..."
@@ -26,7 +25,7 @@
 use dioxus::prelude::*;
 use planned_agent_mcp_rmcp::McpConfigManager;
 use planned_agent_mcp_rmcp::config::McpServerEntry;
-use planned_agent_mcp_rmcp::storage::{LastStatus, ServerStatus};
+use planned_agent_mcp_rmcp::storage::ServerStatus;
 use std::sync::Arc;
 
 use crate::context::{McpChangeNotifier, McpContext, ToolsContext};
@@ -381,28 +380,17 @@ pub fn McpEditorPage(
 
                             match save_result {
                                 Ok(_) => {
-                                    // 6. 预标记 Connecting（让 list_page 立即看到"连接中"）
+                                    // 6. 标记为 Pending（等待连接，默认初始状态）
                                     let _ = mcp.bundle.record_status(
                                         &new_name,
-                                        ServerStatus {
-                                            status: LastStatus::Connecting,
-                                            error_kind: None,
-                                            error_message: None,
-                                            attempt_at: ServerStatus::now(),
-                                        },
+                                        ServerStatus::pending(ServerStatus::now()),
                                     );
 
-                                    // 7. 通知 list_page reload（让用户切回时立刻看到 Connecting）
+                                    // 7. 通知 list_page reload（让用户切回时立刻看到"等待连接"）
                                     notifier.bump();
 
-                                    // 8. 立即返回列表（后台异步刷新工具）
+                                    // 8. 返回列表（不自动刷新，用户手动点击"刷新工具"触发连接）
                                     on_saved.call(());
-
-                                    // 9. 后台 spawn refresh_tools：等完成后再 bump 一次
-                                    spawn(async move {
-                                        let _ = mcp.refresh_tools(&new_name, &tools.registry).await;
-                                        notifier.bump();
-                                    });
                                 }
                                 Err(e) => {
                                     tracing::warn!("保存 MCP 服务器失败: {}", e);

@@ -45,6 +45,8 @@ pub enum LastStatus {
     },
     /// 正在连接中（通常 GUI 重启时不会持久化此状态；提供仅作完整性）
     Connecting,
+    /// 等待连接：已添加但尚未进行首次连接尝试（默认初始状态）
+    Pending,
     /// 连接失败
     Failed,
 }
@@ -107,6 +109,16 @@ impl ServerStatus {
     pub fn connecting(attempt_at: u64) -> Self {
         Self {
             status: LastStatus::Connecting,
+            error_kind: None,
+            error_message: None,
+            attempt_at,
+        }
+    }
+
+    /// 构造等待连接状态（服务器已添加但尚未进行首次连接尝试）
+    pub fn pending(attempt_at: u64) -> Self {
+        Self {
+            status: LastStatus::Pending,
             error_kind: None,
             error_message: None,
             attempt_at,

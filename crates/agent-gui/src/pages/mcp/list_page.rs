@@ -32,6 +32,8 @@ enum CardStatus {
     Ready(u32),
     /// 正在刷新/连接中（灰色）
     Connecting,
+    /// 等待连接：已添加但尚未进行首次连接尝试（灰色，默认状态）
+    Pending,
     /// 刷新失败（红色，可点击弹错误详情）
     Failed(ConnectionError),
 }
@@ -53,6 +55,7 @@ fn to_card_status(s: &ServerStatus) -> Option<CardStatus> {
     match s.status {
         LastStatus::Ready { tool_count } => Some(CardStatus::Ready(tool_count)),
         LastStatus::Connecting => Some(CardStatus::Connecting),
+        LastStatus::Pending => Some(CardStatus::Pending),
         LastStatus::Failed => {
             let reason = s.error_message.clone().unwrap_or_else(|| {
                 format!(
@@ -102,7 +105,8 @@ pub fn McpListPage(
             // 订阅 version 变化（每次 bump 触发这里）
             let _ = notifier.version();
             if let Some(c) = mcp_ctx.as_ref() {
-                views.set(c.load_servers());
+               
+                // views.set(c.load_servers());
             }
         });
     }
@@ -157,6 +161,14 @@ pub fn McpListPage(
                                                         span {
                                                             class: "settings-mcp-card__status settings-mcp-card__status--loading",
                                                             "● 连接中..."
+                                                        }
+                                                    }
+                                                }
+                                                Some(CardStatus::Pending) => {
+                                                    rsx! {
+                                                        span {
+                                                            class: "settings-mcp-card__status settings-mcp-card__status--pending",
+                                                            "○ 等待连接"
                                                         }
                                                     }
                                                 }
@@ -255,7 +267,6 @@ pub fn McpListPage(
                                     }
                                     button {
                                         class: "settings-mcp-action-btn",
-                                        disabled: is_connecting,  // 刷新中禁用编辑
                                         onclick: {
                                             let server_name = server_name.clone();
                                             move |_| on_edit.call(server_name.clone())
@@ -264,13 +275,15 @@ pub fn McpListPage(
                                     }
                                     button {
                                         class: "settings-mcp-action-btn settings-mcp-action-btn--danger",
-                                        disabled: mcp_ctx.is_none() || is_connecting,
+                                        disabled: mcp_ctx.is_none(),
                                         onclick: {
+                                             tracing::info!("删除1");
                                             let server_name = server_name.clone();
                                             let mcp_ctx = mcp_ctx.clone();
                                             let notifier = notifier;
                                             move |_| {
                                                 if let Some(c) = mcp_ctx.as_ref() {
+                                                    tracing::info!("删除");
                                                     // 走 McpContext::delete_server 包装，自动联动清理 status
                                                     if c.delete_server(&server_name).is_ok() {
                                                         // 通知所有监听者重新加载
