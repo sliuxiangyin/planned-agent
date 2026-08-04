@@ -13,10 +13,16 @@ use super::components::quick_actions::QuickActionsBar;
 use super::components::timeline::TimelineBar;
 use super::types::{mock_insights, mock_plans, mock_timeline, PlanMeta};
 
+/// 本页面专属样式（按需加载，不再由 main.rs 统一引入）。
+const HOME_CSS: Asset = asset!("/assets/home.css");
+
 #[derive(Clone, PartialEq)]
 pub enum PageRoute {
     Home,
     Plan(Option<String>), // None = 新建, Some(id) = 编辑已有
+    Settings,
+    // MCP 服务改用嵌套布局：左侧 nav 不动，右侧切视图（在 SettingsPage 内部用 McpView state 管理），
+    // 不再是顶级 page 路由。
 }
 
 #[component]
@@ -43,6 +49,7 @@ pub fn HomePage(
     let completed_count = plans.read().iter().filter(|p| matches!(p.status, super::types::PlanStatus::Completed)).count();
 
     rsx! {
+        document::Stylesheet { href: HOME_CSS }
         div { class: "command-center",
             // ═══════════════════════════════════════════════════════
             // 顶栏
@@ -78,11 +85,11 @@ pub fn HomePage(
                         class: format!("cc-module-dot {}", if prompt_ready { "ready" } else { "init" }),
                         title: if prompt_ready { "Prompt 已加载" } else { "Prompt 加载中" },
                     }
-                    // 设置入口（预留）
+                    // 设置入口
                     button {
                         class: "cc-settings-btn",
-                        title: "设置（即将上线）",
-                        disabled: true,
+                        title: "设置",
+                        onclick: move |_| on_navigate.call(PageRoute::Settings),
                         "⚙"
                     }
                 }

@@ -11,6 +11,7 @@ pub mod init_status;
 pub mod mcp;
 pub mod prompt;
 pub mod rag;
+pub mod storage;
 pub mod tools;
 
 pub use ai::AiContext;
@@ -18,4 +19,5 @@ pub use init_status::{InitStatus, ModuleState, ModuleStatus};
 pub use mcp::McpContext;
 pub use prompt::PromptContext;
 pub use rag::RagContext;
+pub use storage::StorageContext;
 pub use tools::ToolsContext;

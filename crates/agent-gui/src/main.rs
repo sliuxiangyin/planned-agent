@@ -3,12 +3,16 @@ mod config;
 mod context;
 mod pages;
 mod services;
+mod storage;
 
 use config::GuiConfig;
-use context::{AiContext, InitStatus, McpContext, PromptContext, RagContext, ToolsContext};
+use context::{
+    AiContext, InitStatus, McpContext, PromptContext, RagContext, StorageContext, ToolsContext,
+};
 use dioxus::{desktop::Config, prelude::*};
 use pages::home::{HomePage, PageRoute};
 use pages::plan::PlanPage;
+use pages::settings::SettingsPage;
 use std::sync::{Arc, OnceLock};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
@@ -22,9 +26,6 @@ static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 
 const RESET_CSS: Asset = asset!("/assets/reset.css");
 const THEME_CSS: Asset = asset!("/assets/dx-components-theme.css");
-const RESIZABLE_CSS: Asset = asset!("/assets/resizable_panel.css");
-const PLAN_CSS: Asset = asset!("/assets/plan.css");
-const HOME_CSS: Asset = asset!("/assets/home.css");
 
 fn main() {
     init_logging();
@@ -72,7 +73,7 @@ fn app() -> Element {
     let config = use_signal(|| APP_CONFIG.get().cloned().unwrap_or_default());
     use_context_provider(|| config);
 
-    // ── 5 个独立 Resource（互不依赖，并行 init） ─────────────────────────
+    // ── 6 个独立 Resource（互不依赖，并行 init） ────────────────────────
 
     // 1. AI 管理器（同步 init）
     let ai: Resource<Option<Arc<AiContext>>> = use_resource(move || {
@@ -104,16 +105,13 @@ fn app() -> Element {
     });
     use_context_provider(|| prompt);
 
-    // 3. MCP 管理器（异步 init：连接所有 server，10s 超时）
-    let mcp: Resource<Option<Arc<McpContext>>> = use_resource(move || {
-        let cfg = config.read().mcp_servers.clone();
-        async move {
-            match McpContext::init(&cfg).await {
-                Ok(ctx) => Some(Arc::new(ctx)),
-                Err(e) => {
-                    tracing::warn!("MCP 不可用: {}", e);
-                    None
-                }
+    // 3. MCP 管理器（异步 init：从 mcp-config.json 读取配置，连接所有 server，10s 超时）
+    let mcp: Resource<Option<Arc<McpContext>>> = use_resource(move || async move {
+        match McpContext::init().await {
+            Ok(ctx) => Some(Arc::new(ctx)),
+            Err(e) => {
+                tracing::warn!("MCP 不可用: {}", e);
+                None
             }
         }
     });
@@ -146,19 +144,38 @@ fn app() -> Element {
     });
     use_context_provider(|| rag);
 
-    // ── InitStatus 快照（响应式：随 5 个 Resource 变化自动重算） ──
+    // 6. Storage（异步 init：打开 SQLite + 跑 migration）
+    let storage: Resource<Option<Arc<StorageContext>>> = use_resource(move || {
+        let storage_cfg = config.read().storage.clone();
+        async move {
+            match StorageContext::init(&storage_cfg).await {
+                Ok(ctx) => Some(Arc::new(ctx)),
+                Err(e) => {
+                    tracing::warn!("Storage 不可用，应用将以纯 mock 数据运行: {}", e);
+                    None
+                }
+            }
+        }
+    });
+    use_context_provider(|| storage);
+
+    // ── InitStatus 快照（响应式：随 6 个 Resource 变化自动重算） ──
     let init_status = use_memo(move || {
-        InitStatus::from_resources(&ai, &prompt, &mcp, &tools, &rag)
+        InitStatus::from_resources(&ai, &prompt, &mcp, &tools, &rag, &storage)
     });
     use_context_provider(|| init_status);
 
     // ── 延后注入 MCP → Tools ──
-    // use_effect 在 tools / mcp 任一变化时触发；若两端都已 Ready 则调用 set_mcp_manager。
-    // MCP 失败时本 effect 静默 no-op（tools 仍可仅含内置工具）。
+    // use_effect 在 tools / mcp 任一变化时触发：
+    // 1. 注册 MCP 缓存工具到 ToolRegistry
+    // 2. 注入 McpManager 到 ToolRegistry（用于后续工具调用）
     use_effect(move || {
         let tools_arc = tools.read().as_ref().and_then(|x| x.clone());
         let mcp_arc = mcp.read().as_ref().and_then(|x| x.clone());
         if let (Some(t), Some(m)) = (tools_arc, mcp_arc) {
+            // 1. 从缓存注册 MCP 工具（不连接服务器）
+            m.register_cached_tools(&t.registry);
+            // 2. 注入 McpManager 用于后续工具调用路由
             t.set_mcp_manager(m.manager.clone());
         }
     });
@@ -166,14 +183,12 @@ fn app() -> Element {
     rsx! {
         document::Stylesheet { href: RESET_CSS }
         document::Stylesheet { href: THEME_CSS }
-        document::Stylesheet { href: RESIZABLE_CSS }
-        document::Stylesheet { href: PLAN_CSS }
-        document::Stylesheet { href: HOME_CSS }
         AppRouter {}
     }
 }
 
-/// 顶层路由组件：根据 `PageRoute` 切换 HomePage / PlanPage。
+/// 顶层路由组件：根据 `PageRoute` 切换 HomePage / PlanPage / SettingsPage。
+/// MCP 服务作为 `SettingsPage` 内部的嵌套视图（不再走顶级路由）。
 #[component]
 fn AppRouter() -> Element {
     let mut page = use_signal(|| PageRoute::Home);
@@ -192,6 +207,11 @@ fn AppRouter() -> Element {
             PageRoute::Plan(plan_id) => rsx! {
                 PlanPage {
                     plan_id: plan_id.clone(),
+                    on_back: move |_| navigate(PageRoute::Home),
+                }
+            },
+            PageRoute::Settings => rsx! {
+                SettingsPage {
                     on_back: move |_| navigate(PageRoute::Home),
                 }
             },

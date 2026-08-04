@@ -46,10 +46,16 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // 加载配置
-    let config = match AppConfig::load() {
-        Ok(config) => cli.merge_with_config(config),
-        Err(_) => {
-            info!("Using default configuration");
+    let config = match AppConfig::load(String::from("/home/code/planned-agent/crates/agent-gui/config.toml")) {
+        Ok(config) => {
+            info!("已从 {} 加载配置", cli.config);
+            cli.merge_with_config(config)
+        }
+        Err(e) => {
+            info!(
+                "无法从 {} 加载配置 ({}), 使用默认配置",
+                cli.config, e
+            );
             cli.merge_with_config(AppConfig::default_config())
         }
     };

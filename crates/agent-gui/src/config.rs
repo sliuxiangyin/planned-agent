@@ -5,15 +5,13 @@ use planned_agent_prompt_manager::PromptManagerConfig;
 use serde::{Deserialize, Serialize};
 
 /// agent-gui 完整配置
+///
+/// 注意：MCP 服务器配置已迁移到 `data/mcp-config.json`，由 `McpConfigService` 管理。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuiConfig {
     /// AI 提供商列表
     #[serde(default)]
     pub ai_providers: Vec<AiProviderConfig>,
-
-    /// MCP 服务器列表
-    #[serde(default)]
-    pub mcp_servers: Vec<McpServerConfig>,
 
     /// Prompt 管理器配置
     #[serde(default)]
@@ -30,6 +28,10 @@ pub struct GuiConfig {
     /// RAG 向量检索配置
     #[serde(default)]
     pub rag: RagConfig,
+
+    /// 本地持久化配置（SQLite via SeaORM）
+    #[serde(default)]
+    pub storage: GuiStorageConfig,
 }
 
 /// AI 提供商配置
@@ -51,32 +53,6 @@ pub struct AiProviderConfig {
     /// 思考模式配置（适用于支持思考模式的 AI 模型）
     #[serde(default)]
     pub thinking_config: Option<ThinkingConfig>,
-}
-
-/// MCP 服务器配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpServerConfig {
-    pub name: String,
-    pub server_command: String,
-    #[serde(default)]
-    pub server_args: Vec<String>,
-    #[serde(default = "default_transport")]
-    pub transport: String,
-    #[serde(default)]
-    pub timeout_secs: Option<u64>,
-    #[serde(default)]
-    pub max_retries: Option<u32>,
-    #[serde(default)]
-    pub is_default: bool,
-    #[serde(default)]
-    pub categories: Option<Vec<String>>,
-    /// 工具过滤器（仅加载指定工具）
-    #[serde(default)]
-    pub tools_filter: Option<Vec<String>>,
-}
-
-fn default_transport() -> String {
-    "stdio".to_string()
 }
 
 /// 日志配置
@@ -142,11 +118,38 @@ impl Default for GuiConfig {
     fn default() -> Self {
         Self {
             ai_providers: Vec::new(),
-            mcp_servers: Vec::new(),
             prompt_manager: PromptManagerConfig::default(),
             logging: LoggingConfig::default(),
             gui: GuiSettings::default(),
             rag: RagConfig::default(),
+            storage: GuiStorageConfig::default(),
+        }
+    }
+}
+
+// ── 本地持久化配置（SeaORM + SQLite） ──
+
+/// 本地持久化配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuiStorageConfig {
+    /// SQLite 数据库文件路径（推荐相对路径，路径解析复用 try_load 模式）
+    #[serde(default = "default_storage_db_path")]
+    pub db_path: String,
+
+    /// 启动时打印 schema 概要（仅调试）
+    #[serde(default)]
+    pub echo_schema: bool,
+}
+
+fn default_storage_db_path() -> String {
+    "./data/agent-gui.db".to_string()
+}
+
+impl Default for GuiStorageConfig {
+    fn default() -> Self {
+        Self {
+            db_path: default_storage_db_path(),
+            echo_schema: false,
         }
     }
 }
@@ -280,9 +283,8 @@ impl GuiConfig {
     pub fn load() -> Self {
         match Self::try_load() {
             Ok(cfg) => {
-                tracing::info!("配置加载成功: {} 个 AI provider, {} 个 MCP server, RAG api_key={}",
+                tracing::info!("配置加载成功: {} 个 AI provider, RAG api_key={}",
                     cfg.ai_providers.len(),
-                    cfg.mcp_servers.len(),
                     if cfg.rag.embedding_api_key.is_empty() { "未配置" } else { "已配置" });
                 cfg
             }

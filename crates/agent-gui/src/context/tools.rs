@@ -30,6 +30,13 @@ pub struct ToolsContext {
     pub registry: Arc<ToolRegistry>,
 }
 
+// Arc<ToolRegistry> 不实现 PartialEq；我们手动用指针地址比较
+impl PartialEq for ToolsContext {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.registry, &other.registry)
+    }
+}
+
 impl ToolsContext {
     /// 同步初始化：构造 ToolRegistry + 注册 6 个内置 provider
     ///

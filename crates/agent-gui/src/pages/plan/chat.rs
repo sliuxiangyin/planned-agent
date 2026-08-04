@@ -166,12 +166,13 @@ async fn run_chat_stream(
 // 处理用户 UI 操作（点击按钮后的完整流程）
 // ─────────────────────────────────────────────────────────────────────
 
-/// 用户点击 UI action 按钮后的处理：
-/// 1. 替换占位 tool result 为真实用户选择
-/// 2. 更新 messages → 追加 Assistant 占位
-/// 3. 继续 chat_with_callback 获取 LLM 后续响应
+/// 用户点击 UI action 按钮后的处理——同一条 Assistant 消息续写：
+/// 1. 找到 messages 里最后一条 Assistant，光标指回去
+/// 2. 在消息末尾插入分隔线 + 用户选择可视化
+/// 3. 将用户选择作为一条 User 消息追加到 history 给 LLM
+/// 4. 继续 chat_with_callback，后续 TextDelta 全部续写到同一条消息上
 pub(super) fn handle_user_action(
-    action: UIAction,
+    _action: UIAction,
     choice: String,
     pending: PendingUIState,
     mut messages: Signal<Vec<Message>, SyncStorage>,
@@ -180,61 +181,51 @@ pub(super) fn handle_user_action(
     mut pending_ui: Signal<Option<PendingUIState>, SyncStorage>,
     chat_signal: ChatServiceSignal,
 ) {
-    // 1. 获取历史快照
-    let mut history = pending.history_snapshot;
+    // 1. 找到 messages 里最后一条 Assistant —— 后续 TextDelta 续写到它后面
+    let asst_idx = messages
+        .read()
+        .iter()
+        .rposition(|m| matches!(m.role, MessageRole::Assistant));
 
-    // 2. 替换占位 tool result 为真实的用户选择
-    for msg in history.iter_mut().rev() {
-        if let Some(MessageContent::ToolResult { content, .. }) = &mut msg.content {
-            if content.contains("awaiting_user_input") {
-                *content = serde_json::to_string(&serde_json::json!({
-                    "action_id": action.id,
-                    "action_type": serde_json::to_value(&action.action_type).unwrap_or_default(),
-                    "choice": choice,
-                }))
-                .unwrap_or_default();
-                break;
-            }
+    // 不存在 Assistant 消息（理论上不会发生）
+    let asst_idx = match asst_idx {
+        Some(i) => i,
+        None => return,
+    };
+
+    // 2. 在最后一条 Assistant 末尾插入分隔线 + 用户选择可视化
+    if let Some(msg) = messages.write().get_mut(asst_idx) {
+        if let Some(t) = display_text_mut(msg) {
+            t.push_str(&format!("\n\n---\n\n**{}**\n\n", choice));
         }
     }
 
-    // 3. 更新 UI messages（展示用户选择）
-    messages.set(history.clone());
-
-    // 同步 reasoning_texts：history 中历史消息都没有正在 streaming 的 reasoning
-    {
-        let mut r = reasoning_texts.write();
-        r.clear();
-        r.resize(history.len(), None);
-    }
+    // 3. 光标指回现有消息（不 push 新的），后续 TextDelta 全部续写
+    streaming_idx.set(Some(asst_idx));
 
     // 4. 清除 pending 状态
     pending_ui.set(None);
 
-    // 5. 添加新的 assistant 占位（用于流式输出）
-    let asst_idx;
-    {
-        let mut msgs = messages.write();
-        asst_idx = msgs.len();
-        msgs.push(Message {
-            role: MessageRole::Assistant,
-            content: Some(MessageContent::Text {
-                text: String::new(),
-            }),
-            ..Default::default()
-        });
-        reasoning_texts.write().push(Some(String::new()));
-    }
-    streaming_idx.set(Some(asst_idx));
+    // 5. 构造 history 给 LLM：快照 + 用户选择作为一条 User 消息
+    let mut history = pending.history_snapshot;
+    history.push(Message {
+        role: MessageRole::User,
+        content: Some(MessageContent::Text {
+            text: choice.clone(),
+        }),
+        ..Default::default()
+    });
 
     // 6. 继续聊天
     let chat = (*chat_signal.read()).clone();
     let Some(chat) = chat else {
-        finalize_assistant(
-            messages,
-            streaming_idx,
-            "AI 服务未就绪，无法继续对话。",
-        );
+        // 服务未就绪：在当前 Assistant 消息末尾追加错误提示
+        if let Some(msg) = messages.write().get_mut(asst_idx) {
+            if let Some(t) = display_text_mut(msg) {
+                t.push_str("\n\n*AI 服务未就绪，无法继续对话。*");
+            }
+        }
+        streaming_idx.set(None);
         return;
     };
 
@@ -270,23 +261,23 @@ pub(super) fn handle_user_action(
 
         match result {
             Ok(response) => {
-                if response.pending_ui_actions.is_empty() {
-                    finalize_assistant(
-                        messages,
-                        streaming_idx,
-                        &display_text(&response.message),
-                    );
-                } else {
-                    streaming_idx.set(None);
-                }
+                // 不调 finalize_assistant —— 否则会覆盖已续写的全部文本
+                // 直接关光标：内容已在 TextDelta 流里追加到同一条消息上了
+                streaming_idx.set(None);
+                // 若有新 pending_ui_actions，已在回调里设置 pending_ui signal
+                let _ = response;
             }
             Err(e) => {
                 tracing::error!("Plan: handle_user_action Chat 错误: {}", e);
-                finalize_assistant(
-                    messages,
-                    streaming_idx,
-                    &format!("出错: {}", e),
-                );
+                // 在当前 Assistant 消息末尾追加错误提示
+                if let Some(idx) = *streaming_idx.read() {
+                    if let Some(msg) = messages.write().get_mut(idx) {
+                        if let Some(t) = display_text_mut(msg) {
+                            t.push_str(&format!("\n\n*出错: {}*", e));
+                        }
+                    }
+                }
+                streaming_idx.set(None);
             }
         }
     });

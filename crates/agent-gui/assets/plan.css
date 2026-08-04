@@ -123,9 +123,27 @@
     cursor: ns-resize;
 }
 
-.chat-input-area__submit {
-    width: 100%;
+/* 操作行：横向布局，左侧占位（后续放入其它操作）| 右侧图标按钮 */
+.chat-input-area__actions {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
     flex-shrink: 0;
+}
+
+/* 左侧占位（暂时为空，占满剩余宽度，把图标按钮推到最右） */
+.chat-input-area__placeholder {
+    flex: 1 1 auto;
+    min-width: 1px;
+}
+
+/* 图标按钮（发送 / 停止）通用尺寸 */
+.chat-input-area__icon-btn {
+    flex-shrink: 0;
+    font-size: 1.05rem;
+    line-height: 1;
 }
 
 /* ── Markdown 内容（套用在 .chat-message 内的 .markdown 子树） ──────── */

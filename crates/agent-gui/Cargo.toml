@@ -17,6 +17,7 @@ tracing-appender = "0.2"
 chrono = { workspace = true }
 config = "0.13"
 anyhow = "1"
+thiserror = { workspace = true }
 pulldown-cmark = { version = "0.10", default-features = false, features = ["html"] }
 ammonia = "4"
 planned-agent-core = { path = "../core" }
@@ -28,3 +29,18 @@ planned-agent-rag = { path = "../rag" }
 planned-agent = { path = "../planned-agent" }
 dioxus-primitives = { git = "https://github.com/DioxusLabs/components", version = "0.0.1", default-features = false }
 dioxus-icons = { version = "0.1.0", default-features = false }
+
+# SeaORM 2.0 —— 本地 SQLite 持久化
+sea-orm = { version = "2.0", features = [
+    "sqlx-sqlite",      # SQLite 后端
+    "macros",           # DeriveEntityModel / DeriveRelation
+    "runtime-tokio",    # 与现有 tokio runtime 对齐
+    "with-json",        # JSON 字段（阶段 2 可能用到）
+] }
+
+# Migration 框架（关闭默认 cli 特性，避免拉入 clap/dotenvy/sea-orm-cli）
+sea-orm-migration = { version = "2.0", default-features = false, features = [
+    "sqlx-sqlite",
+    "runtime-tokio",
+    "with-json",
+] }

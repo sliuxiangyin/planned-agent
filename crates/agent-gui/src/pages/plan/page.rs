@@ -2,7 +2,7 @@
 //!
 //! 仅持有 UI 状态与 rsx 树；chat 流程委托给同级的 `chat` 模块。
 
-use crate::components::button::{Button, ButtonVariant};
+use crate::components::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::markdown::Markdown;
 use crate::components::resizable_panel::ResizablePanel;
 use crate::components::scroll_area::ScrollArea;
@@ -19,6 +19,11 @@ use super::components::reasoning_view::ReasoningView;
 
 use super::chat::{handle_user_action, send_message};
 use super::types::{display_text, role_css_class, PendingUIState};
+
+/// 本页面专属样式（按需加载）。
+const PLAN_CSS: Asset = asset!("/assets/plan.css");
+/// ResizablePanel 所需样式（按需加载）。
+const RESIZABLE_CSS: Asset = asset!("/assets/resizable_panel.css");
 
 #[component]
 pub fn PlanPage(
@@ -195,30 +200,74 @@ pub fn PlanPage(
                         }
                     },
                 }
-                Button {
-                    class: "chat-input-area__submit",
-                    variant: ButtonVariant::Primary,
-                    disabled: !can_create,
-                    title: if !can_create { Some("AI 与 Prompt 初始化完成后才能创建") } else { None },
-                    onclick: move |_: MouseEvent| {
-                        if can_create {
-                            send_message(
-                                chat_signal,
-                                input_text,
-                                messages,
-                                reasoning_texts,
-                                streaming_idx,
-                                pending_ui,
-                            );
+                // ── 操作行：左侧占位（后期会放置其它操作） | 右侧图标按钮（发送 / 停止）──
+                div { class: "chat-input-area__actions",
+                    // 左侧占位（暂时为空，后续增加其它操作）
+                    div { class: "chat-input-area__placeholder" }
+
+                    // 发送图标：未在流式输出时显示
+                    if sidx.is_none() {
+                        Button {
+                            class: "chat-input-area__icon-btn chat-input-area__icon-btn--send",
+                            variant: ButtonVariant::Primary,
+                            size: ButtonSize::Xs,
+                            disabled: !can_create,
+                            title: if !can_create { Some("AI 与 Prompt 初始化完成后才能创建") } else { Some("发送") },
+                            onclick: move |_: MouseEvent| {
+                                if can_create {
+                                    send_message(
+                                        chat_signal,
+                                        input_text,
+                                        messages,
+                                        reasoning_texts,
+                                        streaming_idx,
+                                        pending_ui,
+                                    );
+                                }
+                            },
+                            // 发送图标（纸飞机，stroke=currentColor 跟随按钮前景色）
+                            svg {
+                                xmlns: "http://www.w3.org/2000/svg",
+                                width: "16",
+                                height: "16",
+                                view_box: "0 0 24 24",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                path { d: "M22 2 11 13" }
+                                path { d: "m22 2-7 20-4-9-9-4 20-7z" }
+                            }
                         }
-                    },
-                    "创建"
+                    } else {
+                        // 停止图标（实心方块，fill=currentColor 跟随按钮前景色）
+                        Button {
+                            class: "chat-input-area__icon-btn chat-input-area__icon-btn--stop",
+                            variant: ButtonVariant::Destructive,
+                            size: ButtonSize::Xs,
+                            title: Some("停止生成（待接入 stop API）"),
+                            onclick: move |_: MouseEvent| {
+                                // TODO: 接入 chat_service 的停止逻辑
+                            },
+                            svg {
+                                xmlns: "http://www.w3.org/2000/svg",
+                                width: "16",
+                                height: "16",
+                                view_box: "0 0 24 24",
+                                fill: "currentColor",
+                                rect { x: "6", y: "6", width: "12", height: "12", rx: "1.5" }
+                            }
+                        }
+                    }
                 }
             }
         }
     };
 
     rsx! {
+        document::Stylesheet { href: PLAN_CSS }
+        document::Stylesheet { href: RESIZABLE_CSS }
         div { class: "plan-page",
             ResizablePanel {
                 initial_left_percent: 70.0,

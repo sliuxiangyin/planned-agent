@@ -3,6 +3,7 @@ use planned_agent_core::types::{AiProviderConfig, McpServerConfig};
 use planned_agent_prompt_manager::PromptManagerConfig;
 use anyhow::Result;
 use config::Config;
+use std::path::Path;
 
 /// 应用配置（支持多配置）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,17 +71,19 @@ pub struct LoggingConfig {
 }
 
 impl AppConfig {
-    /// 从配置文件加载配置
-    pub fn load() -> Result<Self> {
+    /// 从指定的配置文件路径加载配置。
+    ///
+    /// 调用方负责决定路径来源（CLI 参数、默认值、环境变量等），
+    /// 本方法不再做任何目录探测或回退查找 —— 路径不存在或解析失败会直接返回错误。
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let config = Config::builder()
-            .add_source(config::File::with_name("config"))
+            .add_source(config::File::from(path.as_ref()))
             .build()?;
-        
+
         let app_config: AppConfig = config.try_deserialize()?;
-        
+
         Ok(app_config)
     }
-    
 
     
     /// 获取默认AI提供商配置

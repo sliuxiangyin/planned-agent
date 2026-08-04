@@ -21,47 +21,103 @@ struct Styles;
 /// - `message` — 引导文本（如 "需要生成执行计划吗？"）
 /// - `actions` — 用户可选的动作列表
 /// - `on_action` — 用户操作回调，传入 (UIAction, 用户选择值)
+///
+/// # 安全网（防御 LLM 输出违规）
+/// - Input + Select 混搭 → 只渲染 Input，丢弃 Select（两个不同问题不能混在一次交互）
+/// - Input + Confirm 混搭 → 正常渲染（同一问题不同回答方式，如"输入路径 / 当前目录"）
 #[component]
 pub fn ChatUIActionsView(
     message: String,
     actions: Vec<UIAction>,
     on_action: EventHandler<(UIAction, String)>,
 ) -> Element {
-    // Input 类型的本地输入状态（实践中 actions 数组至多含一个 Input action）
     let mut input_text = use_signal(String::new);
+
+    // ── 安全网：Input + Select 混搭 → 只保留 Input ──
+    let input_actions: Vec<UIAction> = actions
+        .iter()
+        .filter(|a| matches!(a.action_type, UIActionType::Input))
+        .cloned()
+        .collect();
+    let has_input = !input_actions.is_empty();
+    let has_select = actions.iter().any(|a| matches!(a.action_type, UIActionType::Select));
+    let show_button_group = !(has_input && has_select);
+
+    // 需要在 rsx 外做 warn
+    if has_input && has_select {
+        let button_count = actions.iter().filter(|a| !matches!(a.action_type, UIActionType::Input)).count();
+        tracing::warn!(
+            "ChatUIActionsView: LLM 返回 Input+Select 混搭（不同问题），丢弃 {} 个按钮 action，只渲染 Input",
+            button_count
+        );
+    }
+
+    // 按钮组数据（不含 Input）
+    let button_actions: Vec<UIAction> = actions
+        .iter()
+        .filter(|a| !matches!(a.action_type, UIActionType::Input))
+        .cloned()
+        .collect();
 
     rsx! {
         div { class: Styles::chat_ui_actions,
             p { class: Styles::chat_ui_actions_message, "{message}" }
-            div { class: Styles::chat_ui_actions_buttons,
-                for action in &actions {
-                    {
-                        match action.action_type {
-                            UIActionType::Confirm => {
-                                let action = action.clone();
-                                let label = action.label.clone();
-                                let display_label = label.clone();
-                                let desc = action.description.clone().unwrap_or_default();
-                                rsx! {
-                                    Button {
-                                        variant: ButtonVariant::Secondary,
-                                        title: if desc.is_empty() { None } else { Some(desc) },
-                                        onclick: move |_| {
-                                            on_action.call((action.clone(), label.clone()));
-                                        },
-                                        "{display_label}"
+
+            // ── Input 类型：独占一行，先渲染 ──
+            for action in &input_actions {
+                {
+                    let action = action.clone();
+                    let enter_action = action.clone();
+                    let click_action = action;
+                    let placeholder = enter_action.description.clone().unwrap_or_default();
+                    rsx! {
+                        div { class: Styles::input_row,
+                            Input {
+                                placeholder: "{placeholder}",
+                                value: "{input_text}",
+                                oninput: move |e: FormEvent| input_text.set(e.value()),
+                                onkeydown: move |e: KeyboardEvent| {
+                                    if e.data.key() == keyboard_types::Key::Enter {
+                                        let v = input_text.read().trim().to_string();
+                                        if !v.is_empty() {
+                                            on_action.call((enter_action.clone(), v));
+                                            input_text.set(String::new());
+                                        }
                                     }
-                                }
+                                },
                             }
-                            UIActionType::Select => {
-                                let action = action.clone();
-                                let label = action.label.clone();
-                                let display_label = label.clone();
-                                let desc = action.description.clone().unwrap_or_default();
-                                rsx! {
-                                    span { class: Styles::select_btn,
+                            Button {
+                                variant: ButtonVariant::Secondary,
+                                size: ButtonSize::Sm,
+                                onclick: move |_| {
+                                    let v = input_text.read().trim().to_string();
+                                    if !v.is_empty() {
+                                        on_action.call((click_action.clone(), v));
+                                        input_text.set(String::new());
+                                    }
+                                },
+                                "确认"
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Confirm / Select 按钮：flex-wrap 同行排列 ──
+            if show_button_group {
+                div { class: Styles::action_buttons,
+                    for action in &button_actions {
+                        {
+                            match action.action_type {
+                                UIActionType::Confirm => {
+                                    let action = action.clone();
+                                    let label = action.label.clone();
+                                    let display_label = label.clone();
+                                    let desc = action.description.clone().unwrap_or_default();
+                                    rsx! {
                                         Button {
                                             variant: ButtonVariant::Secondary,
+                                            size: ButtonSize::Sm,
                                             title: if desc.is_empty() { None } else { Some(desc) },
                                             onclick: move |_| {
                                                 on_action.call((action.clone(), label.clone()));
@@ -70,41 +126,26 @@ pub fn ChatUIActionsView(
                                         }
                                     }
                                 }
-                            }
-                            UIActionType::Input => {
-                                let action = action.clone();
-                                let enter_action = action.clone();
-                                let click_action = action;
-                                let placeholder = enter_action.description.clone().unwrap_or_default();
-                                rsx! {
-                                    div { class: Styles::input_row,
-                                        Input {
-                                            placeholder: "{placeholder}",
-                                            value: "{input_text}",
-                                            oninput: move |e: FormEvent| input_text.set(e.value()),
-                                            onkeydown: move |e: KeyboardEvent| {
-                                                if e.data.key() == keyboard_types::Key::Enter {
-                                                    let v = input_text.read().trim().to_string();
-                                                    if !v.is_empty() {
-                                                        on_action.call((enter_action.clone(), v));
-                                                        input_text.set(String::new());
-                                                    }
-                                                }
-                                            },
-                                        }
-                                        Button {
-                                            variant: ButtonVariant::Secondary,
-                                            onclick: move |_| {
-                                                let v = input_text.read().trim().to_string();
-                                                if !v.is_empty() {
-                                                    on_action.call((click_action.clone(), v));
-                                                    input_text.set(String::new());
-                                                }
-                                            },
-                                            "确认"
+                                UIActionType::Select => {
+                                    let action = action.clone();
+                                    let label = action.label.clone();
+                                    let display_label = label.clone();
+                                    let desc = action.description.clone().unwrap_or_default();
+                                    rsx! {
+                                        span { class: Styles::select_btn,
+                                            Button {
+                                                variant: ButtonVariant::Secondary,
+                                                size: ButtonSize::Sm,
+                                                title: if desc.is_empty() { None } else { Some(desc) },
+                                                onclick: move |_| {
+                                                    on_action.call((action.clone(), label.clone()));
+                                                },
+                                                "{display_label}"
+                                            }
                                         }
                                     }
                                 }
+                                _ => rsx! {}
                             }
                         }
                     }

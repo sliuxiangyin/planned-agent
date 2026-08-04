@@ -17,10 +17,11 @@
     white-space: pre-wrap;
 }
 
-.chat-ui-actions-buttons {
+/* Confirm / Select 按钮组：同行 flex-wrap 排列 */
+.action-buttons {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 6px;
 }
 
 /* Select 类型：虚线边框区分（wrapper span → 内层 Button 组件的 button 元素） */
@@ -28,9 +29,15 @@
     border-style: dashed;
 }
 
-/* Input 类型：输入框 + 确认按钮行 */
+/* Input 类型：独占整行，输入框自动填充剩余宽度 */
 .input-row {
     display: flex;
     gap: 8px;
     align-items: center;
+    width: 100%;
+}
+
+.input-row input {
+    flex: 1;
+    min-width: 0;
 }
