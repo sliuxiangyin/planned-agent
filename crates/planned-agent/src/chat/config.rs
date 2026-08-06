@@ -9,7 +9,7 @@ pub struct ChatConfig {
     /// 指定 AI provider 名;`None` 时使用 `AiManager` 注册的默认 provider。
     pub provider: Option<String>,
     /// system prompt **模板路径**，对应 `prompts/` 下某个 toml：
-    /// - 写法：相对目录、不含 `.toml` 后缀（例如 `"chat/system"` → `prompts/chat/system.toml`）
+    /// - 写法：相对目录、不含 `.toml` 后缀（例如 `"chat/thorough_system"` → `prompts/chat/thorough_system.toml`）
     /// - 解析：`ChatService` 通过注入的 `PromptManager::render(path, ctx)`
     ///   渲染模板（与 `LlmCoarsePlanner` 走相同路径，支持变量替换）
     /// - `None` 时不主动注入 system message；调用方需自行保证历史首条不是 `System`
@@ -29,17 +29,24 @@ pub struct ChatConfig {
     /// 仅作为 hint 透传给底层 `AiClient`,具体行为由 provider 实现决定
     /// (例如某些模型会在请求中追加 `thinking` metadata)。
     pub enable_thinking: bool,
+    /// 工具白名单。
+    ///
+    /// - `None`：全部工具可用（灵活模式等需要完整执行能力的场景）
+    /// - `Some(names)`：仅白名单中的工具会暴露给 LLM（周密模式仅保留
+    ///   `request_user_action` 等 UI 交互工具）
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 impl Default for ChatConfig {
     fn default() -> Self {
         Self {
             provider: None,
-            system_prompt_template: Some("chat/system".to_string()),
+            system_prompt_template: Some("chat/thorough_system".to_string()),
             temperature: None,
             max_tokens: None,
             max_tool_rounds: 10,
             enable_thinking: true,
+            allowed_tools: None,
         }
     }
 }

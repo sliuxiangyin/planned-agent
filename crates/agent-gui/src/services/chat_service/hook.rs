@@ -16,15 +16,18 @@ use super::types::ChatServiceSignal;
 /// `ChatService::new` 需要 owned `AiManager`，故从 `Arc<AiContext>` clone 出 owned 副本
 /// （`AiManager: Clone`，仅 Arc 引用 +1，client 本身不深拷贝）。
 ///
-/// `chat_config` 由调用方传入：可定制 `system_prompt_template`（模板路径，相对
-/// `prompts/` 目录、不含 `.toml` 后缀，例如 `"chat/system"`）、`provider`、
-/// `temperature`、`max_tokens`、`max_tool_rounds`、`enable_thinking` 等。
-/// `ChatService` 内部会通过 `PromptManager::render(template, ctx)` 渲染模板。
+/// `system_prompt_template` 为响应式信号：调用方通过 `use_memo` 将 UI 状态
+/// （如 `plan_mode`）映射为模板路径（相对 `prompts/` 目录、不含 `.toml` 后缀，
+/// 例如 `"chat/thorough_system"`）。信号变化时 effect 自动重建 `ChatService`，
+/// 实现运行时热切换 system prompt 模板。
 ///
-/// 用 `use_signal_sync + use_effect` 组合，绕开 `use_memo` 对 `PartialEq` 的要求。
+/// 其余配置（`temperature`、`max_tokens`、`max_tool_rounds`、`enable_thinking`
+/// 等）使用 `ChatConfig::default()`，可通过扩展本函数签名追加响应式参数。
 ///
 /// 必须在组件渲染期间调用（依赖 Dioxus 当前 scope）。
-pub(crate) fn use_chat_service(chat_config: ChatConfig) -> ChatServiceSignal {
+pub(crate) fn use_chat_service(
+    system_prompt_template: ReadSignal<Option<String>>,
+) -> ChatServiceSignal {
     let ai_resource = use_context::<Resource<Option<Arc<AiContext>>>>();
     let tools_resource = use_context::<Resource<Option<Arc<ToolsContext>>>>();
     let prompt_resource = use_context::<Resource<Option<Arc<PromptContext>>>>();
@@ -36,17 +39,31 @@ pub(crate) fn use_chat_service(chat_config: ChatConfig) -> ChatServiceSignal {
             let ai = ai_resource.read().as_ref().and_then(|x| x.as_ref()).cloned();
             let tools = tools_resource.read().as_ref().and_then(|x| x.as_ref()).cloned();
             let prompt = prompt_resource.read().as_ref().and_then(|x| x.as_ref()).cloned();
+            // 读信号使之成为 effect 依赖：template 变化 → effect 重跑 → ChatService 重建
+            let template = system_prompt_template();
             // 三者全 Ready 才构建；任一缺失则清空 Signal（保持 None）。
             let next = match (ai, tools, prompt) {
                 (Some(ai), Some(tools), Some(p)) => {
                     // ChatService<PM> 这里固定实参化为 FilePromptManager
                     // （与 planned-agent 同款风格的 prompt_manager: Arc<PM>）
                     let pm: Arc<FilePromptManager> = p.manager.clone();
-                    let svc = ChatService::new(
+                    // 周密模式（chat/thorough_system）仅暴露 UI 交互工具，禁止直接执行
+                    let allowed_tools = match template.as_deref() {
+                        Some("chat/thorough_system") => {
+                            Some(vec!["request_user_action".to_string()])
+                        }
+                        _ => None, // 灵活模式或其他：全部工具可用
+                    };
+                    let config = ChatConfig {
+                        system_prompt_template: template,
+                        allowed_tools,
+                        ..Default::default()
+                    };
+                    let svc: ChatService<FilePromptManager> = ChatService::new(
                         (*ai.manager).clone(),
                         tools.registry.clone(),
                         pm,
-                        chat_config.clone(),
+                        config,
                     );
                     Some(Arc::new(svc))
                 }

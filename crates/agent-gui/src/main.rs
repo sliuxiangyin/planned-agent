@@ -234,9 +234,23 @@ fn AppRouter() -> Element {
                 }
             },
             PageRoute::Plan(plan_id) => rsx! {
-                PlanPage {
-                    plan_id: plan_id.clone(),
-                    on_back: move |_| navigate(PageRoute::Home),
+                match plan_id {
+                    Some(id) => rsx! {
+                        PlanPage {
+                            plan_id: id.clone(),
+                            on_back: move |_| navigate(PageRoute::Home),
+                        }
+                    },
+                    None => rsx! {
+                        // 不应出现：新建计划现在通过弹窗创建，不再走 plan_id=None 路径
+                        div { class: "plan-page",
+                            button {
+                                onclick: move |_| navigate(PageRoute::Home),
+                                "← 返回指挥中心"
+                            }
+                            "无效的计划 ID，请返回重新创建。"
+                        }
+                    },
                 }
             },
             PageRoute::Settings => rsx! {

@@ -312,8 +312,9 @@ if is_valid {
 ```
 prompts/
 ├── chat/
-│   ├── system.toml      # 系统角色提示
-│   └── user.txt         # 用户消息模板
+│   ├── flexible_system.toml # 系统角色提示（灵活模式）
+│   ├── thorough_system.toml # 系统角色提示（周密模式）
+│   └── user.txt             # 用户消息模板
 ├── analysis/
 │   └── extract_info.toml # 信息提取提示
 ├── planning/

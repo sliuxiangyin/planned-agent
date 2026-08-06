@@ -10,6 +10,7 @@
 
 use dioxus::prelude::*;
 
+use crate::components::page_header::PageHeader;
 use crate::context::ToolsContext;
 use crate::pages::mcp::{McpEditorPage, McpListPage};
 use super::components::tool_list::ToolList;
@@ -43,15 +44,12 @@ pub fn SettingsPage(
         document::Stylesheet { href: SETTINGS_CSS }
         div { class: "settings-page",
             // ═══════════════════════════════════════════════════════
-            // 顶栏
+            // 顶栏（PageHeader 组件）
             // ═══════════════════════════════════════════════════════
-            header { class: "settings-topbar",
-                button {
-                    class: "settings-back-btn",
-                    onclick: move |_| on_back.call(()),
-                    "← 返回指挥中心"
-                }
-                h1 { class: "settings-topbar__title", "设置" }
+            PageHeader {
+                title: "设置".to_string(),
+                on_back: Some(on_back),
+                back_label: Some("← 返回指挥中心".to_string()),
             }
 
             // ═══════════════════════════════════════════════════════

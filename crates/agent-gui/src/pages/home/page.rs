@@ -2,16 +2,21 @@
 //!
 //! 布局：顶栏 → 核心区(左:AI Core+计划节点 | 右:Agent洞察) → 操作栏 → 时间线
 
+use std::sync::Arc;
+
 use dioxus::prelude::*;
 
-use crate::context::{InitStatus, ModuleState};
+use crate::context::{InitStatus, ModuleState, StorageContext};
 
+use super::components::active_plans::ActivePlans;
 use super::components::agent_insights::AgentInsightsPanel;
 use super::components::ai_core::AiCore;
-use super::components::active_plans::ActivePlans;
+use super::components::create_plan_modal::{CreatePlanData, CreatePlanModal};
 use super::components::quick_actions::QuickActionsBar;
 use super::components::timeline::TimelineBar;
-use super::types::{mock_insights, mock_plans, mock_timeline, PlanMeta};
+use super::types::{
+    mock_insights, mock_plans, mock_timeline, PlanMeta, PlanStatus,
+};
 
 /// 本页面专属样式（按需加载，不再由 main.rs 统一引入）。
 const HOME_CSS: Asset = asset!("/assets/home.css");
@@ -21,16 +26,63 @@ pub enum PageRoute {
     Home,
     Plan(Option<String>), // None = 新建, Some(id) = 编辑已有
     Settings,
-    // MCP 服务改用嵌套布局：左侧 nav 不动，右侧切视图（在 SettingsPage 内部用 McpView state 管理），
-    // 不再是顶级 page 路由。
 }
 
 #[component]
-pub fn HomePage(
-    on_navigate: EventHandler<PageRoute>,
-) -> Element {
+pub fn HomePage(on_navigate: EventHandler<PageRoute>) -> Element {
     let init_status = use_context::<Memo<InitStatus>>();
-    let plans = use_signal(mock_plans);
+    let storage = use_context::<Resource<Option<Arc<StorageContext>>>>();
+
+    // ── 弹窗状态 ──
+    let mut show_create_modal = use_signal(|| false);
+
+    // ── 计划列表（从 DB 加载，fallback mock） ──
+    let mut plans = use_signal(Vec::new);
+    let mut plans_loaded = use_signal(|| false);
+
+    // 当 storage 就绪时加载 plans
+    use_effect(move || {
+        let storage_opt = storage.read().as_ref().and_then(|x| x.as_ref()).cloned();
+        if let Some(ctx) = storage_opt {
+            if !*plans_loaded.read() {
+                plans_loaded.set(true);
+                let repo = ctx.plan_repo.clone();
+                spawn(async move {
+                    match repo.find_all().await {
+                        Ok(list) => {
+                            let meta_list: Vec<PlanMeta> = list
+                                .into_iter()
+                                .enumerate()
+                                .map(|(i, m)| PlanMeta {
+                                    id: m.id,
+                                    name: m.name,
+                                    description: m.description,
+                                    status: PlanStatus::from_str(&m.status),
+                                    mode: m.mode,
+                                    schedule: None,
+                                    strategy: None,
+                                    tags: vec![],
+                                    created_at: chrono::DateTime::parse_from_rfc3339(&m.created_at)
+                                        .map(|d| d.with_timezone(&chrono::Utc))
+                                        .unwrap_or_default(),
+                                    updated_at: chrono::DateTime::parse_from_rfc3339(&m.updated_at)
+                                        .map(|d| d.with_timezone(&chrono::Utc))
+                                        .unwrap_or_default(),
+                                    orbit_angle: (i as f64 * 72.0) % 360.0,
+                                })
+                                .collect();
+                            plans.set(meta_list);
+                        }
+                        Err(e) => {
+                            tracing::warn!("加载计划列表失败，使用 mock 数据: {}", e);
+                            plans.set(mock_plans());
+                        }
+                    }
+                });
+            }
+        }
+    });
+
     let insights = use_signal(mock_insights);
     let timeline = use_signal(mock_timeline);
 
@@ -44,13 +96,54 @@ pub fn HomePage(
 
     let all_ready = ai_ready && mcp_ready && prompt_ready;
 
-    // 活跃计划数统计
-    let active_count = plans.read().iter().filter(|p| matches!(p.status, super::types::PlanStatus::Running | super::types::PlanStatus::Queued)).count();
-    let completed_count = plans.read().iter().filter(|p| matches!(p.status, super::types::PlanStatus::Completed)).count();
+    // 计划数量统计
+    let pending_count = plans
+        .read()
+        .iter()
+        .filter(|p| matches!(p.status, PlanStatus::PendingGeneration))
+        .count();
+    let generated_count = plans
+        .read()
+        .iter()
+        .filter(|p| matches!(p.status, PlanStatus::Generated))
+        .count();
+
+    // ── 弹窗回调 ──
+    let handle_modal_confirm = {
+        let storage = storage.clone();
+        let on_navigate = on_navigate.clone();
+        move |data: CreatePlanData| {
+            let storage_opt = storage.read().as_ref().and_then(|x| x.as_ref()).cloned();
+            if let Some(ctx) = storage_opt {
+                let repo = ctx.plan_repo.clone();
+                spawn(async move {
+                    match repo.create(&data.name, &data.mode).await {
+                        Ok(plan_model) => {
+                            on_navigate.call(PageRoute::Plan(Some(plan_model.id)));
+                        }
+                        Err(e) => {
+                            tracing::error!("创建计划失败: {}", e);
+                        }
+                    }
+                });
+            } else {
+                tracing::warn!("Storage 未就绪，无法创建计划");
+            }
+            show_create_modal.set(false);
+        }
+    };
 
     rsx! {
         document::Stylesheet { href: HOME_CSS }
         div { class: "command-center",
+
+            // ── 创建计划弹窗 ──
+            CreatePlanModal {
+                is_open: show_create_modal(),
+                on_close: move |_| show_create_modal.set(false),
+                on_confirm: handle_modal_confirm,
+            }
+
             // ═══════════════════════════════════════════════════════
             // 顶栏
             // ═══════════════════════════════════════════════════════
@@ -61,7 +154,6 @@ pub fn HomePage(
                     span { class: "cc-topbar__subtitle", "AI 指挥中心" }
                 }
                 div { class: "cc-topbar__center",
-                    // 全局状态脉冲指示
                     div {
                         class: format!(
                             "cc-status-pulse {}",
@@ -85,7 +177,6 @@ pub fn HomePage(
                         class: format!("cc-module-dot {}", if prompt_ready { "ready" } else { "init" }),
                         title: if prompt_ready { "Prompt 已加载" } else { "Prompt 加载中" },
                     }
-                    // 设置入口
                     button {
                         class: "cc-settings-btn",
                         title: "设置",
@@ -101,15 +192,14 @@ pub fn HomePage(
             main { class: "cc-main",
                 // ── 左侧：AI Core + 环绕计划 ──
                 div { class: "cc-core-area",
-                    // 统计概览（左上角）
                     div { class: "cc-stats-overlay",
                         div { class: "cc-stat",
-                            span { class: "cc-stat__value", "{active_count}" }
-                            span { class: "cc-stat__label", "活跃" }
+                            span { class: "cc-stat__value", "{pending_count}" }
+                            span { class: "cc-stat__label", "待生成" }
                         }
                         div { class: "cc-stat",
-                            span { class: "cc-stat__value", "{completed_count}" }
-                            span { class: "cc-stat__label", "完成" }
+                            span { class: "cc-stat__value", "{generated_count}" }
+                            span { class: "cc-stat__label", "已生成" }
                         }
                         div { class: "cc-stat",
                             span { class: "cc-stat__value", "{timeline.read().len()}" }
@@ -117,13 +207,11 @@ pub fn HomePage(
                         }
                     }
 
-                    // AI Core（中心脉冲）
                     AiCore {
                         is_active: all_ready,
-                        active_plan_count: active_count,
+                        active_plan_count: pending_count,
                     }
 
-                    // 环绕计划节点
                     ActivePlans {
                         plans: plans.read().clone(),
                         hovered_id: hovered_plan.read().clone(),
@@ -139,7 +227,6 @@ pub fn HomePage(
                     insights: insights.read().clone(),
                     on_action: move |insight_id: String| {
                         tracing::info!("洞察操作: {}", insight_id);
-                        // TODO: 后续接入实际操作
                     },
                 }
             }
@@ -148,7 +235,7 @@ pub fn HomePage(
             // 快捷操作栏
             // ═══════════════════════════════════════════════════════
             QuickActionsBar {
-                on_new_plan: move |_| on_navigate.call(PageRoute::Plan(None)),
+                on_new_plan: move |_| show_create_modal.set(true),
                 on_execute_all: move |_| {
                     tracing::info!("一键执行全部计划");
                 },

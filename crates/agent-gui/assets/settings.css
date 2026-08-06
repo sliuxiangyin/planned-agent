@@ -13,43 +13,7 @@
     overflow: hidden;
 }
 
-/* ── 顶栏 ──────────────────────────────────────────────────────────── */
-.settings-topbar {
-    height: 48px;
-    min-height: 48px;
-    display: flex;
-    align-items: center;
-    padding: 0 20px;
-    background: var(--primary-color-4);
-    border-bottom: 1px solid var(--primary-color-6);
-    gap: 16px;
-    z-index: 100;
-}
-
-.settings-back-btn {
-    background: var(--primary-color-5);
-    border: 1px solid var(--primary-color-6);
-    color: var(--secondary-color-3);
-    font-size: 0.8rem;
-    padding: 6px 12px;
-    border-radius: 8px;
-    cursor: pointer;
-    transition: all 0.2s;
-}
-
-.settings-back-btn:hover {
-    background: var(--primary-color-3);
-    border-color: rgba(108, 182, 255, 0.3);
-    color: #6cb6ff;
-}
-
-.settings-topbar__title {
-    font-size: 1rem;
-    font-weight: 600;
-    margin: 0;
-    color: var(--secondary-color-2);
-    user-select: none;
-}
+/* 顶栏已抽离到 components/page_header，本页沿用 .page-header 默认样式 */
 
 /* ── 主体区域 ──────────────────────────────────────────────────────── */
 .settings-body {
@@ -799,19 +763,9 @@
     background: var(--primary-color-7);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
- * 嵌套 topbar（McpEditor 在 SettingsPage 右侧内容区的局部 header）
- * ═══════════════════════════════════════════════════════════════════════ */
-.settings-topbar--nested {
-    height: auto;
-    min-height: 40px;
-    padding: 8px 16px;
-    background: var(--primary-color-4);
-    border-bottom: 1px solid var(--primary-color-6);
-    gap: 12px;
-    margin-bottom: 10px;
-
-}
+/* 嵌套 topbar（McpEditor 在 SettingsPage 右侧内容区的局部 header）
+   已抽离到 components/page_header，使用 .page-header--nested 替代
+   原 .settings-topbar--nested */
 
 /* ═══════════════════════════════════════════════════════════════════════
  * MCP 错误详情弹窗（AlertDialog）

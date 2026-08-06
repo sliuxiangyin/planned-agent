@@ -1,0 +1,77 @@
+/* ========================================================================
+ * page-header — 通用页面顶栏组件样式
+ *
+ * 设计目标：
+ *   - 默认高度 48px（顶级页面 / SettingsPage）
+ *   - 通过 .page-header--nested 切换为 40px 嵌入版（McpEditor / PlanPage 左侧 panel）
+ *   - 与项目主题色变量保持一致
+ * ===================================================================== */
+
+/* ── 默认顶栏 ──────────────────────────────────────────────────────────── */
+.page-header {
+    display: flex;
+    align-items: center;
+    height: 48px;
+    padding: 0 20px;
+    background: var(--primary-color-4);
+    border-bottom: 1px solid var(--primary-color-6);
+    gap: 16px;
+    z-index: 100;
+    flex-shrink: 0;
+}
+
+/* ── 嵌套版（次级页面 / 面板内 header） ─────────────────────────────── */
+.page-header--nested {
+    height: auto;
+    min-height: 40px;
+    padding: 8px 16px;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+/* ── 返回按钮 ──────────────────────────────────────────────────────────── */
+.page-header__back {
+    background: var(--primary-color-5);
+    border: 1px solid var(--primary-color-6);
+    color: var(--secondary-color-3);
+    font-size: 0.8rem;
+    padding: 6px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s;
+    flex-shrink: 0;
+}
+
+.page-header__back:hover {
+    background: var(--primary-color-3);
+    border-color: rgba(108, 182, 255, 0.3);
+    color: #6cb6ff;
+}
+
+.page-header__back:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* ── 标题 ──────────────────────────────────────────────────────────────── */
+.page-header__title {
+    font-size: 1rem;
+    font-weight: 600;
+    margin: 0;
+    color: var(--secondary-color-2);
+    user-select: none;
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ── 右侧操作槽位 ──────────────────────────────────────────────────────── */
+.page-header__actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+}

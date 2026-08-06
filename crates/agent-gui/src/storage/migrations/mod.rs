@@ -3,12 +3,16 @@
 use sea_orm_migration::prelude::*;
 
 mod m20260101_000001_create_tests;
+mod m20260806_create_plans_and_messages;
 
 pub struct Migrator;
 
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(m20260101_000001_create_tests::Migration)]
+        vec![
+            Box::new(m20260101_000001_create_tests::Migration),
+            Box::new(m20260806_create_plans_and_messages::Migration),
+        ]
     }
 }

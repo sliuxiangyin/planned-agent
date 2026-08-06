@@ -15,22 +15,28 @@ use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 
 use crate::config::GuiStorageConfig;
-use crate::storage::{migrations::Migrator, repository::TestRepo};
+use crate::storage::{
+    migrations::Migrator,
+    repository::{MessageRepo, PlanRepo, TestRepo},
+};
 
 /// GUI 层 Storage 上下文
 ///
-/// 组件通过 `use_context::<Resource<Option<Arc<StorageContext>>>>()` 获取，
-/// MVP 阶段仅暴露 `ctx.test_repo` 用于验证 Repository ↔ Entity 链路。
-#[allow(dead_code)] // MVP 占位 —— 阶段 2 业务接入时启用
+/// 组件通过 `use_context::<Resource<Option<Arc<StorageContext>>>>()` 获取。
+#[allow(dead_code)]
 pub struct StorageContext {
     /// SQLite 连接（SeaORM DatabaseConnection）
     pub db: DatabaseConnection,
     /// tests 表仓库（验证用）
     pub test_repo: Arc<TestRepo>,
+    /// plans 表仓库
+    pub plan_repo: Arc<PlanRepo>,
+    /// messages 表仓库
+    pub message_repo: Arc<MessageRepo>,
 }
 
 impl StorageContext {
-    /// 从配置异步初始化 SQLite + 迁移 + TestRepo
+    /// 从配置异步初始化 SQLite + 迁移 + Repos
     pub async fn init(config: &GuiStorageConfig) -> anyhow::Result<Self> {
         let path = resolve_db_path(&config.db_path)?;
         let url = format!("sqlite://{}?mode=rwc", path.display());
@@ -49,8 +55,10 @@ impl StorageContext {
         tracing::info!("Storage SQLite 迁移完成");
 
         Ok(Self {
+            db: db.clone(),
             test_repo: Arc::new(TestRepo::new(db.clone())),
-            db,
+            plan_repo: Arc::new(PlanRepo::new(db.clone())),
+            message_repo: Arc::new(MessageRepo::new(db.clone())),
         })
     }
 }

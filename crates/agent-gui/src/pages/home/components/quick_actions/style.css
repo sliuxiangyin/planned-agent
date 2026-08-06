@@ -1,0 +1,121 @@
+/* ── QuickActionsBar 组件样式 ─────────────────────────────────────────── */
+
+.cc-quick-actions {
+    height: 56px;
+    min-height: 56px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    padding: 0 20px;
+    background: var(--primary-color-4);
+    border-top: 1px solid var(--primary-color-6);
+    border-bottom: 1px solid var(--primary-color-6);
+}
+
+.cc-quick-actions__divider {
+    width: 1px;
+    height: 24px;
+    background: var(--primary-color-6);
+    margin: 0 12px;
+}
+
+.cc-action-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border: none;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--secondary-color-3);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    font-size: 0.82rem;
+}
+
+.cc-action-btn:hover:not(:disabled) {
+    background: var(--primary-color-5);
+    transform: translateY(-1px);
+}
+
+.cc-action-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.cc-action-btn--voice {
+    background: linear-gradient(135deg,
+        rgba(108, 182, 255, 0.08),
+        rgba(167, 139, 250, 0.08));
+    border: 1px solid rgba(108, 182, 255, 0.15);
+    min-width: 200px;
+    justify-content: center;
+}
+
+.cc-action-btn--voice:hover:not(:disabled) {
+    background: linear-gradient(135deg,
+        rgba(108, 182, 255, 0.15),
+        rgba(167, 139, 250, 0.15));
+    border-color: rgba(108, 182, 255, 0.3);
+}
+
+.cc-action-btn--primary {
+    background: rgba(16, 185, 129, 0.1);
+    border: 1px solid rgba(16, 185, 129, 0.2);
+}
+
+.cc-action-btn--primary:hover:not(:disabled) {
+    background: rgba(16, 185, 129, 0.18);
+    border-color: rgba(16, 185, 129, 0.35);
+}
+
+.cc-action-btn--execute {
+    background: rgba(108, 182, 255, 0.1);
+    border: 1px solid rgba(108, 182, 255, 0.2);
+    position: relative;
+    overflow: hidden;
+}
+
+.cc-action-btn--execute::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg,
+        transparent,
+        rgba(108, 182, 255, 0.08),
+        transparent);
+    animation: execute-shimmer 2.5s ease-in-out infinite;
+}
+
+@keyframes execute-shimmer {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+}
+
+.cc-action-btn--execute:hover:not(:disabled) {
+    background: rgba(108, 182, 255, 0.18);
+    border-color: rgba(108, 182, 255, 0.35);
+}
+
+.cc-action-btn__icon {
+    font-size: 1.1rem;
+    width: 24px;
+    text-align: center;
+}
+
+.cc-action-btn__label {
+    font-weight: 500;
+}
+
+.cc-action-btn__hint {
+    font-size: 0.65rem;
+    color: var(--secondary-color-5);
+    padding: 1px 6px;
+    background: var(--primary-color-6);
+    border-radius: 4px;
+}
+
+.cc-action-btn--reserved {
+    opacity: 0.4;
+}

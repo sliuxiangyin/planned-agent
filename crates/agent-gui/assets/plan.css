@@ -13,8 +13,10 @@
     height: 100%;
     background: var(--primary-color-4);
     display: flex;
-    align-items: center;
-    justify-content: center;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+    overflow: hidden;
 }
 
 .plan-left-panel__label {
@@ -137,6 +139,64 @@
 .chat-input-area__placeholder {
     flex: 1 1 auto;
     min-width: 1px;
+}
+
+/* 计划模式选择（dx-select 组件包装容器） */
+.chat-input-area__mode-select {
+    flex: 0 0 auto;
+    min-width: 7rem;
+}
+
+/* 缩小 trigger 尺寸以适配操作行高度 */
+.chat-input-area__mode-select button[aria-haspopup="listbox"] {
+    width: 100%;
+    padding: 6px 8px;
+    font-size: 0.8rem;
+    border-radius: 6px;
+}
+
+.chat-input-area__mode-select .dx-select-expand-icon {
+    width: 14px;
+    height: 14px;
+}
+
+/* 输入区在页面底部，下拉列表向上展开 */
+.chat-input-area__mode-select [role="listbox"] {
+    top: auto;
+    bottom: 100%;
+    margin-top: 0;
+    margin-bottom: 0.25rem;
+    transform-origin: bottom;
+}
+
+.chat-input-area__mode-select [role="listbox"][data-state="open"] {
+    animation: plan-select-in-up 150ms ease-out forwards;
+}
+
+.chat-input-area__mode-select [role="listbox"][data-state="closed"] {
+    animation: plan-select-out-down 100ms ease-in forwards;
+}
+
+@keyframes plan-select-in-up {
+    from {
+        opacity: 0;
+        transform: scale(0.95) translateY(2px);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1) translateY(0);
+    }
+}
+
+@keyframes plan-select-out-down {
+    from {
+        opacity: 1;
+        transform: scale(1) translateY(0);
+    }
+    to {
+        opacity: 0;
+        transform: scale(0.95) translateY(2px);
+    }
 }
 
 /* 图标按钮（发送 / 停止）通用尺寸 */
@@ -285,5 +345,47 @@
 
 .chat-message .markdown em {
     font-style: italic;
+}
+
+/* =====================================================================
+ * Plan 左面板头部已抽离到 components/page_header（PageHeader 组件）
+ * 原 .plan-left-panel__header / .plan-back-btn / __title / __plan-id / __plan-name 均已删除
+ * ===================================================================== */
+
+.plan-left-panel__divider {
+    height: 1px;
+    margin: 0 16px;
+    background: var(--primary-color-6);
+}
+
+/* ── 计划详情区（header 下方的字段列表） ─────────────────────────────── */
+.plan-left-panel__details {
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow-y: auto;
+}
+
+/* 单个详情项：左 label + 右 value */
+.plan-detail-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 0.8125rem;
+}
+
+.plan-detail-item__label {
+    color: var(--secondary-color-5);
+    user-select: none;
+    flex-shrink: 0;
+}
+
+.plan-detail-item__value {
+    color: var(--secondary-color-2);
+    font-weight: 500;
+    text-align: right;
+    word-break: break-all;
 }
 

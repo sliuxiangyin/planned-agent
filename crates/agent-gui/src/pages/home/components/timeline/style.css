@@ -1,0 +1,158 @@
+/* ── TimelineBar 组件样式 ────────────────────────────────────────────── */
+
+.cc-timeline {
+    height: 52px;
+    min-height: 52px;
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    background: var(--primary-color-3);
+    gap: 16px;
+}
+
+.cc-timeline__label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.cc-timeline__label-icon {
+    font-size: 0.9rem;
+    color: var(--secondary-color-5);
+}
+
+.cc-timeline__label-text {
+    font-size: 0.72rem;
+    color: var(--secondary-color-5);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.cc-timeline__track {
+    flex: 1;
+    position: relative;
+    height: 100%;
+    display: flex;
+    align-items: center;
+}
+
+/* 时间线轨道线 */
+.cc-timeline__line {
+    position: absolute;
+    top: 50%;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background:
+        linear-gradient(to right,
+            rgba(108, 182, 255, 0.3) 0%,
+            rgba(108, 182, 255, 0.15) 40%,
+            rgba(108, 182, 255, 0.08) 100%);
+    transform: translateY(-50%);
+}
+
+/* 当前时间指示器 */
+.cc-timeline__now {
+    position: absolute;
+    top: 50%;
+    left: 30%;
+    transform: translate(-50%, -50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    z-index: 5;
+}
+
+.cc-timeline__now-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #6cb6ff;
+    box-shadow: 0 0 10px rgba(108, 182, 255, 0.5);
+    animation: now-pulse 2s ease-in-out infinite;
+}
+
+@keyframes now-pulse {
+    0%, 100% { box-shadow: 0 0 8px rgba(108, 182, 255, 0.4); }
+    50% { box-shadow: 0 0 16px rgba(108, 182, 255, 0.7); }
+}
+
+.cc-timeline__now-label {
+    font-size: 0.6rem;
+    color: #6cb6ff;
+    white-space: nowrap;
+}
+
+/* 时间线节点 */
+.cc-timeline__node {
+    position: absolute;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+}
+
+.cc-timeline__node:nth-child(2) { left: 8%; }
+.cc-timeline__node:nth-child(3) { left: 20%; }
+.cc-timeline__node:nth-child(4) { left: 42%; }
+.cc-timeline__node:nth-child(5) { left: 65%; }
+.cc-timeline__node:nth-child(6) { left: 85%; }
+.cc-timeline__node:nth-child(7) { left: 95%; }
+
+.cc-timeline__node--clickable {
+    cursor: pointer;
+}
+
+.cc-timeline__node--clickable:hover .cc-timeline__node-dot {
+    transform: scale(1.5);
+    box-shadow: 0 0 10px rgba(108, 182, 255, 0.5);
+}
+
+.cc-timeline__node--clickable:hover .cc-timeline__node-name {
+    color: #6cb6ff;
+}
+
+.cc-timeline__node-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--secondary-color-5);
+    transition: all 0.2s ease;
+}
+
+.cc-timeline__node--past .cc-timeline__node-dot {
+    background: #10b981;
+}
+
+.cc-timeline__node--future .cc-timeline__node-dot {
+    background: var(--secondary-color-6);
+    opacity: 0.6;
+}
+
+.cc-timeline__node-time {
+    font-size: 0.62rem;
+    color: var(--secondary-color-5);
+    font-family: ui-monospace, "SF Mono", "Consolas", monospace;
+}
+
+.cc-timeline__node-name {
+    font-size: 0.65rem;
+    color: var(--secondary-color-4);
+    max-width: 70px;
+    text-align: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transition: color 0.2s;
+}
+
+.cc-timeline__node-tick {
+    width: 1px;
+    height: 6px;
+    background: var(--secondary-color-6);
+    opacity: 0.3;
+}

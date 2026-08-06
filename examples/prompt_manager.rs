@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
         println!("  - {} (has schema: {})", prompt.name, prompt.has_output_schema);
     }
     
-    // 示例1：渲染普通prompt
+    // 示例1：渲染普通prompt（root prompts/chat/system.toml：通用示例模板）
     println!("\n=== Example 1: Render simple prompt ===");
     let context = PromptContext::new()
         .with_variable("user_name", json!("张三"))
@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
     let rendered = manager.render("analysis/extract_info", &context).await?;
     println!("Rendered prompt:\n{}", rendered);
     
-    // 示例4：检查prompt是否存在
+    // 示例4：检查prompt是否存在（root prompts/chat/system.toml：通用示例模板）
     println!("\n=== Example 4: Check if prompt exists ===");
     println!("chat/system exists: {}", manager.exists("chat/system").await?);
     println!("nonexistent/prompt exists: {}", manager.exists("nonexistent/prompt").await?);

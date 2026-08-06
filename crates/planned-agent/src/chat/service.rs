@@ -20,6 +20,7 @@
 //! 调用方在 `on_event` 内可以直接写 signal，不需要 spawn 或 channel。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -56,6 +57,8 @@ pub struct ChatResponse {
     pub finish_reason: Option<FinishReason>,
     /// 待处理的 UI 交互动作。非空时表示需要用户操作后才能继续对话。
     pub pending_ui_actions: Vec<PendingUIAction>,
+    /// 是否被用户主动取消。
+    pub cancelled: bool,
 }
 
 /// 待处理的 UI 交互请求。
@@ -84,6 +87,7 @@ pub struct ChatService<PM: PromptManager + Send + Sync + 'static> {
     tool_registry: Arc<ToolRegistry>,
     prompt_manager: Arc<PM>,
     config: ChatConfig,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl<PM: PromptManager + Send + Sync + 'static> std::fmt::Debug for ChatService<PM> {
@@ -113,6 +117,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
             tool_registry,
             prompt_manager,
             config,
+            cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -123,6 +128,19 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
     pub fn with_prompt_manager(mut self, pm: Arc<PM>) -> Self {
         self.prompt_manager = pm;
         self
+    }
+
+    /// 请求取消当前正在进行的聊天流。
+    ///
+    /// 调用后 `chat_with_callback` 会在下一个 stream chunk 或下一轮开始时
+    /// 停止并返回 `ChatResponse { cancelled: true, .. }`。
+    pub fn stop(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    /// 内部取消检查。
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
     }
 
     /// 流式聊天入口（粗粒度风格）。
@@ -152,6 +170,8 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
     where
         F: FnMut(ChatEvent) + Send,
     {
+        self.cancelled.store(false, Ordering::SeqCst);
+
         let ai_client = self.resolve_ai_client()?;
 
         let mut history = messages;
@@ -163,6 +183,10 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         let mut pending_ui_actions: Vec<PendingUIAction> = Vec::new();
 
         loop {
+            if self.is_cancelled() {
+                break;
+            }
+
             on_event(ChatEvent::RoundStart { round });
 
             // ── 构造请求 ──
@@ -189,6 +213,11 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
             let mut finish_reason_this_round: Option<FinishReason> = None;
 
             while let Some(chunk_result) = inner.next().await {
+                if self.is_cancelled() {
+                    drop(inner);
+                    break;
+                }
+
                 let chunk = match chunk_result {
                     Ok(c) => c,
                     Err(e) => {
@@ -334,6 +363,34 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
                     self.config.max_tool_rounds
                 );
                 finish_reason = None; // 截断标记
+
+                // 通知用户工具调用已达上限，请求确认是否继续
+                let msg = format!(
+                    "工具调用已达到最大限制（{} 轮），任务可能未完成。是否继续执行？",
+                    self.config.max_tool_rounds
+                );
+                let actions = vec![
+                    UIAction {
+                        id: "continue".to_string(),
+                        action_type: planned_agent_core::types::UIActionType::Confirm,
+                        label: "继续执行".to_string(),
+                        description: None,
+                    },
+                    UIAction {
+                        id: "stop".to_string(),
+                        action_type: planned_agent_core::types::UIActionType::Confirm,
+                        label: "结束".to_string(),
+                        description: None,
+                    },
+                ];
+                on_event(ChatEvent::UIActionRequest {
+                    message: msg.clone(),
+                    actions: actions.clone(),
+                });
+                pending_ui_actions.push(PendingUIAction {
+                    message: msg,
+                    actions,
+                });
                 break;
             }
 
@@ -440,6 +497,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
             tool_calls_executed,
             finish_reason,
             pending_ui_actions,
+            cancelled: self.is_cancelled(),
         })
     }
 
@@ -463,7 +521,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
     ///
     /// 渲染路径与 [`crate::planner::coarse::LlmCoarsePlanner::generate_coarse_plan_stream`]
     /// 完全一致：`pm.render(template, &ctx)`（参见 llm_planner.rs:154-156）。
-    /// 当前 `PromptContext` 为空 —— `chat/system.toml` 的 `context` 变量定义为
+    /// 当前 `PromptContext` 为空 —— `chat/thorough_system.toml` 的 `context` 变量定义为
     /// `required = false`，可正常渲染；将来若需要给 system 注入动态上下文，
     /// 由 caller 在 `ChatConfig` 之外另行拼装 `PromptContext` 并扩展本函数签名。
     ///
@@ -500,10 +558,20 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         Ok(())
     }
 
-    /// 从 ToolRegistry 构建 ToolDefinition 列表。
+    /// 从 ToolRegistry 构建 ToolDefinition 列表，按 `allowed_tools` 白名单过滤。
+    ///
+    /// - `allowed_tools = None`：全部工具可用
+    /// - `allowed_tools = Some(names)`：仅白名单中的工具会暴露给 LLM
     fn build_tool_definitions(&self) -> Vec<ToolDefinition> {
-        self.tool_registry
-            .get_all_tools()
+        let all = self.tool_registry.get_all_tools();
+        let filtered: Vec<_> = match &self.config.allowed_tools {
+            None => all,
+            Some(whitelist) => all
+                .into_iter()
+                .filter(|t| whitelist.contains(&t.name))
+                .collect(),
+        };
+        filtered
             .into_iter()
             .map(|t| ToolDefinition {
                 r#type: ToolType::Function,

@@ -42,6 +42,35 @@ pub fn Markdown(props: MarkdownProps) -> Element {
     }
 }
 
+/// 预处理文本中的换行：将单个 `\n`（非段落分隔）转为 CommonMark 硬换行语法 `  \n`。
+///
+/// 规则：
+/// - `\n\n`（段落分隔）→ 保留不动
+/// - 单个 `\n`（行内换行）→ 替换为 `  \n`（两个空格 + 换行），pulldown-cmark 渲染为 `<br>`
+fn preprocess_line_breaks(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    while i < len {
+        if chars[i] == '\n' {
+            // 检查是否是 \n\n（段落分隔）
+            if i + 1 < len && chars[i + 1] == '\n' {
+                result.push_str("\n\n");
+                i += 2;
+            } else {
+                // 单个 \n → 硬换行
+                result.push_str("  \n");
+                i += 1;
+            }
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+    result
+}
+
 /// Markdown → HTML → sanitize（公开以便其他模块复用，如截图/导出场景）
 ///
 /// 启用扩展：表格（GFM）/ 删除线 / 任务列表 / 脚注 / 智能标点。
@@ -55,7 +84,12 @@ pub fn render_markdown_to_safe_html(text: &str) -> String {
     options.insert(Options::ENABLE_FOOTNOTES);
     options.insert(Options::ENABLE_SMART_PUNCTUATION);
 
-    let parser = Parser::new_ext(text, options);
+    // 预处理：将连续的单 \n 转为 CommonMark 硬换行（两个空格 + \n），
+    // 使 AI 输出的叙事文本中每个 \n 都渲染为可见换行，而非合并为空格。
+    // 保留已有的 \n\n（段落分隔）不动。
+    let preprocessed = preprocess_line_breaks(text);
+
+    let parser = Parser::new_ext(&preprocessed, options);
     let mut raw_html = String::new();
     html::push_html(&mut raw_html, parser);
 

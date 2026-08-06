@@ -1,102 +1,140 @@
-//! Plan 页面主组件：组合左侧占位面板与右侧聊天面板。
+//! Plan 页面主组件：组合左侧计划详情面板与右侧聊天面板。
 //!
-//! 仅持有 UI 状态与 rsx 树；chat 流程委托给同级的 `chat` 模块。
+//! 计划模式在创建时固定，不可在聊天中切换。
+
+use std::sync::Arc;
 
 use crate::components::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::markdown::Markdown;
+use crate::components::page_header::PageHeader;
 use crate::components::resizable_panel::ResizablePanel;
 use crate::components::scroll_area::ScrollArea;
 use crate::components::textarea::Textarea;
-use crate::components::todo::{Todo, TodoItemData, TodoStatus};
 use dioxus::prelude::*;
+use planned_agent_core::types::{Message, MessageContent, MessageRole};
 
-use crate::context::{InitStatus, ModuleState};
+use crate::context::{InitStatus, ModuleState, StorageContext};
 use crate::services::chat_service::use_chat_service;
-use planned_agent::ChatConfig;
 
 use super::components::chat_ui_actions_view::ChatUIActionsView;
+use super::components::plan_todo_view::PlanTodoView;
 use super::components::reasoning_view::ReasoningView;
 
 use super::chat::{handle_user_action, send_message};
-use super::types::{display_text, role_css_class, PendingUIState};
+use super::types::{display_text, role_css_class, PendingUIState, PlanGeneratedEvent};
 
 /// 本页面专属样式（按需加载）。
 const PLAN_CSS: Asset = asset!("/assets/plan.css");
 /// ResizablePanel 所需样式（按需加载）。
 const RESIZABLE_CSS: Asset = asset!("/assets/resizable_panel.css");
 
+/// 从 DB 加载的计划信息
+#[derive(Clone)]
+struct PlanInfo {
+    name: String,
+    mode: String,
+    status: String,
+    created_at: String,
+}
+
 #[component]
-pub fn PlanPage(
-    plan_id: Option<String>,
-    on_back: EventHandler<()>,
-) -> Element {
-    // ── 全局 Context（main.rs 注入） ──
+pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
+    // ── 全局 Context ──
     let init_status = use_context::<Memo<InitStatus>>();
+    let storage = use_context::<Resource<Option<Arc<StorageContext>>>>();
 
-    // ── 聊天状态（SyncStorage：Send + Sync，可在 spawn 异步任务中持有） ──
-    let messages = use_signal_sync(|| {
-        vec![]
-    });
+    // ── 计划信息（从 DB 异步加载） ──
+    let mut plan_info = use_signal_sync(|| None::<PlanInfo>);
+
+    // ── 聊天状态 ──
+    let mut messages = use_signal_sync(|| vec![]);
     let mut input_text = use_signal_sync(String::new);
-    // 当前正在流式输出的消息下标（None = 没有消息在流式输出）
     let streaming_idx = use_signal_sync(|| None::<usize>);
-    // 待处理的 UI 交互（Agent 请求用户确认/选择/输入）
     let pending_ui = use_signal_sync(|| None::<PendingUIState>);
+    let mut reasoning_texts = use_signal_sync(|| Vec::<Option<String>>::new());
 
-    // ── 深度思考侧 state ──
-    // 与 messages 一一对应；None 表示该消息没有 reasoning（user/tool）
-    let reasoning_texts = use_signal_sync(|| Vec::<Option<String>>::new());
+    // ── 计划模式（从 DB 加载后固定） ──
+    let mut plan_mode = use_signal_sync(|| None::<String>);
 
-    // ── Chat Service 缓存（委托给 services::chat_service） ──
-    // 显式传入 ChatConfig：system_prompt_template 指向 prompts/chat/system.toml
-    // （当前值与 ChatConfig::default() 相同，但走显式路径便于将来按页面切模板）。
-    let chat_signal = use_chat_service(ChatConfig {
-        system_prompt_template: Some("chat/system".to_string()),
-        enable_thinking:true,
-        ..Default::default()
+    // ── 计划生成事件 ──
+    let plan_generated = use_signal_sync(|| None::<PlanGeneratedEvent>);
+
+    // ── 加载计划元数据 + 历史消息 ──
+    let pid = plan_id.clone();
+    use_effect(move || {
+        let storage_opt = storage.read().as_ref().and_then(|x| x.as_ref()).cloned();
+        if let Some(ctx) = storage_opt {
+            let plan_repo = ctx.plan_repo.clone();
+            let msg_repo = ctx.message_repo.clone();
+            let pid = pid.clone();
+            spawn(async move {
+                // 加载计划元数据
+                if let Ok(Some(plan_model)) = plan_repo.find_by_id(&pid).await {
+                    plan_info.set(Some(PlanInfo {
+                        name: plan_model.name,
+                        mode: plan_model.mode.clone(),
+                        status: plan_model.status,
+                        created_at: plan_model.created_at,
+                    }));
+                    plan_mode.set(Some(plan_model.mode));
+                }
+                // 加载历史消息
+                if let Ok(msg_list) = msg_repo.find_by_plan_id(&pid).await {
+                    let loaded: Vec<Message> = msg_list
+                        .into_iter()
+                        .map(|m| Message {
+                            role: match m.role.as_str() {
+                                "user" => MessageRole::User,
+                                "assistant" => MessageRole::Assistant,
+                                "system" => MessageRole::System,
+                                "tool" => MessageRole::Tool,
+                                _ => MessageRole::User,
+                            },
+                            content: if m.content.is_empty() {
+                                None
+                            } else {
+                                Some(MessageContent::Text { text: m.content })
+                            },
+                            ..Default::default()
+                        })
+                        .collect();
+                    messages.set(loaded);
+                    // 对齐 reasoning_texts 长度
+                    reasoning_texts.set(vec![None; messages.read().len()]);
+                }
+            });
+        }
     });
+
+    // ── 根据 plan_mode 派生 system prompt 模板路径 ──
+    let system_prompt_template = use_memo(move || {
+        plan_mode.read().as_ref().map(|mode| match mode.as_str() {
+            "flexible" => "chat/flexible_system".to_string(),
+            "thorough" => "chat/thorough_system".to_string(),
+            _ => "chat/thorough_system".to_string(),
+        })
+    });
+
+    // ── Chat Service ──
+    let chat_signal = use_chat_service(system_prompt_template.into());
 
     // ── 按钮可用性 ──
     let can_create = init_status.read().ai.state == ModuleState::Ready
         && init_status.read().prompt.state == ModuleState::Ready;
 
-    // 快照当前流式下标（响应式：streaming_idx 变化时本 rsx 整体重渲）
     let sidx = *streaming_idx.read();
+
+    // ── 获取 message_repo 用于持久化 ──
+    let message_repo = storage
+        .read()
+        .as_ref()
+        .and_then(|x| x.as_ref())
+        .map(|ctx| ctx.message_repo.clone());
 
     // ── 右侧聊天面板 ──
     let chat_panel = rsx! {
         div { class: "chat-panel",
-            // Todo 计划区，固定 200px（当前使用 mock 数据，后续接 AI 计划）
-            div {
-                style : "padding:0px",
-                Todo {
-                items: vec![
-                    TodoItemData::new(
-                        TodoStatus::Completed,
-                        "分析当前项目结构与依赖关系",
-                        "读取 Cargo.toml 与 crate 目录结构，识别已实现的核心模块（core、planned-agent、agent-gui 等），确认本次改动边界。",
-                    ),
-                    TodoItemData::new(
-                        TodoStatus::Running,
-                        "创建 Todo UI 组件",
-                        "在 crates/agent-gui/src/components/todo/ 下新增 mod.rs、component.rs、style.css，复用 dioxus_primitives::accordion 行为，自定义 trigger / content 样式。",
-                    ),
-                    TodoItemData::new(
-                        TodoStatus::Queued,
-                        "在 Plan 页面接入 Todo 组件",
-                        "在 pages/plan.rs 的右侧聊天面板顶部插入 Todo，固定 200px 高度，列表区支持展开收起，底部执行按钮暂不接业务。",
-                    ),
-                    TodoItemData::new(
-                        TodoStatus::Pending,
-                        "后续接入 AI 计划数据流",
-                        "从 Assistant 回复中解析计划条目，同步填充 Todo；执行计划时按状态机更新 TodoStatus；本轮仅完成 UI，不实现数据流。",
-                    ),
-                ],
-                on_execute: move |_| {
-                    // TODO(后续): 触发 Agent 执行计划
-                },
-            }
-            }
+            PlanTodoView { plan_generated }
 
             // 消息展示区
             div { class: "chat-messages",
@@ -112,33 +150,27 @@ pub fn PlanPage(
                                     if is_streaming { "chat-message--streaming" } else { "" }
                                 );
 
-                                // reasoning_texts 与 messages 一一对位：
-                                // user/tool 行 → None（unwrap 后是空串）
                                 let r_text: String = reasoning_texts
                                     .read()
                                     .get(idx)
                                     .and_then(|o| o.clone())
                                     .unwrap_or_default();
                                 let has_reasoning = !r_text.is_empty();
-                                // 流式光标仅在还没有可显示的 reasoning 时出现
                                 let show_streaming_cursor =
                                     is_streaming && text.is_empty() && !has_reasoning;
 
                                 rsx! {
                                     div {
                                         class: "{class}",
-                                        // ── 深度思考折叠面板（无 reasoning 时不渲染）──
                                         if has_reasoning {
                                             ReasoningView {
                                                 text: r_text,
                                                 is_streaming: is_streaming,
                                             }
                                         }
-                                        // ── 正文 ──
                                         if show_streaming_cursor {
                                             "▍"
                                         } else if !text.is_empty() {
-                                            // Markdown 渲染：pulldown-cmark + ammonia sanitize
                                             Markdown { text: text.to_string() }
                                         }
                                     }
@@ -149,7 +181,7 @@ pub fn PlanPage(
                 }
             }
 
-            // 🆕 待处理的 UI 交互（Agent 请求用户操作的按钮/选项）
+            // 待处理的 UI 交互
             {
                 let ui = pending_ui.read();
                 if let Some(ref pending) = *ui {
@@ -159,6 +191,7 @@ pub fn PlanPage(
                             message: p.message.clone(),
                             actions: p.actions.clone(),
                             on_action: move |(action, choice)| {
+                                let mode = plan_mode.read().clone().unwrap_or_default();
                                 handle_user_action(
                                     action,
                                     choice,
@@ -168,6 +201,8 @@ pub fn PlanPage(
                                     streaming_idx,
                                     pending_ui,
                                     chat_signal,
+                                    mode,
+                                    plan_generated,
                                 );
                             },
                         }
@@ -180,52 +215,63 @@ pub fn PlanPage(
             // 输入发送区
             div { class: "chat-input-area",
                 Textarea {
-                    placeholder: if can_create { "创建计划..." } else { "等待 AI 与 Prompt 初始化..." },
+                    placeholder: if can_create { "输入消息..." } else { "等待 AI 与 Prompt 初始化..." },
                     value: "{input_text}",
                     disabled: !can_create,
                     oninput: move |e: FormEvent| input_text.set(e.value()),
-                    onkeydown: move |e: KeyboardEvent| {
-                        if e.data.key() == keyboard_types::Key::Enter && !e.data.modifiers().shift() {
-                            e.prevent_default();
-                            if can_create {
-                                send_message(
-                                    chat_signal,
-                                    input_text,
-                                    messages,
-                                    reasoning_texts,
-                                    streaming_idx,
-                                    pending_ui,
-                                );
+                    onkeydown: {
+                        let pid = plan_id.clone();
+                        let repo = message_repo.clone();
+                        move |e: KeyboardEvent| {
+                            if e.data.key() == keyboard_types::Key::Enter && !e.data.modifiers().shift() {
+                                e.prevent_default();
+                                if can_create {
+                                    if let Some(ref repo) = repo {
+                                        send_message(
+                                            chat_signal,
+                                            input_text,
+                                            messages,
+                                            reasoning_texts,
+                                            streaming_idx,
+                                            pending_ui,
+                                            pid.clone(),
+                                            repo.clone(),
+                                        );
+                                    }
+                                }
                             }
                         }
                     },
                 }
-                // ── 操作行：左侧占位（后期会放置其它操作） | 右侧图标按钮（发送 / 停止）──
+                // ── 操作行：发送 / 停止 ──
                 div { class: "chat-input-area__actions",
-                    // 左侧占位（暂时为空，后续增加其它操作）
-                    div { class: "chat-input-area__placeholder" }
-
-                    // 发送图标：未在流式输出时显示
                     if sidx.is_none() {
                         Button {
                             class: "chat-input-area__icon-btn chat-input-area__icon-btn--send",
                             variant: ButtonVariant::Primary,
                             size: ButtonSize::Xs,
                             disabled: !can_create,
-                            title: if !can_create { Some("AI 与 Prompt 初始化完成后才能创建") } else { Some("发送") },
-                            onclick: move |_: MouseEvent| {
-                                if can_create {
-                                    send_message(
-                                        chat_signal,
-                                        input_text,
-                                        messages,
-                                        reasoning_texts,
-                                        streaming_idx,
-                                        pending_ui,
-                                    );
+                            title: if !can_create { Some("AI 与 Prompt 初始化完成后才能发送") } else { Some("发送") },
+                            onclick: {
+                                let pid = plan_id.clone();
+                                let repo = message_repo.clone();
+                                move |_: MouseEvent| {
+                                    if can_create {
+                                        if let Some(ref repo) = repo {
+                                            send_message(
+                                                chat_signal,
+                                                input_text,
+                                                messages,
+                                                reasoning_texts,
+                                                streaming_idx,
+                                                pending_ui,
+                                                pid.clone(),
+                                                repo.clone(),
+                                            );
+                                        }
+                                    }
                                 }
                             },
-                            // 发送图标（纸飞机，stroke=currentColor 跟随按钮前景色）
                             svg {
                                 xmlns: "http://www.w3.org/2000/svg",
                                 width: "16",
@@ -241,14 +287,15 @@ pub fn PlanPage(
                             }
                         }
                     } else {
-                        // 停止图标（实心方块，fill=currentColor 跟随按钮前景色）
                         Button {
                             class: "chat-input-area__icon-btn chat-input-area__icon-btn--stop",
                             variant: ButtonVariant::Destructive,
                             size: ButtonSize::Xs,
-                            title: Some("停止生成（待接入 stop API）"),
+                            title: Some("停止生成"),
                             onclick: move |_: MouseEvent| {
-                                // TODO: 接入 chat_service 的停止逻辑
+                                if let Some(ref chat) = *chat_signal.read() {
+                                    chat.stop();
+                                }
                             },
                             svg {
                                 xmlns: "http://www.w3.org/2000/svg",
@@ -265,6 +312,29 @@ pub fn PlanPage(
         }
     };
 
+    // ── 左侧计划详情面板 ──
+    let plan_name = plan_info
+        .read()
+        .as_ref()
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| format!("计划 {}", plan_id));
+    let plan_mode_label = plan_info
+        .read()
+        .as_ref()
+        .map(|p| match p.mode.as_str() {
+            "thorough" => "周密模式".to_string(),
+            _ => "灵活模式".to_string(),
+        })
+        .unwrap_or_default();
+    let plan_status_label = plan_info
+        .read()
+        .as_ref()
+        .map(|p| match p.status.as_str() {
+            "generated" => "已生成".to_string(),
+            _ => "待生成".to_string(),
+        })
+        .unwrap_or_default();
+
     rsx! {
         document::Stylesheet { href: PLAN_CSS }
         document::Stylesheet { href: RESIZABLE_CSS }
@@ -275,25 +345,29 @@ pub fn PlanPage(
                 max_left_percent: 75.0,
                 left: rsx! {
                     div { class: "plan-left-panel",
-                        // ── 返回按钮 + 计划标题 ──
-                        div { class: "plan-left-panel__header",
-                            button {
-                                class: "plan-back-btn",
-                                onclick: move |_| on_back.call(()),
-                                title: "返回指挥中心",
-                                "← 返回"
-                            }
-                            div { class: "plan-left-panel__title",
-                                if let Some(ref id) = plan_id {
-                                    span { class: "plan-left-panel__plan-id", "计划 #{id}" }
-                                } else {
-                                    span { class: "plan-left-panel__plan-id", "新建计划" }
-                                }
-                            }
+                        // ── Header topbar：返回 + 计划名称（PageHeader 组件） ──
+                        PageHeader {
+                            title: plan_name.clone(),
+                            on_back: Some(on_back),
+                            class: Some("page-header--nested".to_string()),
                         }
                         div { class: "plan-left-panel__divider" }
-                        span { class: "plan-left-panel__label",
-                            "计划详情（待开发）"
+                        // ── 计划详情 ──
+                        div { class: "plan-left-panel__details",
+                            div { class: "plan-detail-item",
+                                span { class: "plan-detail-item__label", "模式" }
+                                span { class: "plan-detail-item__value", "{plan_mode_label}" }
+                            }
+                            div { class: "plan-detail-item",
+                                span { class: "plan-detail-item__label", "状态" }
+                                span { class: "plan-detail-item__value", "{plan_status_label}" }
+                            }
+                            if let Some(ref info) = *plan_info.read() {
+                                div { class: "plan-detail-item",
+                                    span { class: "plan-detail-item__label", "创建时间" }
+                                    span { class: "plan-detail-item__value", "{info.created_at}" }
+                                }
+                            }
                         }
                     }
                 },

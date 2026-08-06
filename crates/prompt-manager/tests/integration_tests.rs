@@ -45,7 +45,7 @@ async fn test_prompt_exists() {
     let manager = FilePromptManager::new(config).unwrap();
     manager.initialize().await.unwrap();
     
-    // 检查chat/system是否存在
+    // 检查chat/system是否存在（root prompts/chat/system.toml：通用示例模板）
     assert!(manager.exists("chat/system").await.unwrap());
     
     // 检查不存在的prompt
@@ -59,7 +59,7 @@ async fn test_prompt_rendering() {
     let manager = FilePromptManager::new(config).unwrap();
     manager.initialize().await.unwrap();
     
-    // 渲染chat/system prompt
+    // 渲染chat/system prompt（root prompts/chat/system.toml：通用示例模板）
     let context = PromptContext::new()
         .with_variable("user_name", json!("张三"))
         .with_variable("context", json!("这是一个测试"));

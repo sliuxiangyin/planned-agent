@@ -28,6 +28,7 @@ use planned_agent_mcp_rmcp::config::McpServerEntry;
 use planned_agent_mcp_rmcp::storage::ServerStatus;
 use std::sync::Arc;
 
+use crate::components::page_header::PageHeader;
 use crate::context::{McpChangeNotifier, McpContext, ToolsContext};
 
 /// 合法分类列表（与 `context::mcp::parse_categories` 中的映射保持一致）
@@ -166,22 +167,18 @@ pub fn McpEditorPage(
 
     rsx! {
         // Editor 自带局部 header：左上角"← 返回列表"按钮回到 McpList，
-        // 复用 settings.css 中的 .settings-topbar / .settings-back-btn 类。
+        // 使用通用 PageHeader 组件，class="page-header--nested" 切换为 40px 嵌入版。
         // 左侧 nav 与外层 Settings 顶栏仍保留 —— 这是二级深度任务的局部标识。
-        header { class: "settings-topbar settings-topbar--nested",
-            button {
-                class: "settings-back-btn",
-                disabled: *is_saving.read(),
-                onclick: move |_| on_back.call(()),
-                "← 返回列表"
-            }
-            h1 { class: "settings-topbar__title",
-                if editing_name.is_some() {
-                    "编辑 MCP 服务器"
-                } else {
-                    "添加 MCP 服务器"
-                }
-            }
+        PageHeader {
+            title: if editing_name.is_some() {
+                "编辑 MCP 服务器".to_string()
+            } else {
+                "添加 MCP 服务器".to_string()
+            },
+            on_back: Some(on_back),
+            back_label: Some("← 返回列表".to_string()),
+            back_disabled: Some(*is_saving.read()),
+            class: Some("page-header--nested".to_string()),
         }
 
         // 复用 settings.css 中的 .settings-mcp-form 系列样式（SettingsPage 已加载）。

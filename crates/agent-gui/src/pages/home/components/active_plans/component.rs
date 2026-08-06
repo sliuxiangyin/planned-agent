@@ -4,7 +4,10 @@
 
 use dioxus::prelude::*;
 
-use super::super::types::{PlanMeta, PlanStatus};
+use crate::pages::home::types::{PlanMeta, PlanStatus};
+
+#[css_module("/src/pages/home/components/active_plans/style.css")]
+struct Styles;
 
 /// 根据角度和轨道层级计算 CSS 定位的 (x%, y%)
 fn orbit_position(angle_deg: f64, level: usize) -> (f64, f64) {
@@ -30,19 +33,20 @@ pub fn ActivePlans(
     on_click: EventHandler<PlanMeta>,
 ) -> Element {
     rsx! {
-        div { class: "cc-active-plans",
+        div { class: Styles::cc_active_plans,
             for plan in &plans {
                 {
                     let pos = orbit_position(plan.orbit_angle, plan.status.orbit_level());
                     let is_hovered = hovered_id.as_deref() == Some(&plan.id);
-                    let is_completed = plan.status == PlanStatus::Completed;
+                    let is_completed = plan.status == PlanStatus::Generated;
 
-                    // 节点样式类
+                    // 节点样式类：基础类用 Styles::，状态/交互修饰符用 format! 拼接（__CssIdent 与 &str 类型不兼容）
                     let node_class = format!(
-                        "cc-plan-node cc-plan-node--{} {} {}",
+                        "{} cc-plan-node--{}{}{}",
+                        Styles::cc_plan_node,
                         plan.status.css_class(),
-                        if is_hovered { "cc-plan-node--hovered" } else { "" },
-                        if is_completed { "cc-plan-node--faded" } else { "" },
+                        if is_hovered { format!(" {}", Styles::cc_plan_node__hovered) } else { String::new() },
+                        if is_completed { format!(" {}", Styles::cc_plan_node__faded) } else { String::new() },
                     );
 
                     let plan_id = plan.id.clone();
@@ -57,29 +61,29 @@ pub fn ActivePlans(
                             onclick: move |_| on_click.call(plan_clone.clone()),
 
                             // 连接线（从节点到核心）
-                            div { class: "cc-plan-node__line" }
+                            div { class: Styles::cc_plan_node__line }
 
                             // 节点内容
-                            div { class: "cc-plan-node__content",
+                            div { class: Styles::cc_plan_node__content,
                                 // 状态指示点
-                                div { class: "cc-plan-node__dot" }
+                                div { class: Styles::cc_plan_node__dot }
 
                                 // 计划名
-                                span { class: "cc-plan-node__name", "{plan.name}" }
+                                span { class: Styles::cc_plan_node__name, "{plan.name}" }
 
                                 // hover 展开详情
                                 if is_hovered {
-                                    div { class: "cc-plan-node__detail",
-                                        span { class: "cc-plan-node__status-label",
+                                    div { class: Styles::cc_plan_node__detail,
+                                        span { class: Styles::cc_plan_node__status_label,
                                             "{plan.status.label()}"
                                         }
                                         if let Some(ref sched) = plan.schedule {
-                                            span { class: "cc-plan-node__tag cc-plan-node__tag--schedule",
+                                            span { class: "{Styles::cc_plan_node__tag} {Styles::cc_plan_node__tag__schedule}",
                                                 "⏰ {sched.description}"
                                             }
                                         }
                                         if let Some(ref strategy) = plan.strategy {
-                                            span { class: "cc-plan-node__tag cc-plan-node__tag--strategy",
+                                            span { class: "{Styles::cc_plan_node__tag} {Styles::cc_plan_node__tag__strategy}",
                                                 "🔗 {strategy.name}"
                                             }
                                         }

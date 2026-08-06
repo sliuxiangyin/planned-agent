@@ -2,50 +2,51 @@
 
 use chrono::{DateTime, Utc};
 
-/// 计划执行状态
+/// 计划状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanStatus {
-    /// 排队等待
-    Queued,
-    /// 正在执行
-    Running,
-    /// 已完成
-    Completed,
-    /// 执行失败
-    Failed,
-    /// 已暂停
-    Paused,
+    /// 待生成 — 计划已创建，尚未通过 AI 生成具体步骤
+    PendingGeneration,
+    /// 已生成 — AI 已完成计划生成
+    Generated,
 }
 
 impl PlanStatus {
     pub fn label(&self) -> &'static str {
         match self {
-            PlanStatus::Queued => "排队中",
-            PlanStatus::Running => "进行中",
-            PlanStatus::Completed => "已完成",
-            PlanStatus::Failed => "失败",
-            PlanStatus::Paused => "已暂停",
+            PlanStatus::PendingGeneration => "待生成",
+            PlanStatus::Generated => "已生成",
         }
     }
 
     pub fn css_class(&self) -> &'static str {
         match self {
-            PlanStatus::Queued => "queued",
-            PlanStatus::Running => "running",
-            PlanStatus::Completed => "completed",
-            PlanStatus::Failed => "failed",
-            PlanStatus::Paused => "paused",
+            PlanStatus::PendingGeneration => "pending",
+            PlanStatus::Generated => "generated",
         }
     }
 
-    /// 在 AI Core 周围的轨道半径层级：活跃的靠近核心，完成的远离
+    /// 在 AI Core 周围的轨道半径层级
     pub fn orbit_level(&self) -> usize {
         match self {
-            PlanStatus::Running => 0,  // 最内层
-            PlanStatus::Queued => 1,
-            PlanStatus::Paused => 2,
-            PlanStatus::Failed => 2,
-            PlanStatus::Completed => 3, // 最外层，变暗飘远
+            PlanStatus::PendingGeneration => 1,
+            PlanStatus::Generated => 2,
+        }
+    }
+
+    /// 从 DB 字符串解析
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "generated" => PlanStatus::Generated,
+            _ => PlanStatus::PendingGeneration,
+        }
+    }
+
+    /// 转为 DB 字符串
+    pub fn to_str(&self) -> &'static str {
+        match self {
+            PlanStatus::PendingGeneration => "pending_generation",
+            PlanStatus::Generated => "generated",
         }
     }
 }
@@ -77,6 +78,8 @@ pub struct PlanMeta {
     pub name: String,
     pub description: String,
     pub status: PlanStatus,
+    /// 计划模式：flexible / thorough
+    pub mode: String,
     pub schedule: Option<ScheduleConfig>,
     pub strategy: Option<StrategyRef>,
     pub tags: Vec<String>,
@@ -123,14 +126,15 @@ pub struct TimelineEntry {
 
 // ── 模拟数据 ──────────────────────────────────────────────────────
 
-/// 生成模拟计划列表
+/// 生成模拟计划列表（DB 未就绪时作 fallback）
 pub fn mock_plans() -> Vec<PlanMeta> {
     vec![
         PlanMeta {
             id: "plan-1".into(),
             name: "重构 agent-gui 模块".into(),
             description: "分析当前组件结构，设计指挥中心页面布局，拆分 home/plan 双页面架构".into(),
-            status: PlanStatus::Running,
+            status: PlanStatus::Generated,
+            mode: "flexible".into(),
             schedule: None,
             strategy: None,
             tags: vec!["前端".into(), "重构".into()],
@@ -142,7 +146,8 @@ pub fn mock_plans() -> Vec<PlanMeta> {
             id: "plan-2".into(),
             name: "添加 MCP 工具注册机制".into(),
             description: "支持 browser-use 等外部 MCP 工具的动态注册与热加载".into(),
-            status: PlanStatus::Queued,
+            status: PlanStatus::PendingGeneration,
+            mode: "thorough".into(),
             schedule: None,
             strategy: Some(StrategyRef {
                 id: "strategy-1".into(),
@@ -157,7 +162,8 @@ pub fn mock_plans() -> Vec<PlanMeta> {
             id: "plan-3".into(),
             name: "优化 Prompt 模板系统".into(),
             description: "重构 coarse_plan 与 react_system 模板，提升计划生成准确率".into(),
-            status: PlanStatus::Queued,
+            status: PlanStatus::PendingGeneration,
+            mode: "flexible".into(),
             schedule: None,
             strategy: None,
             tags: vec!["Prompt".into(), "优化".into()],
@@ -169,7 +175,8 @@ pub fn mock_plans() -> Vec<PlanMeta> {
             id: "plan-4".into(),
             name: "数据库每日备份".into(),
             description: "每天 09:00 自动备份 PostgreSQL 数据库到远程存储".into(),
-            status: PlanStatus::Queued,
+            status: PlanStatus::PendingGeneration,
+            mode: "thorough".into(),
             schedule: Some(ScheduleConfig {
                 cron: "0 9 * * *".into(),
                 description: "每日 09:00".into(),
@@ -186,7 +193,8 @@ pub fn mock_plans() -> Vec<PlanMeta> {
             id: "plan-5".into(),
             name: "项目初始化骨架".into(),
             description: "搭建 Rust workspace、配置 Cargo.toml、Dioxus 项目脚手架".into(),
-            status: PlanStatus::Completed,
+            status: PlanStatus::Generated,
+            mode: "flexible".into(),
             schedule: None,
             strategy: None,
             tags: vec!["基建".into()],

@@ -1,0 +1,36 @@
+/* ── CreatePlanModal 组件样式 ──────────────────────────────────────── */
+
+/* 弹窗正文：表单字段垂直堆叠，并覆盖 DialogDescription 默认居中 */
+.create-plan-dialog__body {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    text-align: left;
+}
+
+/* 单个字段：标签 + 控件垂直堆叠 */
+.create-plan-dialog__field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+/* 字段标签 */
+.create-plan-dialog__label {
+    font-size: 0.8125rem;
+    color: var(--secondary-color-5);
+}
+
+/* 错误提示 */
+.create-plan-dialog__error {
+    color: var(--primary-error-color);
+    font-size: 0.8125rem;
+}
+
+/* 操作按钮区：右对齐两端 */
+.create-plan-dialog__footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 4px;
+}

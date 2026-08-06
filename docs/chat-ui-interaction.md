@@ -421,7 +421,7 @@ tool_registry.register_custom_tool(
 
 ---
 
-## System Prompt 设计（`agent-gui/prompts/chat/system.toml`）
+## System Prompt 设计（`agent-gui/prompts/chat/thorough_system.toml`）
 
 ```toml
 [name]
@@ -762,7 +762,7 @@ pending_ui.set(None);
 | `crates/planned-agent/src/chat/event.rs` | 新增 `ChatEvent::UIActionRequest` 变体 | 低 |
 | `crates/planned-agent/src/chat/service.rs` | UI tool 拦截逻辑 + `pending_ui_actions` 字段 + `PendingUIAction` 类型 | 中 |
 | `crates/planned-agent/src/chat/mod.rs` | 导出 `PendingUIAction` | 低 |
-| `crates/agent-gui/prompts/chat/system.toml` | System prompt 重写，定义角色与行为规则 | 中 |
+| `crates/agent-gui/prompts/chat/thorough_system.toml` | System prompt 重写，定义角色与行为规则 | 中 |
 | `crates/agent-gui/src/pages/plan.rs` | 新增 `pending_ui` signal、`UIActionRequest` 事件处理、`handle_user_action` 函数、UI 渲染 | 高 |
 | `crates/agent-gui/src/main.rs`（或初始化处） | 注册 `request_user_action` 自定义工具 | 低 |
 | `crates/agent-gui/src/services/chat_service/` | 导出新类型到前端使用 | 低 |
@@ -808,7 +808,7 @@ pending_ui.set(None);
 | 3 | 二 | `crates/planned-agent/src/chat/service.rs` | `PendingUIAction` + `ChatResponse` 扩展 + tool 拦截逻辑 | 中 | ✅ 完成 |
 | 4 | 二 | `crates/planned-agent/src/chat/mod.rs` | 导出 `PendingUIAction` | 低 | ✅ 完成 |
 | — | 二 | `crates/planned-agent/src/lib.rs` | **追加**：re-export `PendingUIAction` 到 crate root | 低 | ✅ 完成 |
-| 5 | 三 | `crates/agent-gui/prompts/chat/system.toml` | 重写 System Prompt（四种模式 + 跨轮累积） | 中 | ✅ 完成 |
+| 5 | 三 | `crates/agent-gui/prompts/chat/thorough_system.toml` | 重写 System Prompt（四种模式 + 跨轮累积） | 中 | ✅ 完成 |
 | 6 | 三 | `crates/agent-gui/src/context/tools.rs` | 注册 `request_user_action` 自定义工具（NoopExecutor） | 低 | ✅ 完成 |
 | 7 | 四 | `crates/agent-gui/src/pages/plan.rs` | `pending_ui` signal + `UIActionRequest` 事件处理 | 高 | ✅ 完成 |
 | 8 | 四 | `crates/agent-gui/src/pages/plan.rs` | `handle_user_action` 函数（替换占位 + 继续 chat） | 高 | ✅ 完成 |

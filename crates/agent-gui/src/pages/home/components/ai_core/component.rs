@@ -4,6 +4,9 @@
 
 use dioxus::prelude::*;
 
+#[css_module("/src/pages/home/components/ai_core/style.css")]
+struct Styles;
+
 /// AI Core 组件
 ///
 /// - `is_active`: AI 系统是否就绪（影响动画颜色）
@@ -14,9 +17,9 @@ pub fn AiCore(
     active_plan_count: usize,
 ) -> Element {
     let core_class = if is_active {
-        "cc-core cc-core--active"
+        format!("{} {}", Styles::cc_core, Styles::cc_core__active)
     } else {
-        "cc-core cc-core--loading"
+        format!("{} {}", Styles::cc_core, Styles::cc_core__loading)
     };
 
     let count_display = if is_active {
@@ -26,9 +29,9 @@ pub fn AiCore(
     };
 
     rsx! {
-        div { class: "cc-core-container",
+        div { class: Styles::cc_core_container,
             // 外层轨道环（静态装饰）
-            svg { class: "cc-core__orbit-ring",
+            svg { class: Styles::cc_core__orbit_ring,
                 view_box: "0 0 300 300",
                 width: "300",
                 height: "300",
@@ -58,7 +61,7 @@ pub fn AiCore(
                     cy: "150",
                     r: "3",
                     fill: "var(--secondary-color-3)",
-                    class: "cc-core__orbit-dot",
+                    class: Styles::cc_core__orbit_dot,
                     opacity: "0.6",
                 }
                 circle {
@@ -66,40 +69,40 @@ pub fn AiCore(
                     cy: "150",
                     r: "2",
                     fill: "var(--secondary-color-5)",
-                    class: "cc-core__orbit-dot--slow",
+                    class: Styles::cc_core__orbit_dot__slow,
                     opacity: "0.4",
                 }
             }
 
             // 脉冲波纹（多层）
-            div { class: "cc-core__ripple cc-core__ripple--1" }
-            div { class: "cc-core__ripple cc-core__ripple--2" }
-            div { class: "cc-core__ripple cc-core__ripple--3" }
+            div { class: "{Styles::cc_core__ripple} {Styles::cc_core__ripple__1}" }
+            div { class: "{Styles::cc_core__ripple} {Styles::cc_core__ripple__2}" }
+            div { class: "{Styles::cc_core__ripple} {Styles::cc_core__ripple__3}" }
 
             // 核心球体
             div { class: "{core_class}",
                 // 内部发光层
-                div { class: "cc-core__glow" }
+                div { class: Styles::cc_core__glow }
 
                 // 旋转粒子轨道
-                div { class: "cc-core__particle-ring",
-                    div { class: "cc-core__particle cc-core__particle--1" }
-                    div { class: "cc-core__particle cc-core__particle--2" }
-                    div { class: "cc-core__particle cc-core__particle--3" }
+                div { class: Styles::cc_core__particle_ring,
+                    div { class: "{Styles::cc_core__particle} {Styles::cc_core__particle__1}" }
+                    div { class: "{Styles::cc_core__particle} {Styles::cc_core__particle__2}" }
+                    div { class: "{Styles::cc_core__particle} {Styles::cc_core__particle__3}" }
                 }
 
                 // 中心文字
-                div { class: "cc-core__inner",
-                    span { class: "cc-core__status-icon",
+                div { class: Styles::cc_core__inner,
+                    span { class: Styles::cc_core__status_icon,
                         if is_active { "◈" } else { "◇" }
                     }
-                    span { class: "cc-core__label",
+                    span { class: Styles::cc_core__label,
                         if is_active { "AI" } else { "..." }
                     }
-                    span { class: "cc-core__count",
+                    span { class: Styles::cc_core__count,
                         "{count_display}"
                     }
-                    span { class: "cc-core__sublabel", "活跃计划" }
+                    span { class: Styles::cc_core__sublabel, "活跃计划" }
                 }
             }
         }

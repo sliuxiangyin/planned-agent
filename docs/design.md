@@ -98,8 +98,9 @@ planned-agent/
 │               └── react/     # DefaultReActAgent
 ├── prompts/                   # 提示模板目录
 │   ├── chat/                  # 对话提示
-│   │   ├── system.toml        # 系统角色提示
-│   │   └── user.txt           # 用户消息模板
+│   │   ├── flexible_system.toml  # 系统角色提示（灵活模式：执行轨迹总结）
+│   │   ├── thorough_system.toml  # 系统角色提示（周密模式：需求确认后生成）
+│   │   └── user.txt              # 用户消息模板
 │   ├── analysis/              # 分析提示
 │   │   └── extract_info.toml  # 信息提取提示
 │   └── planning/              # 计划提示

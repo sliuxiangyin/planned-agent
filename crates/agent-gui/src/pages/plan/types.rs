@@ -42,3 +42,25 @@ pub(super) struct PendingUIState {
     /// 当时的对话历史快照（用于用户操作后继续 chat）
     pub(super) history_snapshot: Vec<Message>,
 }
+
+// ── 计划生成事件 ──
+
+/// 计划来源模式。
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum PlanSource {
+    /// 灵活模式（`flexible_system.toml`）——执行轨迹总结
+    Flexible,
+    /// 周密模式（`thorough_system.toml`）——需求确认后生成
+    Thorough,
+}
+
+/// 计划生成事件——用户点击"确认生成"时触发。
+///
+/// 由 `chat::handle_user_action` 写入，`PlanTodoView` 读取监听。
+#[derive(Clone, Debug)]
+pub(crate) struct PlanGeneratedEvent {
+    /// LLM 输出的计划/总结文本
+    pub plan_text: String,
+    /// 来源 prompt 模式
+    pub source: PlanSource,
+}
