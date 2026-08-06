@@ -3,12 +3,14 @@
  *
  * 设计目标：
  *   - 默认高度 48px（顶级页面 / SettingsPage）
- *   - 通过 .page-header--nested 切换为 40px 嵌入版（McpEditor / PlanPage 左侧 panel）
+ *   - 通过 .dx-page-header--nested 切换为 40px 嵌入版（McpEditor / PlanPage 左侧 panel）
  *   - 与项目主题色变量保持一致
+ *
+ * 注意：css_module! 宏要求类名加 `dx_` 前缀（生成 Styles::dx_* 引用）。
  * ===================================================================== */
 
 /* ── 默认顶栏 ──────────────────────────────────────────────────────────── */
-.page-header {
+.dx-page-header {
     display: flex;
     align-items: center;
     height: 48px;
@@ -20,8 +22,13 @@
     flex-shrink: 0;
 }
 
+/* 包含返回按钮 + 标题 + 操作槽位的三段式布局 */
+.dx-page-header-back-title-actions {
+    /* 该类用作语义标记，实际 flex 布局由 .dx-page-header 提供 */
+}
+
 /* ── 嵌套版（次级页面 / 面板内 header） ─────────────────────────────── */
-.page-header--nested {
+.dx-page-header--nested {
     height: auto;
     min-height: 40px;
     padding: 8px 16px;
@@ -30,7 +37,7 @@
 }
 
 /* ── 返回按钮 ──────────────────────────────────────────────────────────── */
-.page-header__back {
+.dx-page-header-back {
     background: var(--primary-color-5);
     border: 1px solid var(--primary-color-6);
     color: var(--secondary-color-3);
@@ -42,19 +49,19 @@
     flex-shrink: 0;
 }
 
-.page-header__back:hover {
+.dx-page-header-back:hover {
     background: var(--primary-color-3);
     border-color: rgba(108, 182, 255, 0.3);
     color: #6cb6ff;
 }
 
-.page-header__back:disabled {
+.dx-page-header-back:disabled {
     opacity: 0.5;
     cursor: not-allowed;
 }
 
 /* ── 标题 ──────────────────────────────────────────────────────────────── */
-.page-header__title {
+.dx-page-header-title {
     font-size: 1rem;
     font-weight: 600;
     margin: 0;
@@ -68,7 +75,7 @@
 }
 
 /* ── 右侧操作槽位 ──────────────────────────────────────────────────────── */
-.page-header__actions {
+.dx-page-header-actions {
     margin-left: auto;
     display: flex;
     align-items: center;

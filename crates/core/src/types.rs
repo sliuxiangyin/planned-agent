@@ -46,6 +46,21 @@ pub struct UIAction {
     /// 补充说明（可选 tooltip / 副文本）
     #[serde(default)]
     pub description: Option<String>,
+    /// MultiSelect 复选框选项列表（仅 action_type = multi_select 时有效）
+    #[serde(default)]
+    pub options: Vec<MultiSelectOption>,
+}
+
+/// MultiSelect 复选框选项。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MultiSelectOption {
+    /// 选项唯一标识（如 "city", "keyword"）
+    pub id: String,
+    /// 展示文本（如 "城市 = 北京"）
+    pub label: String,
+    /// 是否默认勾选
+    #[serde(default)]
+    pub default: bool,
 }
 
 /// UI 交互动作类型。
@@ -58,6 +73,8 @@ pub enum UIActionType {
     Select,
     /// 文本输入提示——引导用户输入具体信息（如路径、关键词）
     Input,
+    /// 多选复选框——用于逐项勾选（如"固化哪些参数"）
+    MultiSelect,
 }
 
 /// 图片 URL

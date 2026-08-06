@@ -179,7 +179,7 @@
     background:
         radial-gradient(ellipse at center, rgba(108, 182, 255, 0.03) 0%, transparent 70%),
         radial-gradient(circle at 50% 50%, var(--primary-color-3) 0%, var(--primary-color-2) 100%);
-    overflow: hidden;
+    overflow: visible;
 }
 
 /* 统计概览（左上角浮动） */

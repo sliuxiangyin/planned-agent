@@ -27,7 +27,7 @@ impl PlanRepo {
             description: Set(String::new()),
             mode: Set(mode.to_string()),
             status: Set("pending_generation".to_string()),
-            todos: Set("[]".to_string()),
+            flexible_version: Set(0),
             created_at: Set(now.clone()),
             updated_at: Set(now),
         };
@@ -56,6 +56,20 @@ impl PlanRepo {
         plan::ActiveModel {
             id: Set(id.to_string()),
             status: Set(status.to_string()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .update(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    /// 更新灵活模式当前版本号
+    pub async fn update_flexible_version(&self, id: &str, version: i32) -> StorageResult<()> {
+        let now = Utc::now().to_rfc3339();
+        plan::ActiveModel {
+            id: Set(id.to_string()),
+            flexible_version: Set(version),
             updated_at: Set(now),
             ..Default::default()
         }

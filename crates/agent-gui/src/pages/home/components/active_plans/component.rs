@@ -10,18 +10,23 @@ use crate::pages::home::types::{PlanMeta, PlanStatus};
 struct Styles;
 
 /// 根据角度和轨道层级计算 CSS 定位的 (x%, y%)
+///
+/// 节点中心坐标会被 clamp 在 [MARGIN, 100-MARGIN] 范围内，
+/// 确保即使容器较小，节点也不会溢出被裁切。
 fn orbit_position(angle_deg: f64, level: usize) -> (f64, f64) {
+    const MARGIN: f64 = 6.0; // 距边缘的安全边距（%）
+
     let angle_rad = angle_deg.to_radians();
-    // 不同层级的半径
+    // 不同层级的轨道半径（%）
     let radius = match level {
-        0 => 38.0, // Running: 最近
-        1 => 48.0, // Queued
-        2 => 58.0, // Paused / Failed
-        _ => 68.0, // Completed: 最远
+        0 => 26.0, // Running: 最近
+        1 => 34.0, // Queued / PendingGeneration
+        2 => 40.0, // Generated
+        _ => 46.0, // Completed / 其他: 最远
     };
-    // 中心 50%, 坐标偏移
-    let x = 50.0 + radius * angle_rad.cos();
-    let y = 50.0 + radius * angle_rad.sin();
+    // 中心 50%, 坐标偏移，并 clamp 到安全区域
+    let x = (50.0 + radius * angle_rad.cos()).clamp(MARGIN, 100.0 - MARGIN);
+    let y = (50.0 + radius * angle_rad.sin()).clamp(MARGIN, 100.0 - MARGIN);
     (x, y)
 }
 

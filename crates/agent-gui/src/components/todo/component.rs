@@ -153,11 +153,23 @@ fn status_icon(status: TodoStatus) -> Element {
 pub fn Todo(
     items: Vec<TodoItemData>,
     #[props(default)] on_execute: Option<EventHandler<MouseEvent>>,
+    /// 外部强制展开触发器：值递增时强制展开面板（如计划生成/保存完成）。
+    /// 用户手动折叠后，若该值不变则保持折叠。
+    #[props(default)]
+    expand_token: Signal<u32, SyncStorage>,
 ) -> Element {
     let count = items.len();
     // 整体折叠/展开：默认 false（仅显示 header）
-    let mut expanded = use_signal(|| false);
-    let is_open = *expanded.read();
+    let mut is_open = use_signal(|| false);
+
+    // 外部触发强制展开：expand_token 递增时重新展开
+    use_effect(move || {
+        if *expand_token.read() > 0 {
+            is_open.set(true);
+        }
+    });
+
+    let is_open_val = is_open();
 
     // 运行状态：控制开始/暂停图标的切换
     let mut is_running = use_signal(|| false);
@@ -188,7 +200,7 @@ pub fn Todo(
     rsx! {
         div {
             class: Styles::dx_todo,
-            "data-expanded": if is_open { "true" } else { "false" },
+            "data-expanded": if is_open_val { "true" } else { "false" },
 
             // ── Header：左侧标题组 + 右侧操作组，flexbox 垂直居中 ──
             div {
@@ -224,10 +236,10 @@ pub fn Todo(
                     Button {
                         class: Styles::dx_todo__collapse_btn,
                         variant: ButtonVariant::Ghost,
-                        title: if is_open { "折叠计划" } else { "展开计划" },
-                        aria_label: if is_open { "折叠计划" } else { "展开计划" },
+                        title: if is_open_val { "折叠计划" } else { "展开计划" },
+                        aria_label: if is_open_val { "折叠计划" } else { "展开计划" },
                         onclick: move |_| {
-                            expanded.with_mut(|v| *v = !*v);
+                            is_open.with_mut(|v| *v = !*v);
                         },
                         svg {
                             class: Styles::dx_todo__collapse_icon,
@@ -246,7 +258,7 @@ pub fn Todo(
             }
 
             // ── Body：默认不渲染（折叠态）；展开时挂载列表/空状态 ──
-            if is_open {
+            if is_open_val {
                 div {
                     class: Styles::dx_todo__body,
                     if items.is_empty() {

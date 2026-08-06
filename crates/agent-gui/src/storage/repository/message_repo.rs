@@ -47,6 +47,33 @@ impl MessageRepo {
         Ok(list)
     }
 
+    /// 更新某计划最后一条 assistant 消息的内容（状态块追加完成后同步持久化）。
+    ///
+    /// 找不到记录时返回 `Ok(false)`，调用方可按需重试。
+    pub async fn update_last_assistant(
+        &self,
+        plan_id: &str,
+        content: &str,
+    ) -> StorageResult<bool> {
+        let list = message::Entity::find()
+            .filter(message::Column::PlanId.eq(plan_id))
+            .filter(message::Column::Role.eq("assistant"))
+            .order_by_asc(message::Column::CreatedAt)
+            .all(&self.db)
+            .await?;
+        let Some(last) = list.into_iter().last() else {
+            return Ok(false);
+        };
+        message::ActiveModel {
+            id: Set(last.id),
+            content: Set(content.to_string()),
+            ..Default::default()
+        }
+        .update(&self.db)
+        .await?;
+        Ok(true)
+    }
+
     /// 按 plan_id 删除全部消息
     pub async fn delete_by_plan_id(&self, plan_id: &str) -> StorageResult<()> {
         message::Entity::delete_many()

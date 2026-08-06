@@ -34,7 +34,8 @@ pub use crate::planner::coarse::LlmCoarsePlanner;
 // ─── 本 crate：ReAct 实现 + 编排 ─────────────────────────────
 pub use crate::planner::react::chunk::executor_context::ExecutorContext;
 pub use crate::planner::react::{
-    DefaultReActAgent, PlanAndExecuteAgent, PlanAndExecuteConfig,
+    DefaultReActAgent, FlexiblePlanAgent, FlexiblePlanResult,
+    PlanAndExecuteAgent, PlanAndExecuteConfig,
     PlanAndExecuteResult, StepResult, StepStore,
 };
 

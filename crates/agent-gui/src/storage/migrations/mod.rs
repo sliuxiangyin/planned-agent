@@ -3,7 +3,9 @@
 use sea_orm_migration::prelude::*;
 
 mod m20260101_000001_create_tests;
+mod m20260806_add_plans_flexible_output_schema;
 mod m20260806_create_plans_and_messages;
+mod m20260806_create_plans_flexible;
 
 pub struct Migrator;
 
@@ -13,6 +15,8 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(m20260101_000001_create_tests::Migration),
             Box::new(m20260806_create_plans_and_messages::Migration),
+            Box::new(m20260806_create_plans_flexible::Migration),
+            Box::new(m20260806_add_plans_flexible_output_schema::Migration),
         ]
     }
 }

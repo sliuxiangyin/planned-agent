@@ -9,6 +9,7 @@
 
 mod chat;
 mod components;
+mod message;
 mod page;
 mod types;
 

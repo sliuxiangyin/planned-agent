@@ -178,7 +178,7 @@ pub fn McpEditorPage(
             on_back: Some(on_back),
             back_label: Some("← 返回列表".to_string()),
             back_disabled: Some(*is_saving.read()),
-            class: Some("page-header--nested".to_string()),
+            class: Some("dx-page-header--nested".to_string()),
         }
 
         // 复用 settings.css 中的 .settings-mcp-form 系列样式（SettingsPage 已加载）。

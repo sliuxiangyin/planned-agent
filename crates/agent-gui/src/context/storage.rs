@@ -17,7 +17,7 @@ use sea_orm_migration::MigratorTrait;
 use crate::config::GuiStorageConfig;
 use crate::storage::{
     migrations::Migrator,
-    repository::{MessageRepo, PlanRepo, TestRepo},
+    repository::{MessageRepo, PlanFlexibleRepo, PlanRepo, TestRepo},
 };
 
 /// GUI 层 Storage 上下文
@@ -31,6 +31,8 @@ pub struct StorageContext {
     pub test_repo: Arc<TestRepo>,
     /// plans 表仓库
     pub plan_repo: Arc<PlanRepo>,
+    /// plans_flexible 表仓库（灵活模式版本快照）
+    pub plan_flexible_repo: Arc<PlanFlexibleRepo>,
     /// messages 表仓库
     pub message_repo: Arc<MessageRepo>,
 }
@@ -58,6 +60,7 @@ impl StorageContext {
             db: db.clone(),
             test_repo: Arc::new(TestRepo::new(db.clone())),
             plan_repo: Arc::new(PlanRepo::new(db.clone())),
+            plan_flexible_repo: Arc::new(PlanFlexibleRepo::new(db.clone())),
             message_repo: Arc::new(MessageRepo::new(db.clone())),
         })
     }

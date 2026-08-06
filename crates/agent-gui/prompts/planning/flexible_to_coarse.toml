@@ -1,0 +1,171 @@
+[name]
+description = "灵活模式执行轨迹→粗粒度计划提炼"
+
+[content]
+text = """
+你是一个任务提炼专家。从以下 AI 执行轨迹总结中，提取出结构化的粗粒度计划。
+
+执行轨迹总结：
+{{ trace_summary }}
+
+请严格按照以下JSON格式返回粗粒度计划：
+{{ example }}
+
+要求：
+1. 从轨迹中识别关键步骤，总结其意图（intent）和预期输出（expected_output）
+2. 每个步骤必须为原子动作，只包含一个操作
+3. 推断步骤间的依赖关系，填充 dependencies（用 #E1、#E2 等格式引用）
+4. 为每个步骤分配唯一的 result_reference（#E1, #E2...）
+5. 评估整体复杂度（simple / medium / complex）和风险等级（low / medium / high / critical）
+6. 步骤中的实体值（URL、关键词、文件名、人名、地名等）原样保留，暂不泛化
+7. data_requirements 可从执行轨迹的上下文推断，推荐工具分类可留空
+
+原子动作判断标准：
+- 如果步骤描述中包含"提取...并排序"、"解析...并处理"等，说明包含多个操作，必须拆分
+- 如果步骤可以用一个工具完成，就是原子动作
+- 如果步骤需要先用一个工具获取数据，再用另一个工具处理，就不是原子动作
+"""
+
+[variables]
+trace_summary = { description = "AI 执行轨迹的完整总结文本", required = true }
+
+[output_schema]
+format = "json"
+
+[output_schema.json_schema]
+type = "object"
+required = ["id", "title", "description", "steps", "complexity", "risk_level"]
+
+[output_schema.json_schema.properties.id]
+type = "string"
+description = "计划唯一标识"
+
+[output_schema.json_schema.properties.title]
+type = "string"
+description = "计划标题"
+
+[output_schema.json_schema.properties.description]
+type = "string"
+description = "计划描述"
+
+[output_schema.json_schema.properties.steps]
+type = "array"
+description = "粗粒度步骤列表"
+
+[output_schema.json_schema.properties.steps.items]
+type = "object"
+required = ["id", "order", "intent", "expected_output", "result_reference", "dependencies", "data_requirements", "recommended_tool_categories"]
+
+[output_schema.json_schema.properties.steps.items.properties.id]
+type = "string"
+description = "步骤ID"
+
+[output_schema.json_schema.properties.steps.items.properties.order]
+type = "integer"
+description = "步骤顺序"
+
+[output_schema.json_schema.properties.steps.items.properties.intent]
+type = "string"
+description = "意图描述，如：获取搜索结果"
+
+[output_schema.json_schema.properties.steps.items.properties.expected_output]
+type = "string"
+description = "预期输出描述"
+
+[output_schema.json_schema.properties.steps.items.properties.result_reference]
+type = "string"
+description = "结果引用标识，格式：#E1"
+pattern = "^#E\\d+$"
+
+[output_schema.json_schema.properties.steps.items.properties.dependencies]
+type = "array"
+items = { type = "string", pattern = "^#E\\d+$" }
+description = "依赖的步骤结果引用列表（#E1 格式）"
+
+[output_schema.json_schema.properties.steps.items.properties.data_requirements]
+type = "array"
+description = "数据需求列表"
+
+[output_schema.json_schema.properties.steps.items.properties.data_requirements.items]
+type = "object"
+required = ["name", "description", "required", "source_hint"]
+
+[output_schema.json_schema.properties.steps.items.properties.data_requirements.items.properties.name]
+type = "string"
+description = "需求名称"
+
+[output_schema.json_schema.properties.steps.items.properties.data_requirements.items.properties.description]
+type = "string"
+description = "需求描述"
+
+[output_schema.json_schema.properties.steps.items.properties.data_requirements.items.properties.required]
+type = "boolean"
+description = "是否必需"
+
+[output_schema.json_schema.properties.steps.items.properties.data_requirements.items.properties.source_hint]
+type = "string"
+description = "来源提示"
+
+[output_schema.json_schema.properties.steps.items.properties.recommended_tool_categories]
+type = "array"
+items = { type = "string", enum = ["Browser", "File", "Text", "Data", "System", "Device", "Dev", "Utility"] }
+description = "推荐的工具分类（可选，可为空数组）"
+
+[output_schema.json_schema.properties.complexity]
+type = "string"
+enum = ["simple", "medium", "complex"]
+description = "计划复杂度"
+
+[output_schema.json_schema.properties.risk_level]
+type = "string"
+enum = ["low", "medium", "high", "critical"]
+description = "风险等级"
+
+[output_schema.example]
+text = """
+{
+  "id": "plan-flex-001",
+  "title": "执行任务",
+  "description": "根据执行轨迹提炼的计划",
+  "steps": [
+    {
+      "id": "step-1",
+      "order": 1,
+      "intent": "获取输入数据",
+      "expected_output": "获取所需数据",
+      "result_reference": "#E1",
+      "dependencies": [],
+      "data_requirements": [
+        {
+          "name": "input",
+          "description": "输入数据",
+          "required": true,
+          "source_hint": "从用户输入中提取"
+        }
+      ],
+      "recommended_tool_categories": ["File"]
+    },
+    {
+      "id": "step-2",
+      "order": 2,
+      "intent": "处理数据",
+      "expected_output": "处理后的数据",
+      "result_reference": "#E2",
+      "dependencies": ["#E1"],
+      "data_requirements": [
+        {
+          "name": "data",
+          "description": "待处理数据",
+          "required": true,
+          "source_hint": "从 #E1 中获取"
+        }
+      ],
+      "recommended_tool_categories": ["Text"]
+    }
+  ],
+  "complexity": "medium",
+  "risk_level": "low"
+}"""
+
+[output_schema.constraints]
+text = "请确保返回有效的JSON格式，不要包含其他文本说明"

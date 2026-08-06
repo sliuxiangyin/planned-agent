@@ -389,3 +389,85 @@
     word-break: break-all;
 }
 
+/* ── Header 操作区元素（chips / more-btn / 危险 dropdown 项） ─── */
+.header-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    line-height: 1.4;
+    white-space: nowrap;
+    user-select: none;
+}
+
+.header-chip--mode {
+    background: var(--primary-color-5);
+    color: var(--secondary-color-3);
+    border: 1px solid var(--primary-color-6);
+}
+
+.header-chip--status {
+    border: 1px solid transparent;
+}
+
+.header-chip--status--generated {
+    background: rgba(16, 185, 129, 0.15);
+    color: var(--secondary-success-color);
+    border-color: rgba(16, 185, 129, 0.45);
+}
+
+.header-chip--status--pending {
+    background: rgba(245, 158, 11, 0.15);
+    color: var(--secondary-warning-color);
+    border-color: rgba(245, 158, 11, 0.45);
+}
+
+.header-more-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0 !important;
+    border: none !important;
+    border-radius: 6px;
+    background: transparent !important;
+    box-shadow: none !important;
+    color: var(--secondary-color-3);
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.header-more-btn:hover {
+    background: var(--primary-color-3) !important;
+    color: var(--secondary-color-1);
+}
+
+.header-more-btn:focus-visible {
+    box-shadow: 0 0 0 2px var(--focused-border-color) !important;
+    outline: none;
+}
+
+/* 确保 trigger 内的 SVG 图标正常显示 */
+.header-more-btn svg {
+    display: block;
+    flex-shrink: 0;
+}
+
+/* Header 下拉菜单：向右溢出到 chat-panel 会被 overflow:hidden 剪掉，
+ * 改为 right 对齐让下拉向左展开（完全位于 .plan-left-panel 内）。 */
+.header-more-menu .header-more-menu-content {
+    left: auto;
+    right: 0;
+}
+
+.header-dropdown-item--danger {
+    color: var(--primary-error-color);
+}
+
+.header-dropdown-item--danger:hover {
+    background: rgba(239, 68, 68, 0.12);
+}
+

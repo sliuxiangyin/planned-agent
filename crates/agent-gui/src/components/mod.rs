@@ -13,3 +13,5 @@ pub mod alert_dialog;
 pub mod dialog;
 pub mod page_header;
 pub mod toast;
+pub mod tooltip;
+pub mod switch;

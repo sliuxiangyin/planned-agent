@@ -161,6 +161,83 @@ impl<PM: PromptManager + 'static> TraceRecorder<PM> {
         Ok(())
     }
 
+    /// 从 chat_with_callback 产生的消息历史中记录执行轨迹（灵活模式专用）。
+    ///
+    /// 与 `record_successful_step` 不同：输入是原始 `Vec<Message>` 而非
+    /// `ReActStep[]`。内部提取 tool 调用序列后走相同的泛化→存储流程。
+    pub async fn record_from_chat_history(
+        &self,
+        plan_intent: &str,
+        messages: &[Message],
+        duration_ms: u64,
+    ) -> Result<()> {
+        if !self.config.enabled {
+            return Ok(());
+        }
+
+        // 从 messages 提取 ReActStep 序列
+        let steps = crate::planner::react::flexible_plan_agent::extract_react_steps_from_messages(messages);
+
+        if steps.is_empty() {
+            info!("[TraceRecorder] 跳过记录：消息中无工具调用");
+            return Ok(());
+        }
+
+        let iterations = steps.len();
+        if iterations > self.config.max_iterations_for_record {
+            info!(
+                "[TraceRecorder] 跳过记录：工具调用次数 {} 超过门槛 {}",
+                iterations, self.config.max_iterations_for_record
+            );
+            return Ok(());
+        }
+
+        let contexts = Self::extract_step_contexts(&steps);
+        if contexts.is_empty() {
+            return Ok(());
+        }
+
+        let (generalized_intent, actions) = if self.config.use_llm_generalization
+            && self.ai_manager.is_some()
+        {
+            match self.llm_generalize(plan_intent, &contexts).await {
+                Ok((gi, acts)) => {
+                    info!("[TraceRecorder] LLM 泛化成功（灵活模式）");
+                    (gi, acts)
+                }
+                Err(e) => {
+                    warn!("[TraceRecorder] LLM 泛化失败: {}，退化为规则泛化", e);
+                    self.rule_generalize(plan_intent, &contexts)
+                }
+            }
+        } else {
+            self.rule_generalize(plan_intent, &contexts)
+        };
+
+        let seq = self.seq.fetch_add(1, Ordering::SeqCst);
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let trace_id = format!("{}-{:03}", today, seq);
+
+        let trace = ExecutionTrace {
+            id: trace_id.clone(),
+            original_intent: plan_intent.to_string(),
+            generalized_intent,
+            upstream_intent: None,
+            actions,
+            total_iterations: iterations,
+            total_duration_ms: duration_ms,
+            recorded_at: Local::now().to_rfc3339(),
+        };
+
+        let filename = format!("{}.json", trace_id);
+        let filepath = self.config.storage_dir.join(&filename);
+        let json = serde_json::to_string_pretty(&trace)?;
+        tokio::fs::write(&filepath, json).await?;
+
+        info!("[TraceRecorder] 灵活模式轨迹已保存: {}", filepath.display());
+        Ok(())
+    }
+
     // ── 内部方法 ────────────────────────────────────────
 
     fn extract_step_contexts(history: &[ReActStep]) -> Vec<StepContext> {

@@ -1,0 +1,606 @@
+/* ========================================================================
+ * plan-left-panel.css — Term x Bento 左侧计划面板
+ *
+ * 设计语言：暗底霓虹 + Bento 瓷块网格
+ * 依赖 dx-components-theme.css 的 CSS 变量体系
+ * ===================================================================== */
+
+/* ── 容器：占满左 panel 剩余高度，纵向滚动 ──────────────────────────── */
+.plan-bento-container {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px 12px 14px;
+    overflow-y: auto;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * Bento 瓷块基类
+ * ══════════════════════════════════════════════════════════════════════ */
+.plan-bento-block {
+    background: var(--plan-bento-bg, var(--primary-color-2));
+    border: 1px solid var(--plan-bento-border, var(--primary-color-5));
+    border-radius: 12px;
+    overflow: hidden;
+    flex-shrink: 0;
+    transition: transform 200ms ease-out, box-shadow 200ms ease-out;
+}
+
+.plan-bento-block:hover {
+    transform: translateY(-1px);
+    box-shadow:
+        0 4px 20px rgba(0, 0, 0, 0.25),
+        inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+/* ── 瓷块标题栏 ─────────────────────────────────────────────────────── */
+.plan-bento-block__header {
+    display: flex;
+    align-items: center;
+    height: 36px;
+    padding: 0 12px;
+    background: var(--primary-color-3);
+    border-bottom: 1px solid var(--primary-color-5);
+    gap: 8px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--secondary-color-2);
+    user-select: none;
+    flex-shrink: 0;
+}
+
+.plan-bento-block__header-emoji {
+    font-size: 14px;
+    line-height: 1;
+    opacity: 0.9;
+}
+
+.plan-bento-block__header-label {
+    white-space: nowrap;
+}
+
+.plan-bento-block__header-spacer {
+    flex: 1 1 auto;
+    min-width: 4px;
+}
+
+/* 标题栏内的 chip 标签 */
+.plan-bento-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 0.68rem;
+    font-weight: 500;
+    line-height: 1.4;
+    white-space: nowrap;
+}
+.plan-bento-chip--version {
+    background: var(--primary-color-5);
+    color: var(--secondary-color-4);
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+}
+.plan-bento-chip--running {
+    background: rgba(43, 127, 255, 0.15);
+    color: var(--focused-border-color);
+    border: 1px solid rgba(43, 127, 255, 0.35);
+}
+.plan-bento-chip--done {
+    background: rgba(16, 185, 129, 0.15);
+    color: var(--secondary-success-color);
+    border: 1px solid rgba(16, 185, 129, 0.35);
+}
+
+/* 标题栏图标按钮 */
+.plan-bento-header-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--secondary-color-4);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 120ms, color 120ms;
+}
+.plan-bento-header-btn:hover {
+    background: var(--primary-color-4);
+    color: var(--secondary-color-1);
+}
+
+/* ── 瓷块内容区 ─────────────────────────────────────────────────────── */
+.plan-bento-block__body {
+    padding: 10px 12px;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * ① PIPELINE — 执行时间线
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/* ── 时间线容器 ─────────────────────────────────────────────────────── */
+.plan-pipeline__timeline {
+    display: flex;
+    flex-direction: column;
+}
+
+/* ── 单个步骤行 ─────────────────────────────────────────────────────── */
+.plan-pipeline__step {
+    display: flex;
+    align-items: stretch;
+    min-height: 36px;
+}
+.plan-pipeline__step:last-child .plan-pipeline__step-line {
+    display: none; /* 最后一步无连接线 */
+}
+
+/* ── 左侧节点 + 线 ──────────────────────────────────────────────────── */
+.plan-pipeline__step-rail {
+    flex-shrink: 0;
+    width: 28px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.plan-pipeline__step-dot {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+    margin-top: 5px;
+}
+
+.plan-pipeline__step-line {
+    width: 2px;
+    flex: 1 1 auto;
+    min-height: 10px;
+    margin: 2px 0;
+}
+
+/* ── 线的状态色 ────────────────────────────────────────────────────── */
+.plan-pipeline__step-line--done {
+    background: var(--secondary-success-color);
+}
+.plan-pipeline__step-line--active {
+    background: linear-gradient(
+        to bottom,
+        var(--focused-border-color) 0%,
+        var(--focused-border-color) 40%,
+        var(--primary-color-5) 100%
+    );
+}
+.plan-pipeline__step-line--pending {
+    background: repeating-linear-gradient(
+        to bottom,
+        var(--primary-color-6) 0px,
+        var(--primary-color-6) 2px,
+        transparent 2px,
+        transparent 6px
+    );
+}
+.plan-pipeline__step-line--failed {
+    background: var(--primary-error-color);
+    opacity: 0.5;
+}
+
+/* ── 右侧步骤内容 ───────────────────────────────────────────────────── */
+.plan-pipeline__step-body {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 4px 0 6px 6px;
+}
+
+.plan-pipeline__step-header {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    line-height: 1.35;
+}
+
+.plan-pipeline__step-index {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--secondary-color-5);
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    flex-shrink: 0;
+}
+.plan-pipeline__step--running .plan-pipeline__step-index {
+    color: var(--focused-border-color);
+}
+.plan-pipeline__step--done .plan-pipeline__step-index {
+    color: var(--secondary-success-color);
+}
+
+.plan-pipeline__step-title {
+    font-size: 0.81rem;
+    color: var(--secondary-color-3);
+    flex: 1 1 auto;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.plan-pipeline__step--running .plan-pipeline__step-title {
+    color: var(--secondary-color-1);
+    font-weight: 500;
+}
+.plan-pipeline__step--done .plan-pipeline__step-title {
+    opacity: 0.7;
+}
+
+.plan-pipeline__step-meta {
+    font-size: 0.68rem;
+    color: var(--secondary-color-5);
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.plan-pipeline__step-detail {
+    font-size: 0.73rem;
+    color: var(--secondary-color-5);
+    line-height: 1.4;
+    margin-top: 2px;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* ── 节点 SVG 颜色 ──────────────────────────────────────────────────── */
+.plan-pipeline-node--done {
+    color: var(--secondary-success-color);
+}
+.plan-pipeline-node--running {
+    color: var(--focused-border-color);
+    animation: plan-node-pulse 2s ease-in-out infinite;
+}
+.plan-pipeline-node--pending {
+    color: var(--secondary-color-6);
+}
+.plan-pipeline-node--failed {
+    color: var(--primary-error-color);
+}
+.plan-pipeline-node--skipped {
+    color: var(--secondary-color-6);
+    opacity: 0.5;
+}
+
+/* ── THINK 终端 ─────────────────────────────────────────────────────── */
+.plan-think-box {
+    margin-top: 2px;
+    margin-bottom: 6px;
+    padding: 10px 12px;
+    background: #0d1117;
+    border-left: 2px solid var(--focused-border-color);
+    border-radius: 0 6px 6px 0;
+    font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+    font-size: 0.7rem;
+    color: #c9d1d9;
+    line-height: 1.55;
+    max-height: 150px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.plan-think-box__line {
+    display: block;
+    padding: 1px 0;
+}
+
+.plan-think-box__prompt {
+    color: var(--focused-border-color);
+}
+
+.plan-think-box__result {
+    color: #8b949e;
+}
+
+.plan-think-box__cursor::after {
+    content: "▋";
+    color: var(--focused-border-color);
+    animation: plan-cursor-blink 1s steps(2) infinite;
+}
+
+.plan-think-box__empty {
+    color: var(--secondary-color-6);
+    font-style: italic;
+}
+
+/* ── 底部状态栏 ─────────────────────────────────────────────────────── */
+.plan-pipeline__statusbar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 6px 12px;
+    border-top: 1px solid var(--primary-color-5);
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.68rem;
+    color: var(--secondary-color-5);
+    flex-wrap: wrap;
+}
+
+.plan-pipeline__statusbar-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+}
+
+.plan-pipeline__statusbar-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.plan-pipeline__statusbar-dot--ok {
+    background: var(--secondary-success-color);
+}
+.plan-pipeline__statusbar-dot--active {
+    background: var(--focused-border-color);
+}
+.plan-pipeline__statusbar-dot--warn {
+    background: var(--secondary-warning-color);
+}
+
+.plan-pipeline__statusbar-val {
+    color: var(--secondary-color-3);
+    font-weight: 500;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * ② + ③ 双列布局容器
+ * ══════════════════════════════════════════════════════════════════════ */
+.plan-bento-row {
+    display: flex;
+    gap: 10px;
+    flex-shrink: 0;
+}
+
+.plan-bento-row > .plan-bento-block {
+    flex: 1 1 50%;
+    min-width: 0;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * ② PARAMS — 固化参数
+ * ══════════════════════════════════════════════════════════════════════ */
+
+.plan-params__item {
+    margin-bottom: 8px;
+}
+.plan-params__item:last-child {
+    margin-bottom: 0;
+}
+
+.plan-params__label {
+    display: block;
+    font-size: 0.68rem;
+    color: var(--secondary-color-5);
+    margin-bottom: 3px;
+    user-select: none;
+}
+
+.plan-params__input-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.plan-params__input {
+    width: 100%;
+    height: 30px;
+    padding: 0 8px;
+    background: var(--primary-color-3);
+    border: 1px solid var(--primary-color-5);
+    border-radius: 6px;
+    font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+    font-size: 0.76rem;
+    color: var(--secondary-color-2);
+    outline: none;
+    transition: border-color 150ms, box-shadow 150ms;
+}
+
+.plan-params__input:focus {
+    border-color: var(--focused-border-color);
+    box-shadow: 0 0 0 1px var(--focused-border-color);
+}
+
+.plan-params__input--readonly {
+    opacity: 0.8;
+    cursor: default;
+    color: var(--secondary-color-3);
+}
+
+.plan-params__edit-btn {
+    position: absolute;
+    right: 4px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--secondary-color-5);
+    cursor: pointer;
+    transition: color 120ms, background 120ms;
+}
+.plan-params__edit-btn:hover {
+    color: var(--secondary-color-2);
+    background: var(--primary-color-5);
+}
+
+.plan-params__empty {
+    text-align: center;
+    padding: 8px 0;
+    font-size: 0.73rem;
+    color: var(--secondary-color-6);
+    user-select: none;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * ③ STATS — 执行统计
+ * ══════════════════════════════════════════════════════════════════════ */
+
+.plan-stats__row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    height: 24px;
+    padding: 0 2px;
+}
+
+.plan-stats__label {
+    font-size: 0.7rem;
+    color: var(--secondary-color-5);
+    flex-shrink: 0;
+}
+
+.plan-stats__value {
+    font-size: 0.76rem;
+    color: var(--secondary-color-2);
+    font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+    font-weight: 500;
+}
+
+.plan-stats__value--highlight {
+    color: var(--focused-border-color);
+}
+
+.plan-stats__value--success {
+    color: var(--secondary-success-color);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * ④ HISTORY — 历史版本
+ * ══════════════════════════════════════════════════════════════════════ */
+
+.plan-history__list {
+    max-height: 140px;
+    overflow-y: auto;
+}
+
+.plan-history__item {
+    display: flex;
+    align-items: center;
+    height: 32px;
+    padding: 0 10px;
+    gap: 8px;
+    font-size: 0.73rem;
+    cursor: pointer;
+    transition: background 120ms;
+    border-radius: 4px;
+}
+
+.plan-history__item:hover {
+    background: var(--primary-color-3);
+}
+
+.plan-history__item--current {
+    background: var(--primary-color-3);
+    border-left: 2px solid var(--secondary-success-color);
+    border-radius: 0 4px 4px 0;
+}
+
+.plan-history__item--failed {
+    opacity: 0.5;
+}
+
+.plan-history__version {
+    font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+    font-weight: 600;
+    color: var(--secondary-color-2);
+    min-width: 24px;
+    flex-shrink: 0;
+}
+
+.plan-history__time {
+    font-size: 0.68rem;
+    color: var(--secondary-color-5);
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+.plan-history__separator {
+    color: var(--secondary-color-6);
+    flex-shrink: 0;
+    font-size: 0.65rem;
+}
+
+.plan-history__status {
+    font-size: 0.68rem;
+    flex-shrink: 0;
+}
+.plan-history__status--ok {
+    color: var(--secondary-success-color);
+}
+.plan-history__status--fail {
+    color: var(--primary-error-color);
+}
+
+.plan-history__meta {
+    font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+    font-size: 0.66rem;
+    color: var(--secondary-color-6);
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+.plan-history__load-btn {
+    flex-shrink: 0;
+    font-size: 0.68rem;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 动画
+ * ══════════════════════════════════════════════════════════════════════ */
+
+@keyframes plan-cursor-blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+}
+
+@keyframes plan-node-pulse {
+    0%, 100% {
+        filter: drop-shadow(0 0 2px rgba(43, 127, 255, 0.6));
+    }
+    50% {
+        filter: drop-shadow(0 0 6px rgba(43, 127, 255, 0.9));
+    }
+}
+
+/* 瓷块入场动画 */
+@keyframes plan-bento-in {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.plan-bento-block {
+    animation: plan-bento-in 300ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.plan-bento-block:nth-child(1) { animation-delay: 0ms; }
+.plan-bento-block:nth-child(2) { animation-delay: 50ms; }
+.plan-bento-block:nth-child(3) { animation-delay: 100ms; }
+.plan-bento-block:nth-child(4) { animation-delay: 150ms; }
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 右侧面板微调：让聊天区利用移走 PlanTodo 后的空间
+ * ══════════════════════════════════════════════════════════════════════ */
+.chat-panel .dx-todo {
+    margin: 8px 10px 0;
+}

@@ -130,6 +130,40 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         self
     }
 
+    /// 派生一个仅 `allowed_tools` 不同的副本。
+    ///
+    /// 灵活模式通过此方法在清晰度检查阶段限制工具为 `["request_user_action"]`，
+    /// 确认需求明确后再用完整工具集执行。内部组件（AiManager、ToolRegistry、
+    /// PromptManager）均为浅拷贝，开销极小。
+    pub fn with_allowed_tools(&self, allowed_tools: Option<Vec<String>>) -> Self {
+        Self {
+            ai_manager: self.ai_manager.clone(),
+            tool_registry: self.tool_registry.clone(),
+            prompt_manager: self.prompt_manager.clone(),
+            config: ChatConfig {
+                allowed_tools,
+                ..self.config.clone()
+            },
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// 派生一个仅 `system_prompt_template` 不同的副本。
+    ///
+    /// 灵活模式 Phase 1（清晰度检查）与 Phase 2（执行）使用不同的 system prompt。
+    pub fn with_system_prompt_template(&self, template: Option<String>) -> Self {
+        Self {
+            ai_manager: self.ai_manager.clone(),
+            tool_registry: self.tool_registry.clone(),
+            prompt_manager: self.prompt_manager.clone(),
+            config: ChatConfig {
+                system_prompt_template: template,
+                ..self.config.clone()
+            },
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     /// 请求取消当前正在进行的聊天流。
     ///
     /// 调用后 `chat_with_callback` 会在下一个 stream chunk 或下一轮开始时
@@ -375,12 +409,14 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
                         action_type: planned_agent_core::types::UIActionType::Confirm,
                         label: "继续执行".to_string(),
                         description: None,
+                        options: vec![],
                     },
                     UIAction {
                         id: "stop".to_string(),
                         action_type: planned_agent_core::types::UIActionType::Confirm,
                         label: "结束".to_string(),
                         description: None,
+                        options: vec![],
                     },
                 ];
                 on_event(ChatEvent::UIActionRequest {
@@ -583,6 +619,26 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
                 },
             })
             .collect()
+    }
+
+    /// 从执行轨迹总结生成粗粒度计划（灵活模式）。
+    ///
+    /// 内部构造 `LlmCoarsePlanner` 并调用 `generate_from_trace`，
+    /// 返回序列化后的 `CoarseGrainedPlan` JSON 字符串。
+    ///
+    /// 调用方无需直接依赖 `planned_agent_core::planner::coarse` 类型。
+    pub async fn generate_coarse_plan_from_trace(
+        &self,
+        trace_summary: &str,
+    ) -> Result<String> {
+        use crate::planner::coarse::LlmCoarsePlanner;
+
+        let ai_client = self.resolve_ai_client()?;
+        let planner = LlmCoarsePlanner::new(ai_client, self.prompt_manager.clone());
+        let plan = planner.generate_from_trace(trace_summary).await?;
+        let json = serde_json::to_string(&plan)
+            .map_err(|e| anyhow!("序列化 CoarseGrainedPlan 失败: {}", e))?;
+        Ok(json)
     }
 }
 

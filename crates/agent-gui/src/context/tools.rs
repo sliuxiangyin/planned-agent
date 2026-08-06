@@ -141,8 +141,8 @@ fn request_user_action_tool() -> Tool {
                             },
                             "type": {
                                 "type": "string",
-                                "enum": ["confirm", "select", "input"],
-                                "description": "动作类型：confirm=确认按钮, select=单选列表, input=文本输入提示"
+                                "enum": ["confirm", "select", "input", "multi_select"],
+                                "description": "动作类型：confirm=确认按钮, select=单选列表, input=文本输入提示, multi_select=多选复选框"
                             },
                             "label": {
                                 "type": "string",
@@ -151,6 +151,19 @@ fn request_user_action_tool() -> Tool {
                             "description": {
                                 "type": "string",
                                 "description": "补充说明，可选"
+                            },
+                            "options": {
+                                "type": "array",
+                                "description": "MultiSelect 的复选框选项列表（仅 multi_select 类型使用）",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": { "type": "string", "description": "选项唯一标识" },
+                                        "label": { "type": "string", "description": "选项展示文本" },
+                                        "default": { "type": "boolean", "description": "是否默认勾选，默认 false" }
+                                    },
+                                    "required": ["id", "label"]
+                                }
                             }
                         },
                         "required": ["id", "type", "label"]

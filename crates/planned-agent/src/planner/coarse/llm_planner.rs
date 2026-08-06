@@ -212,6 +212,101 @@ impl<PM: PromptManager> LlmCoarsePlanner<PM> {
 
         Ok(plan)
     }
+
+    /// 从执行轨迹总结提炼粗粒度计划（灵活模式）。
+    ///
+    /// 使用 `planning/flexible_to_coarse` 模板，输入为 AI 自然语言总结文本，
+    /// 输出与 [`CoarsePlanner::generate_coarse_plan`] 相同的 `CoarseGrainedPlan`。
+    ///
+    /// # 参数
+    /// - `trace_summary`: AI 执行轨迹的完整总结文本
+    /// - `on_chunk`: 流式回调（与周密模式一致）
+    pub async fn generate_from_trace_stream<F>(
+        &self,
+        trace_summary: &str,
+        mut on_chunk: F,
+    ) -> Result<CoarseGrainedPlan>
+    where
+        F: FnMut(&str) + Send,
+    {
+        // 1. 构建提示上下文（仅 trace_summary 变量）
+        let prompt_context = PromptContext::new()
+            .with_variable("trace_summary", json!(trace_summary));
+
+        // 2. 渲染 flexible_to_coarse 模板
+        let prompt = self.prompt_manager
+            .render("planning/flexible_to_coarse", &prompt_context)
+            .await?;
+        debug!(
+            "===========planning/flexible_to_coarse: {} \r\n ==================",
+            prompt
+        );
+
+        // 3. 构造 stream=true 请求
+        let request = ChatCompletionRequest {
+            model: self.ai_client.model_name().to_string(),
+            messages: vec![Message {
+                role: MessageRole::User,
+                content: Some(MessageContent::Text { text: prompt }),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+                reasoning_content: None,
+            }],
+            tools: None,
+            temperature: Some(0.3),
+            max_tokens: Some(8000),
+            stream: true,
+            extra: std::collections::HashMap::new(),
+        };
+
+        // 4. 调用流式接口
+        let response_stream = self.ai_client.chat_completion_stream(request).await?;
+
+        // 5. 拉取 chunk，回调 + 累积
+        let mut full_text = String::new();
+        let mut stream = response_stream.stream;
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result?;
+            if let Some(choice) = chunk.choices.first() {
+                if let Some(content) = &choice.delta.content {
+                    if !content.is_empty() {
+                        on_chunk(content);
+                        full_text.push_str(content);
+                    }
+                }
+            }
+        }
+
+        if full_text.is_empty() {
+            return Err(anyhow!("LLM 流式响应为空，未产出任何文本片段"));
+        }
+
+        // 6. 解析完整文本（使用 flexible_to_coarse 模板的 output_schema）
+        let plan: CoarseGrainedPlan = self.prompt_manager
+            .parse_response("planning/flexible_to_coarse", &full_text)
+            .await?;
+
+        // 7. 验证原子步骤
+        let validation_warnings = self.validate_atomic_steps(&plan);
+        if !validation_warnings.is_empty() {
+            debug!("步骤验证警告: {:?}", validation_warnings);
+        }
+
+        Ok(plan)
+    }
+
+    /// `generate_from_trace_stream` 的便捷版，丢弃流式回调。
+    pub async fn generate_from_trace(
+        &self,
+        trace_summary: &str,
+    ) -> Result<CoarseGrainedPlan> {
+        let mut full_text = String::new();
+        self.generate_from_trace_stream(trace_summary, |chunk| {
+            full_text.push_str(chunk);
+        })
+        .await
+    }
 }
 
 #[async_trait]
