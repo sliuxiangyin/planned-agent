@@ -164,6 +164,23 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         }
     }
 
+    /// 派生一个带 `context` 注入的副本。
+    ///
+    /// 灵活模式第二阶段传入上版本四字段（todos/summary/params/output_schema），
+    /// 渲染到 `flexible_system.toml` 的 `{{ context }}` 变量。
+    pub fn with_context(&self, context: Option<String>) -> Self {
+        Self {
+            ai_manager: self.ai_manager.clone(),
+            tool_registry: self.tool_registry.clone(),
+            prompt_manager: self.prompt_manager.clone(),
+            config: ChatConfig {
+                context: context.or(self.config.context.clone()),
+                ..self.config.clone()
+            },
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     /// 请求取消当前正在进行的聊天流。
     ///
     /// 调用后 `chat_with_callback` 会在下一个 stream chunk 或下一轮开始时
@@ -575,7 +592,15 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
             .prompt_manager
             .render(
                 template,
-                &PromptContext::new().with_variable("context", Value::String(String::new())),
+                &PromptContext::new().with_variable(
+                    "context",
+                    Value::String(
+                        self.config
+                            .context
+                            .clone()
+                            .unwrap_or_default(),
+                    ),
+                ),
             )
             .await?;
 
@@ -624,21 +649,23 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
     /// 从执行轨迹总结生成粗粒度计划（灵活模式）。
     ///
     /// 内部构造 `LlmCoarsePlanner` 并调用 `generate_from_trace`，
-    /// 返回序列化后的 `CoarseGrainedPlan` JSON 字符串。
+    /// 返回 `(todos_json, output_schema)`。output_schema 现由
+    /// `CoarseGrainedPlan::output_schema` 承载，首次执行时可能为 `None`。
     ///
     /// 调用方无需直接依赖 `planned_agent_core::planner::coarse` 类型。
     pub async fn generate_coarse_plan_from_trace(
         &self,
         trace_summary: &str,
-    ) -> Result<String> {
+    ) -> Result<(String, String)> {
         use crate::planner::coarse::LlmCoarsePlanner;
 
         let ai_client = self.resolve_ai_client()?;
         let planner = LlmCoarsePlanner::new(ai_client, self.prompt_manager.clone());
         let plan = planner.generate_from_trace(trace_summary).await?;
+        let output_schema = plan.output_schema.clone().unwrap_or_default();
         let json = serde_json::to_string(&plan)
             .map_err(|e| anyhow!("序列化 CoarseGrainedPlan 失败: {}", e))?;
-        Ok(json)
+        Ok((json, output_schema))
     }
 }
 

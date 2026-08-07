@@ -74,6 +74,9 @@ pub struct CoarseGrainedPlan {
     pub complexity: PlanComplexity,
     /// 风险等级
     pub risk_level: RiskLevel,
+    /// 输出格式描述（从 AI 响应中提取，执行完毕后按此 schema 产出最终结果）
+    #[serde(default)]
+    pub output_schema: Option<String>,
 }
 
 /// 计划验证结果
@@ -105,6 +108,7 @@ impl CoarseGrainedPlan {
             created_at: Utc::now(),
             complexity,
             risk_level,
+            output_schema: None,
         }
     }
 

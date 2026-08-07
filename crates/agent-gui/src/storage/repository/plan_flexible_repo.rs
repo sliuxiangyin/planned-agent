@@ -25,6 +25,7 @@ impl PlanFlexibleRepo {
         previous_summary: &str,
         todos: &str,
         params: &str,
+        output_schema: &str,
     ) -> StorageResult<plans_flexible::Model> {
         let now = Utc::now().to_rfc3339();
         let id = Uuid::new_v4().to_string();
@@ -35,7 +36,7 @@ impl PlanFlexibleRepo {
             previous_summary: Set(previous_summary.to_string()),
             todos: Set(todos.to_string()),
             params: Set(params.to_string()),
-            output_schema: Set(String::new()),
+            output_schema: Set(output_schema.to_string()),
             created_at: Set(now),
         };
         let res = model.insert(&self.db).await?;

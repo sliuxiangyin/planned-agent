@@ -35,6 +35,11 @@ pub struct ChatConfig {
     /// - `Some(names)`：仅白名单中的工具会暴露给 LLM（周密模式仅保留
     ///   `request_user_action` 等 UI 交互工具）
     pub allowed_tools: Option<Vec<String>>,
+    /// system prompt 的 `{{ context }}` 变量值。
+    ///
+    /// 用于向 prompt 注入历史执行上下文（四字段：todos/summary/params/output_schema）。
+    /// `None` 或空串时 context 变量渲染为空。
+    pub context: Option<String>,
 }
 
 impl Default for ChatConfig {
@@ -47,6 +52,7 @@ impl Default for ChatConfig {
             max_tool_rounds: 10,
             enable_thinking: true,
             allowed_tools: None,
+            context: None,
         }
     }
 }

@@ -283,9 +283,15 @@ impl<PM: PromptManager> LlmCoarsePlanner<PM> {
         }
 
         // 6. 解析完整文本（使用 flexible_to_coarse 模板的 output_schema）
-        let plan: CoarseGrainedPlan = self.prompt_manager
+        let mut plan: CoarseGrainedPlan = self.prompt_manager
             .parse_response("planning/flexible_to_coarse", &full_text)
             .await?;
+
+        // 6.5 从原始响应中提取 output_schema 并写入计划
+        let schema = extract_output_schema(&full_text);
+        if !schema.is_empty() {
+            plan.output_schema = Some(schema);
+        }
 
         // 7. 验证原子步骤
         let validation_warnings = self.validate_atomic_steps(&plan);
@@ -297,15 +303,14 @@ impl<PM: PromptManager> LlmCoarsePlanner<PM> {
     }
 
     /// `generate_from_trace_stream` 的便捷版，丢弃流式回调。
+    ///
+    /// `output_schema` 已由 [`generate_from_trace_stream`] 内联提取并写入
+    /// `CoarseGrainedPlan::output_schema`，调用方直接从 plan 读取即可。
     pub async fn generate_from_trace(
         &self,
         trace_summary: &str,
     ) -> Result<CoarseGrainedPlan> {
-        let mut full_text = String::new();
-        self.generate_from_trace_stream(trace_summary, |chunk| {
-            full_text.push_str(chunk);
-        })
-        .await
+        self.generate_from_trace_stream(trace_summary, |_chunk| {}).await
     }
 }
 
@@ -373,6 +378,26 @@ impl<PM: PromptManager + Send + Sync> CoarsePlanner for LlmCoarsePlanner<PM> {
     /// 获取计划生成器名称
     fn name(&self) -> &str {
         "LlmCoarsePlanner"
+    }
+}
+
+/// 从 LLM 原始响应中提取 `## 输出格式` 段落。
+///
+/// 格式示例：
+/// ```text
+/// ## 输出格式
+/// JSON 对象数组，每项含 name(string)、url(string)、summary(string)
+/// ```
+fn extract_output_schema(raw_text: &str) -> String {
+    // 查找 "## 输出格式" 标记
+    let marker = "## 输出格式";
+    if let Some(pos) = raw_text.find(marker) {
+        let after_marker = &raw_text[pos + marker.len()..];
+        // 取到下一个 ## 标题或文档结尾
+        let end = after_marker.find("\n## ").unwrap_or(after_marker.len());
+        after_marker[..end].trim().to_string()
+    } else {
+        String::new()
     }
 }
 

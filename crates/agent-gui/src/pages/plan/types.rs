@@ -108,7 +108,7 @@ pub(super) struct ChatState {
 }
 
 /// 计划元数据状态：模式、生成事件、版本号、基本信息。
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(super) struct PlanState {
     pub plan_info: Signal<Option<PlanInfo>, SyncStorage>,
     pub plan_mode: Signal<Option<String>, SyncStorage>,
@@ -116,6 +116,132 @@ pub(super) struct PlanState {
     pub plan_version: Signal<u32, SyncStorage>,
     /// 已固化的参数定义（清晰度检查 multi_select 勾选后暂存，确认生成时随事件落库）
     pub plan_params: Signal<Vec<ParamDef>, SyncStorage>,
+}
+
+// ── 灵活模式工作流类型 ──
+
+/// 灵活模式工作流阶段。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum WorkflowPhase {
+    /// 等待用户输入任务描述
+    Idle,
+    /// Phase 1 清晰度检查中
+    ClarityChecking,
+    /// 等待用户回复追问卡片
+    AwaitingUserAction,
+    /// Phase 2 灵活执行中
+    Executing,
+    /// 执行完成，提炼计划中
+    Solidifying,
+}
+
+/// 从 `plans_flexible` 加载的四字段快照，供下次执行注入 context。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct PlanFlexibleSnapshot {
+    pub version: i64,
+    pub todos: String,           // CoarseGrainedPlan JSON
+    pub previous_summary: String, // AI 执行轨迹原文
+    pub params: String,           // ParamDef[] JSON
+    pub output_schema: String,    // 输出格式描述
+}
+
+impl PlanFlexibleSnapshot {
+    /// 是否有任何有效数据（首次执行返回 false）。
+    pub fn has_data(&self) -> bool {
+        !self.todos.is_empty() || !self.previous_summary.is_empty()
+    }
+}
+
+/// 执行步骤（用于 ExecutionView 渲染）。
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct ExecutionStep {
+    /// 步骤序号
+    pub index: usize,
+    /// 工具名称
+    pub tool_name: String,
+    /// 参数摘要
+    pub params_summary: String,
+    /// 结果摘要
+    pub result_summary: String,
+    /// 步骤状态
+    pub status: StepStatus,
+    /// 意外调整说明（仅 Warning 时有值）
+    pub warning_detail: Option<String>,
+    /// 耗时（毫秒）
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum StepStatus {
+    Pending,
+    Running,
+    Done,
+    Warning,
+    Failed,
+}
+
+/// 灵活模式工作流状态：替代 ChatState，管理结构化工作流而非聊天消息。
+#[derive(Clone, Copy, PartialEq)]
+pub(super) struct WorkflowState {
+    /// 当前工作流阶段
+    pub phase: Signal<WorkflowPhase, SyncStorage>,
+    /// 任务描述（绑定到 RequirementInput 的 Textarea）
+    pub requirement_text: Signal<String, SyncStorage>,
+    /// 执行步骤列表（ExecutionView 渲染）
+    pub execution_steps: Signal<Vec<ExecutionStep>, SyncStorage>,
+    /// 待处理的 UI 交互（追问/确认卡片）
+    pub pending_ui: Signal<Option<PendingUIState>, SyncStorage>,
+    /// 从 plans_flexible 加载的历史上下文（首次为 None）
+    pub context_snapshot: Signal<Option<PlanFlexibleSnapshot>, SyncStorage>,
+    /// 参数值（由 RequirementInput 表单收集，执行时注入 prompt）
+    pub param_values: Signal<Vec<(String, String)>, SyncStorage>,
+}
+
+impl WorkflowState {
+    /// 是否正在执行中（非 Idle）。
+    pub fn is_running(&self) -> bool {
+        let phase = *self.phase.read();
+        !matches!(phase, WorkflowPhase::Idle)
+    }
+
+    /// 设置阶段。
+    pub fn set_phase(&mut self, phase: WorkflowPhase) {
+        self.phase.set(phase);
+    }
+
+    /// 追加执行步骤。
+    pub fn push_step(&mut self, step: ExecutionStep) {
+        self.execution_steps.write().push(step);
+    }
+
+    /// 更新最后一步的状态与结果。
+    pub fn update_last_step(&mut self, status: StepStatus, result: &str, warning: Option<&str>) {
+        let mut steps = self.execution_steps.write();
+        if let Some(last) = steps.last_mut() {
+            last.status = status;
+            last.result_summary = result.to_string();
+            last.warning_detail = warning.map(|s| s.to_string());
+        }
+    }
+
+    /// 设置待处理 UI 状态。
+    pub fn set_pending(&mut self, state: PendingUIState) {
+        *self.pending_ui.write() = Some(state);
+    }
+
+    /// 清除待处理 UI 状态。
+    pub fn clear_pending(&mut self) {
+        self.pending_ui.set(None);
+    }
+
+    /// 重置为 Idle（保留 context_snapshot）。
+    pub fn reset(&mut self) {
+        self.phase.set(WorkflowPhase::Idle);
+        self.requirement_text.set(String::new());
+        self.execution_steps.set(vec![]);
+        self.pending_ui.set(None);
+        self.param_values.set(vec![]);
+    }
 }
 
 // ── ChatState 方法 ──

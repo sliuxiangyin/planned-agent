@@ -8,6 +8,13 @@ text = """
 执行轨迹总结：
 {{ trace_summary }}
 
+请先输出「输出格式」段落，再输出粗粒度计划 JSON。
+
+## 输出格式
+（用自然语言描述本次计划的最终输出格式。例如："JSON 对象数组，每项含 name(string)、url(string)、summary(string)"，或 "Markdown 格式的综合分析报告"。如果执行轨迹中未明确输出格式，请根据任务意图合理推断。）
+
+---
+
 请严格按照以下JSON格式返回粗粒度计划：
 {{ example }}
 
