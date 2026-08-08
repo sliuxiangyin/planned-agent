@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use planned_agent_core::tool_registry::{BuiltinToolProvider, ToolCategory, ToolExecutor};
-use planned_agent_core::types::{Tool, ToolResult};
+use planned_agent_core::mcp::types::{Tool, ToolResult};
 
 use super::chunk_store::ChunkStore;
 use super::executor_context::ExecutorContext;

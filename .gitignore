@@ -10,7 +10,7 @@ target-verify/
 *.tmp
 *.swp
 *.swo
-
+.idea
 .DS_Store
 Thumbs.db
 config.toml

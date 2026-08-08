@@ -1,6 +1,10 @@
 use planned_agent_core::{
-    ai::AiClient,
-    types::{ChatCompletionRequest, Message, MessageRole, MessageContent, ToolCall, ToolType, ToolDefinition, FunctionDefinition, AiProviderConfig, McpServerConfig},
+    ai::{
+        AiClient,
+        config::AiProviderConfig,
+        types::{ChatCompletionRequest, Message, MessageRole, MessageContent, ToolCall, ToolType, ToolDefinition, FunctionDefinition},
+    },
+    mcp::types::McpServerConfig,
 };
 use planned_agent_ai_manager::AiManager;
 use planned_agent_mcp_rmcp::{McpConfigManager, McpManager};

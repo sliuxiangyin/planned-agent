@@ -1,6 +1,6 @@
 use anyhow::Result;
 use serde_json::Value;
-use planned_agent_core::types::Tool;
+use planned_agent_core::mcp::types::Tool;
 use tracing::warn;
 
 /// 工具参数验证器

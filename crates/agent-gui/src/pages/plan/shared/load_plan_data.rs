@@ -6,11 +6,10 @@ use std::sync::Arc;
 
 use crate::storage::repository::{MessageRepo, PlanFlexibleRepo, PlanRepo};
 use dioxus::prelude::*;
-use planned_agent_core::types::{Message, MessageContent, MessageRole};
+use planned_agent_core::ai::types::{Message, MessageContent, MessageRole};
 
-use super::super::types::{
-    ChatState, PlanFlexibleSnapshot, PlanInfo, PlanState, WorkflowState,
-};
+use super::super::states::{ChatState, PlanState, WorkflowState};
+use super::super::types::{PlanFlexibleSnapshot, PlanInfo};
 
 /// 从 DB 异步加载计划元数据。
 /// - 周密模式：同时加载历史消息
@@ -53,14 +52,16 @@ pub async fn load_plan_data(
                     previous_summary: snapshot.previous_summary,
                     params: snapshot.params,
                     output_schema: snapshot.output_schema,
+                    input_schema: snapshot.input_schema,
                 };
                 tracing::info!(
-                    "load_plan_data: 加载灵活模式快照 v{}, has_todos={}, has_summary={}, has_params={}, has_schema={}",
+                    "load_plan_data: 加载灵活模式快照 v{}, has_todos={}, has_summary={}, has_params={}, has_schema={}, has_input_schema={}",
                     ctx.version,
                     !ctx.todos.is_empty(),
                     !ctx.previous_summary.is_empty(),
                     !ctx.params.is_empty(),
                     !ctx.output_schema.is_empty(),
+                    !ctx.input_schema.is_empty(),
                 );
                 wf.context_snapshot.set(Some(ctx));
             } else {
@@ -138,6 +139,13 @@ pub fn build_context_string(snapshot: &PlanFlexibleSnapshot) -> String {
         ctx.push_str("### 输出格式（output_schema）\n（未记录）\n\n");
     }
 
+    // 输入参数定义
+    if !snapshot.input_schema.is_empty() {
+        ctx.push_str("### 输入参数定义（input_schema）\n");
+        ctx.push_str(&format_input_schema(&snapshot.input_schema));
+        ctx.push('\n');
+    }
+
     ctx
 }
 
@@ -191,5 +199,51 @@ fn format_params(params_json: &str) -> String {
                 .join("")
         }
         Err(_) => params_json.to_string(),
+    }
+}
+
+/// 将 input_schema JSON 对象格式化为可读文本。
+///
+/// input_schema 形如 `{"keyword": {"type": "string", "description": "搜索关键词", "example": "安仁乡"}}`，
+/// 逐参数渲染为 `- keyword (string): 搜索关键词（示例: 安仁乡）`。
+fn format_input_schema(input_schema_json: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(input_schema_json) {
+        Ok(json) if json.is_object() => {
+            let obj = json.as_object().unwrap();
+            if obj.is_empty() {
+                return "(空)".to_string();
+            }
+            let mut lines: Vec<String> = obj
+                .iter()
+                .map(|(name, def)| {
+                    let param_type = def
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?");
+                    let desc = def
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let example = def
+                        .get("example")
+                        .map(|v| {
+                            if v.is_string() {
+                                v.as_str().unwrap_or("").to_string()
+                            } else {
+                                v.to_string()
+                            }
+                        })
+                        .unwrap_or_default();
+                    if example.is_empty() {
+                        format!("- {} ({}): {}", name, param_type, desc)
+                    } else {
+                        format!("- {} ({}): {}（示例: {}）", name, param_type, desc, example)
+                    }
+                })
+                .collect();
+            lines.sort();
+            lines.join("\n")
+        }
+        _ => input_schema_json.to_string(),
     }
 }

@@ -6,7 +6,7 @@
 //! - pending：灰显（icon + ○ + 标题）
 
 use dioxus::prelude::*;
-use planned_agent_core::types::UIAction;
+use planned_agent::chat::UIAction;
 use tracing;
 
 use super::super::components::chat_ui_actions_view::ChatUIActionsView;
@@ -280,7 +280,7 @@ pub fn ExecutionView(props: ExecutionViewProps) -> Element {
                                                 ChatUIActionsView {
                                                     message: p_clone.message.clone(),
                                                     actions: p_clone.actions.clone(),
-                                                    on_action: move |(action, choice)| {
+                                                    on_action: move |(action, choice): (UIAction, String)| {
                                                         // 打印原始 action / choice UI action 选择结构
                                                         tracing::debug!(
                                                             action_id = %action.id,

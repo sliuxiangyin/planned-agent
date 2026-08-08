@@ -14,7 +14,8 @@ use std::sync::Arc;
 use dioxus::prelude::*;
 use planned_agent::{ChatEvent, ChatService};
 use planned_agent_core::prompt::PromptContext;
-use planned_agent_core::types::{Message, MessageContent, MessageRole, UIAction};
+use planned_agent::chat::UIAction;
+use planned_agent_core::ai::types::{Message, MessageContent, MessageRole};
 use planned_agent_prompt_manager::FilePromptManager;
 
 use crate::services::chat_service::ChatServiceSignal;
@@ -26,9 +27,8 @@ use super::execution_view::ExecutionView;
 use super::requirement_input::RequirementInput;
 use super::super::shared::load_plan_data::build_context_string;
 use super::super::shared::save_flexible_plan::save_flexible_plan;
-use super::super::types::{
-    ExecutionStep, PendingUIState, PlanState, StepStatus, WorkflowPhase, WorkflowState,
-};
+use super::super::states::{PlanState, WorkflowState};
+use super::super::types::{ExecutionStep, PendingUIState, StepStatus, WorkflowPhase};
 
 /// 灵活模式三段式布局样式（仅本组件渲染时按需加载）。
 const FLEXIBLE_CSS: Asset = asset!("/assets/plan-flexible.css");
@@ -184,15 +184,18 @@ async fn run_pipeline(
 ) {
     // 基础实例：flexible_system + context，全程复用（system prompt 仅注入一次）
     let base_svc = chat_svc
-        .with_system_prompt_template(Some("chat/flexible_system".to_string()))
+        .with_system_prompt_template(Some("flexible/flexible_system".to_string()))
         .with_context(if context_str.is_empty() {
             None
         } else {
             Some(context_str)
         });
 
-    // ── Stage ①：清晰度判断（仅 request_user_action）──
-    let clarity_svc = base_svc.with_allowed_tools(Some(vec!["request_user_action".to_string()]));
+    // ── Stage ①：清晰度判断（仅 request_user_action + builtin_read_documentation）──
+    let clarity_svc = base_svc.with_allowed_tools(Some(vec![
+        "request_user_action".to_string(),
+        "builtin_read_documentation".to_string(),
+    ]));
     let (stage, history) = match entry_stage {
         WorkflowPhase::ClarityCheck => {
             run_clarity_check_stage(&clarity_svc, &mut workflow, history).await
@@ -222,10 +225,12 @@ async fn run_pipeline(
         (stage, history)
     };
 
-    // ── Stage ② [条件]：参数识别（仅 request_user_action）──
+    // ── Stage ② [条件]：参数识别（仅 request_user_action + builtin_read_documentation）──
     let (stage, history) = if stage == WorkflowPhase::ParamIdentify && input_params_enabled {
-        let param_svc =
-            base_svc.with_allowed_tools(Some(vec!["request_user_action".to_string()]));
+        let param_svc = base_svc.with_allowed_tools(Some(vec![
+            "request_user_action".to_string(),
+            "builtin_read_documentation".to_string(),
+        ]));
         run_param_identify_stage(&param_svc, &mut workflow, history).await
     } else if stage == WorkflowPhase::ParamIdentify {
         // input_params_enabled 为 false，跳过该阶段
@@ -234,10 +239,12 @@ async fn run_pipeline(
         (stage, history)
     };
 
-    // ── Stage ④ [条件]：输出类型建议（仅 request_user_action）──
+    // ── Stage ④ [条件]：输出类型建议（仅 request_user_action + builtin_read_documentation）──
     let (stage, history) = if stage == WorkflowPhase::OutputSuggesting && output_params_enabled {
-        let output_svc =
-            base_svc.with_allowed_tools(Some(vec!["request_user_action".to_string()]));
+        let output_svc = base_svc.with_allowed_tools(Some(vec![
+            "request_user_action".to_string(),
+            "builtin_read_documentation".to_string(),
+        ]));
         run_output_suggest_stage(&output_svc, &mut workflow, history).await
     } else if stage == WorkflowPhase::OutputSuggesting {
         // output_params_enabled 为 false，跳过该阶段
@@ -283,7 +290,7 @@ async fn run_clarity_check_stage(
     // 首次进入时注入清晰度判断消息（防重复注入）
     if !has_clarity_check_message(&history) {
         if let Some(msg) =
-            render_message(chat_svc, "chat/flexible_clarity_check", &PromptContext::new()).await
+            render_message(chat_svc, "flexible/flexible_clarity_check", &PromptContext::new()).await
         {
             history.push(user_message(msg));
         }
@@ -384,7 +391,7 @@ async fn run_param_identify_stage(
     // 首次进入时注入参数识别消息（防重复注入）
     if !has_param_identify_message(&history) {
         if let Some(msg) =
-            render_message(chat_svc, "chat/flexible_param_identify", &PromptContext::new()).await
+            render_message(chat_svc, "flexible/flexible_param_identify", &PromptContext::new()).await
         {
             history.push(user_message(msg));
         }
@@ -435,7 +442,7 @@ async fn run_output_suggest_stage(
     workflow.set_phase(WorkflowPhase::OutputSuggesting);
 
     let Some(msg) =
-        render_message(chat_svc, "chat/flexible_output_suggest", &PromptContext::new()).await
+        render_message(chat_svc, "flexible/flexible_output_suggest", &PromptContext::new()).await
     else {
         // 渲染失败 → 跳过本阶段
         return (WorkflowPhase::TraceExtracting, history);
@@ -492,7 +499,7 @@ async fn run_trace_extract_stage(
         .with_variable("param_hints", serde_json::Value::String(param_hints));
 
     let Some(msg) =
-        render_message(chat_svc, "chat/flexible_trace_extract", &ctx).await
+        render_message(chat_svc, "flexible/flexible_trace_extract", &ctx).await
     else {
         workflow.set_phase(WorkflowPhase::Idle);
         return None;

@@ -8,7 +8,7 @@
 //!    验证子进程真实报错能被捕获并显示给用户（解决"UI 显示 connection closed 但终端显示 MODULE_NOT_FOUND"的问题）
 //! 4. **status 暴露**：失败后 `connection_status()` 能读到对应 `ConnectionError`
 
-use planned_agent_core::types::{ConnectionError, McpServerConfig};
+use planned_agent_core::mcp::types::{ConnectionError, McpServerConfig};
 use planned_agent_mcp_rmcp::McpClientImpl;
 use planned_agent_core::mcp::McpClient;
 

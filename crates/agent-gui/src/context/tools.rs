@@ -6,6 +6,7 @@
 //! - ToolRegistry 内部已用 `RwLock<Option<...>>`，天然支持延后设置与将来替换
 //! - **不新增任何占位/扩展 API**——按需再设计
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -13,12 +14,12 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use planned_agent_core::tool_registry::{ToolCategory, ToolExecutor};
-use planned_agent_core::types::{Tool, ToolResult};
+use planned_agent_core::mcp::types::{Tool, ToolResult};
 use planned_agent_mcp_rmcp::McpManager;
 use planned_agent_tool_manager::builtin::{
-    ai_tools::AiToolsProvider, data_tools::DataToolsProvider, file_tools::FileToolsProvider,
-    system_tools::SystemToolsProvider, text_tools::TextToolsProvider,
-    web_tools::WebToolsProvider,
+    ai_tools::AiToolsProvider, data_tools::DataToolsProvider, doc_tools::DocToolsProvider,
+    file_tools::FileToolsProvider, system_tools::SystemToolsProvider,
+    text_tools::TextToolsProvider, web_tools::WebToolsProvider,
 };
 use planned_agent_tool_manager::ToolRegistry;
 
@@ -38,10 +39,10 @@ impl PartialEq for ToolsContext {
 }
 
 impl ToolsContext {
-    /// 同步初始化：构造 ToolRegistry + 注册 6 个内置 provider
+    /// 同步初始化：构造 ToolRegistry + 注册 7 个内置 provider
     ///
     /// 此时 `mcp_manager` 为 None；MCP 工具由后续 `set_mcp_manager` 触发注入。
-    pub fn init() -> anyhow::Result<Self> {
+    pub fn init(docs_dir: PathBuf) -> anyhow::Result<Self> {
         let registry = ToolRegistry::new();
 
         // 按 CLI 既有顺序注册内置 provider（顺序无功能影响，仅日志可读性）
@@ -51,6 +52,7 @@ impl ToolsContext {
         registry.register_builtin_provider(&DataToolsProvider);
         registry.register_builtin_provider(&AiToolsProvider);
         registry.register_builtin_provider(&WebToolsProvider);
+        registry.register_builtin_provider(&DocToolsProvider::new(docs_dir));
 
         // 注册 UI 交互工具 `request_user_action`（前端拦截，不实际执行）
         registry.register_custom_tool(
@@ -160,6 +162,7 @@ fn request_user_action_tool() -> Tool {
                                     "properties": {
                                         "id": { "type": "string", "description": "选项唯一标识" },
                                         "label": { "type": "string", "description": "选项展示文本" },
+                                        "value": { "type": "string", "description": "选项的实际数据值（推荐）。勾选后回传为 id=value；不填则仅回传 id" },
                                         "default": { "type": "boolean", "description": "是否默认勾选，默认 false" }
                                     },
                                     "required": ["id", "label"]

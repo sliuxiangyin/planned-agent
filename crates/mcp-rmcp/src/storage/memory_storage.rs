@@ -5,7 +5,7 @@
 use std::sync::RwLock;
 
 use anyhow::Result;
-use planned_agent_core::types::Tool;
+use planned_agent_core::mcp::types::Tool;
 
 use crate::config::{McpConfigFile, McpServerEntry, ToolEntry};
 use crate::storage::trait_def::McpConfigStorage;

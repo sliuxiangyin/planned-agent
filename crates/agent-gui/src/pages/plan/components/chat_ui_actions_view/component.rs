@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use dioxus::prelude::*;
-use planned_agent_core::types::{UIAction, UIActionType};
+use planned_agent::chat::{UIAction, UIActionType};
 
 use crate::components::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::input::Input;
@@ -44,10 +44,13 @@ pub fn ChatUIActionsView(
         .collect();
     let has_multi_select = !multi_select_actions.is_empty();
     let mut checkbox_state = use_signal(HashMap::<String, bool>::new);
-    // 初始化默认勾选（仅首次）
+    // option id → value 映射（用于构造 "id=value" 格式 choice）
+    let mut option_value_map = use_signal(HashMap::<String, Option<String>>::new);
+    // 初始化默认勾选 + value 映射（仅首次）
     for ms in &multi_select_actions {
         for opt in &ms.options {
             checkbox_state.write().entry(opt.id.clone()).or_insert(opt.default);
+            option_value_map.write().entry(opt.id.clone()).or_insert(opt.value.clone());
         }
     }
 
@@ -157,8 +160,9 @@ pub fn ChatUIActionsView(
                                     let label = action.label.clone();
                                     let display_label = label.clone();
                                     let desc = action.description.clone().unwrap_or_default();
-                                    // 若伴随 MultiSelect，choice 取复选框勾选 ID 集合
+                                    // 若伴随 MultiSelect，choice 取复选框勾选 ID 集合（含 value）
                                     let checkbox_state = checkbox_state.clone();
+                                    let option_value_map = option_value_map.clone();
                                     rsx! {
                                         Button {
                                             variant: ButtonVariant::Secondary,
@@ -167,9 +171,15 @@ pub fn ChatUIActionsView(
                                             onclick: move |_| {
                                                 let choice = if has_multi_select {
                                                     let state = checkbox_state.read();
+                                                    let values = option_value_map.read();
                                                     let ids: Vec<String> = state.iter()
                                                         .filter(|(_, &v)| v)
-                                                        .map(|(k, _)| k.clone())
+                                                        .filter_map(|(k, _)| {
+                                                            values.get(k).and_then(|v| v.as_ref())
+                                                                // 有 value → id=value；无 value → 仅回传 id（schema 允许 value 缺省，不丢弃勾选项）
+                                                                .map(|val| format!("{}={}", k, val))
+                                                                .or_else(|| Some(k.clone()))
+                                                        })
                                                         .collect();
                                                     if ids.is_empty() { "none".to_string() } else { ids.join(",") }
                                                 } else {

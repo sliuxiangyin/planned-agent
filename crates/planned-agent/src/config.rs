@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use planned_agent_core::types::{AiProviderConfig, McpServerConfig};
+use planned_agent_core::ai::config::AiProviderConfig;
+use planned_agent_core::mcp::types::McpServerConfig;
 use planned_agent_prompt_manager::PromptManagerConfig;
 use anyhow::Result;
 use config::Config;

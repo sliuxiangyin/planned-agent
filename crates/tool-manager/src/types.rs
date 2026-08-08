@@ -7,7 +7,7 @@ pub use planned_agent_core::tool_registry::{
 };
 
 use serde::{Deserialize, Serialize};
-use planned_agent_core::types::ToolResult;
+use planned_agent_core::mcp::types::ToolResult;
 
 /// 工具调用结果（带分类）。
 ///

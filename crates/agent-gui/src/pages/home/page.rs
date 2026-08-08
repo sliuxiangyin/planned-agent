@@ -26,6 +26,8 @@ pub enum PageRoute {
     Home,
     Plan(Option<String>), // None = 新建, Some(id) = 编辑已有
     Settings,
+    /// Chat 测试页（临时：调试 request_user_action 交互）
+    Chat,
 }
 
 #[component]
@@ -176,6 +178,12 @@ pub fn HomePage(on_navigate: EventHandler<PageRoute>) -> Element {
                     div {
                         class: format!("cc-module-dot {}", if prompt_ready { "ready" } else { "init" }),
                         title: if prompt_ready { "Prompt 已加载" } else { "Prompt 加载中" },
+                    }
+                    button {
+                        class: "cc-settings-btn",
+                        title: "Chat 测试（request_user_action 调试）",
+                        onclick: move |_| on_navigate.call(PageRoute::Chat),
+                        "⚡"
                     }
                     button {
                         class: "cc-settings-btn",

@@ -26,9 +26,10 @@ use super::left_panel::PlanLeftPanel;
 use super::flexible::workflow::FlexibleWorkflow;
 use super::message::MessageListView;
 use super::shared::load_plan_data::load_plan_data as load_plan_data_shared;
+use super::states::{ChatState, PlanState, WorkflowState};
 use super::types::{
-    ChatState, ParamDef, PendingUIState, PlanGeneratedEvent, PlanInfo, PlanState,
-    PlanFlexibleSnapshot, WorkflowPhase, WorkflowState,
+    ParamDef, PendingUIState, PlanGeneratedEvent, PlanInfo, PlanFlexibleSnapshot,
+    WorkflowPhase,
 };
 
 /// 本页面专属样式（按需加载）。
@@ -132,9 +133,9 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
             .read()
             .as_ref()
             .map(|mode| match mode.as_str() {
-                "flexible" => "chat/flexible_system".to_string(),
-                "thorough" => "chat/thorough_system".to_string(),
-                _ => "chat/thorough_system".to_string(),
+                "flexible" => "flexible/flexible_system".to_string(),
+                "thorough" => "thorough/thorough_system".to_string(),
+                _ => "thorough/thorough_system".to_string(),
             })
     });
 

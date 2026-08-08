@@ -28,10 +28,8 @@ use futures::StreamExt;
 use planned_agent_ai_manager::AiManager;
 use planned_agent_core::ai::AiClient;
 use planned_agent_core::prompt::{PromptContext, PromptManager};
-use planned_agent_core::types::{
-    ChatCompletionRequest, FinishReason, FunctionCall, Message, MessageContent, MessageRole,
-    ToolCall, ToolDefinition, ToolType, UIAction,
-};
+use crate::chat::UIAction;
+use planned_agent_core::ai::types::{ChatCompletionRequest, FinishReason, FunctionCall, Message, MessageContent, MessageRole, ToolCall, ToolDefinition, ToolType};
 use planned_agent_tool_manager::ToolRegistry;
 use serde_json::Value;
 use tracing::{info, warn};
@@ -437,14 +435,14 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
                 let actions = vec![
                     UIAction {
                         id: "continue".to_string(),
-                        action_type: planned_agent_core::types::UIActionType::Confirm,
+                        action_type: crate::chat::UIActionType::Confirm,
                         label: "继续执行".to_string(),
                         description: None,
                         options: vec![],
                     },
                     UIAction {
                         id: "stop".to_string(),
-                        action_type: planned_agent_core::types::UIActionType::Confirm,
+                        action_type: crate::chat::UIActionType::Confirm,
                         label: "结束".to_string(),
                         description: None,
                         options: vec![],
@@ -510,14 +508,45 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
             // 🆕 处理 UI 工具：不执行后端逻辑，发出 UIActionRequest 事件 +
             // 推送占位 tool result（保持 assistant→tool 消息顺序，前端后续替换）
             for call in &ui_calls {
-                let args: Value = serde_json::from_str(&call.function.arguments)
-                    .unwrap_or_default();
+                let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or_else(
+                    |e| {
+                        warn!(
+                            "request_user_action: tool arguments 不是合法 JSON（{}），按空参数处理",
+                            e
+                        );
+                        Value::Null
+                    },
+                );
 
                 let message = args["message"].as_str().unwrap_or("").to_string();
-                let actions: Vec<UIAction> = serde_json::from_value(
-                    args.get("actions").cloned().unwrap_or(Value::Array(vec![])),
-                )
-                .unwrap_or_default();
+
+                // 逐条解析 actions：跳过非法条目（未知 type / 缺字段 / 字段拼写错误），
+                // 避免单条错误导致整个卡片为空、交互卡死
+                let raw_actions = args.get("actions").cloned().unwrap_or(Value::Array(vec![]));
+                let mut actions: Vec<UIAction> = Vec::new();
+                match raw_actions {
+                    Value::Array(items) => {
+                        for item in items {
+                            match serde_json::from_value::<UIAction>(item.clone()) {
+                                Ok(a) => actions.push(a),
+                                Err(e) => warn!(
+                                    "request_user_action: 跳过非法 action 条目（{}）：{}",
+                                    e, item
+                                ),
+                            }
+                        }
+                    }
+                    other => warn!(
+                        "request_user_action: actions 不是数组（{:?}），忽略",
+                        other
+                    ),
+                }
+                if actions.is_empty() {
+                    warn!("request_user_action: 解析后 actions 为空，卡片将无可操作按钮");
+                }
+                if message.is_empty() {
+                    warn!("request_user_action: message 为空，卡片缺少引导文本");
+                }
 
                 on_event(ChatEvent::UIActionRequest {
                     message: message.clone(),
@@ -588,7 +617,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
     ///
     /// 渲染路径与 [`crate::planner::coarse::LlmCoarsePlanner::generate_coarse_plan_stream`]
     /// 完全一致：`pm.render(template, &ctx)`（参见 llm_planner.rs:154-156）。
-    /// 当前 `PromptContext` 为空 —— `chat/thorough_system.toml` 的 `context` 变量定义为
+    /// 当前 `PromptContext` 为空 —— `thorough/thorough_system.toml` 的 `context` 变量定义为
     /// `required = false`，可正常渲染；将来若需要给 system 注入动态上下文，
     /// 由 caller 在 `ChatConfig` 之外另行拼装 `PromptContext` 并扩展本函数签名。
     ///
@@ -650,7 +679,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
             .into_iter()
             .map(|t| ToolDefinition {
                 r#type: ToolType::Function,
-                function: planned_agent_core::types::FunctionDefinition {
+                function: planned_agent_core::ai::types::FunctionDefinition {
                     name: t.name,
                     description: Some(t.description),
                     parameters: Some(t.input_schema),
@@ -663,23 +692,29 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
     /// 从执行轨迹总结生成粗粒度计划（灵活模式）。
     ///
     /// 内部构造 `LlmCoarsePlanner` 并调用 `generate_from_trace`，
-    /// 返回 `(todos_json, output_schema)`。output_schema 现由
-    /// `CoarseGrainedPlan::output_schema` 承载，首次执行时可能为 `None`。
+    /// 返回 `(todos_json, output_schema, input_schema)`。output_schema 现由
+    /// `CoarseGrainedPlan::output_schema` 承载，input_schema 由
+    /// `CoarseGrainedPlan::input_schema` 承载（JSON 序列化），首次执行时可能为空串。
     ///
     /// 调用方无需直接依赖 `planned_agent_core::planner::coarse` 类型。
     pub async fn generate_coarse_plan_from_trace(
         &self,
         trace_summary: &str,
-    ) -> Result<(String, String)> {
+    ) -> Result<(String, String, String)> {
         use crate::planner::coarse::LlmCoarsePlanner;
 
         let ai_client = self.resolve_ai_client()?;
         let planner = LlmCoarsePlanner::new(ai_client, self.prompt_manager.clone());
         let plan = planner.generate_from_trace(trace_summary).await?;
         let output_schema = plan.output_schema.clone().unwrap_or_default();
+        let input_schema = plan
+            .input_schema
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default())
+            .unwrap_or_default();
         let json = serde_json::to_string(&plan)
             .map_err(|e| anyhow!("序列化 CoarseGrainedPlan 失败: {}", e))?;
-        Ok((json, output_schema))
+        Ok((json, output_schema, input_schema))
     }
 }
 

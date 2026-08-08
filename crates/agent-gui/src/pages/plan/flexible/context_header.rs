@@ -21,6 +21,7 @@ enum ContextTab {
     Summary,
     Params,
     OutputSchema,
+    InputSchema,
 }
 
 impl ContextTab {
@@ -30,6 +31,7 @@ impl ContextTab {
             ContextTab::Summary => "执行轨迹",
             ContextTab::Params => "参数定义",
             ContextTab::OutputSchema => "输出格式",
+            ContextTab::InputSchema => "输入参数",
         }
     }
 }
@@ -87,6 +89,18 @@ fn render_tab_content(snapshot: &PlanFlexibleSnapshot, tab: ContextTab) -> Eleme
                 }
             }
         }
+        ContextTab::InputSchema => {
+            let text = if snapshot.input_schema.is_empty() {
+                "（未记录）".to_string()
+            } else {
+                snapshot.input_schema.clone()
+            };
+            rsx! {
+                div { class: "context-header__tab-content",
+                    pre { class: "context-header__text", "{text}" }
+                }
+            }
+        }
     }
 }
 
@@ -122,7 +136,7 @@ pub fn ContextHeader(props: ContextHeaderProps) -> Element {
             // 展开内容：tab 行 + 内容
             if expanded() {
                 div { class: "context-header__tabs",
-                    for tab in &[ContextTab::Todos, ContextTab::Summary, ContextTab::Params, ContextTab::OutputSchema] {
+                    for tab in &[ContextTab::Todos, ContextTab::Summary, ContextTab::Params, ContextTab::OutputSchema, ContextTab::InputSchema] {
                         {
                             let t = *tab;
                             let is_active = active_tab() == t;

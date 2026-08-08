@@ -17,10 +17,8 @@ use planned_agent_core::ai::AiClient;
 use planned_agent_core::planner::coarse::CoarseGrainedStep;
 use planned_agent_core::planner::react::Observation;
 use planned_agent_core::tool_registry::ToolCategory;
-use planned_agent_core::types::{
-    ChatCompletionRequest, FunctionDefinition, Message, MessageContent, MessageRole, Tool,
-    ToolDefinition, ToolType,
-};
+use planned_agent_core::ai::types::{ChatCompletionRequest, FunctionDefinition, Message, MessageContent, MessageRole, ToolDefinition, ToolType};
+use planned_agent_core::mcp::types::Tool;
 use planned_agent_tool_manager::ToolRegistry;
 
 use super::agent_context::AgentContext;

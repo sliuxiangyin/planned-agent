@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use anyhow::Result;
 use super::coarse_types::{CoarseGrainedPlan, CoarsePlanValidationResult};
-use crate::types::PlanContext;
+use crate::planner::types::PlanContext;
 
 /// 粗粒度计划生成器 trait
 ///

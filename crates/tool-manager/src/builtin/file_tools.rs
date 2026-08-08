@@ -2,7 +2,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use anyhow::Result;
 use serde_json::{json, Value};
-use planned_agent_core::types::{Tool, ToolResult};
+use planned_agent_core::mcp::types::{Tool, ToolResult};
 use planned_agent_core::tool_registry::{ToolExecutor, ToolCategory, BuiltinToolProvider};
 
 /// 内置文件工具提供者

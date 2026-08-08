@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use planned_agent_core::types::Tool;
+use planned_agent_core::mcp::types::Tool;
 use tracing::info;
 
 use crate::config::{McpConfigFile, McpServerEntry, ToolEntry};

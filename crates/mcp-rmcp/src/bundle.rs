@@ -27,11 +27,11 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use planned_agent_core::types::ConnectionError;
+use planned_agent_core::mcp::types::ConnectionError;
 
 use crate::config::{McpConfigFile, McpConfigManager, McpRefreshError, McpServerEntry};
 use crate::storage::{McpStatusStorage, ServerStatus};
-use planned_agent_core::types::Tool;
+use planned_agent_core::mcp::types::Tool;
 
 // ═══════════════════════════════════════════════════════════════════════
 // 统一视图类型

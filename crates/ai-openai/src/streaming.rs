@@ -1,5 +1,5 @@
 use futures::StreamExt;
-use planned_agent_core::types::ChatCompletionChunk;
+use planned_agent_core::ai::types::ChatCompletionChunk;
 use anyhow::Result;
 
 /// 流式响应处理器

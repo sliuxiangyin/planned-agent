@@ -1,6 +1,6 @@
 use anyhow::Result;
 use config::Config;
-use planned_agent_core::types::ThinkingConfig;
+use planned_agent_core::ai::config::ThinkingConfig;
 use planned_agent_prompt_manager::PromptManagerConfig;
 use serde::{Deserialize, Serialize};
 

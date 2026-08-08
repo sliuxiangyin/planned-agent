@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use anyhow::Result;
 use serde_json::Value;
 use std::sync::Arc;
-use planned_agent_core::types::{Tool, ToolResult};
+use planned_agent_core::mcp::types::{Tool, ToolResult};
 // McpManagerTrait 已下沉到 core（依赖反转）。
 // 这里只重新导出，保持现有 `use planned_agent_tool_manager::McpManagerTrait` 的调用方式可用。
 pub use planned_agent_core::tool_registry::traits::McpManagerTrait;

@@ -9,7 +9,7 @@ pub struct ChatConfig {
     /// 指定 AI provider 名;`None` 时使用 `AiManager` 注册的默认 provider。
     pub provider: Option<String>,
     /// system prompt **模板路径**，对应 `prompts/` 下某个 toml：
-    /// - 写法：相对目录、不含 `.toml` 后缀（例如 `"chat/thorough_system"` → `prompts/chat/thorough_system.toml`）
+    /// - 写法：相对目录、不含 `.toml` 后缀（例如 `"thorough/thorough_system"` → `prompts/thorough/thorough_system.toml`）
     /// - 解析：`ChatService` 通过注入的 `PromptManager::render(path, ctx)`
     ///   渲染模板（与 `LlmCoarsePlanner` 走相同路径，支持变量替换）
     /// - `None` 时不主动注入 system message；调用方需自行保证历史首条不是 `System`
@@ -46,7 +46,7 @@ impl Default for ChatConfig {
     fn default() -> Self {
         Self {
             provider: None,
-            system_prompt_template: Some("chat/thorough_system".to_string()),
+            system_prompt_template: Some("thorough/thorough_system".to_string()),
             temperature: None,
             max_tokens: None,
             max_tool_rounds: 10,

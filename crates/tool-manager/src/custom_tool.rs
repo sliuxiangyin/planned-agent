@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use anyhow::Result;
 use serde_json::Value;
-use planned_agent_core::types::ToolResult;
+use planned_agent_core::mcp::types::ToolResult;
 use planned_agent_core::tool_registry::{ToolExecutor, ToolCategory};
 
 /// 自定义工具执行器

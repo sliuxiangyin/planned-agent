@@ -3,7 +3,7 @@
 //! 从 `page` 中解耦，所有项以 `pub(super)` 对同级 `page` 暴露。
 
 use dioxus::prelude::*;
-use planned_agent_core::types::Message;
+use planned_agent_core::ai::types::Message;
 
 use crate::components::markdown::Markdown;
 use crate::components::scroll_area::ScrollArea;

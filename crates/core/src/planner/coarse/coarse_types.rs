@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 use crate::tool_registry::types::ToolCategory;
 
 /// 计划复杂度
@@ -77,6 +78,13 @@ pub struct CoarseGrainedPlan {
     /// 输出格式描述（从 AI 响应中提取，执行完毕后按此 schema 产出最终结果）
     #[serde(default)]
     pub output_schema: Option<String>,
+    /// 输入参数定义（JSON 承载）。
+    ///
+    /// 计划执行所需的输入参数以 JSON 对象描述（如 `{"keyword": {"type": "string",
+    /// "description": "搜索关键词", "example": "安仁乡"}}`）。计划保存后可供
+    /// 下次执行时动态替换参数、以及多计划工作流的输入对接。
+    #[serde(default)]
+    pub input_schema: Option<Value>,
 }
 
 /// 计划验证结果
@@ -109,6 +117,7 @@ impl CoarseGrainedPlan {
             complexity,
             risk_level,
             output_schema: None,
+            input_schema: None,
         }
     }
 

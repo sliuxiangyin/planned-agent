@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use planned_agent_ai_manager::AiManager;
-use planned_agent_core::types::AiProviderConfig;
+use planned_agent_core::ai::config::AiProviderConfig;
 
 use crate::config::AiProviderConfig as GuiAiProviderConfig;
 

@@ -19,7 +19,8 @@ use planned_agent_core::planner::coarse::CoarseGrainedStep;
 use planned_agent_core::planner::react::*;
 use planned_agent_core::prompt::{PromptContext, PromptManager};
 use planned_agent_core::tool_registry::ToolCategory;
-use planned_agent_core::types::{Message, MessageContent, PlanContext};
+use planned_agent_core::ai::types::{Message, MessageContent};
+use planned_agent_core::planner::types::PlanContext;
 use planned_agent_tool_manager::ToolRegistry;
 
 use super::agent_context::AgentContext;
@@ -299,7 +300,7 @@ impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
                 .content
                 .as_ref()
                 .and_then(|c| match c {
-                    planned_agent_core::types::MessageContent::Text { text } => {
+                    planned_agent_core::ai::types::MessageContent::Text { text } => {
                         Some(text.as_str())
                     }
                     _ => None,
@@ -336,7 +337,7 @@ impl<PM: PromptManager + 'static> DefaultReActAgent<PM> {
                         .content
                         .as_ref()
                         .and_then(|c| match c {
-                            planned_agent_core::types::MessageContent::Text { text } => {
+                            planned_agent_core::ai::types::MessageContent::Text { text } => {
                                 Some(text.chars().take(200).collect::<String>())
                             }
                             _ => None,
@@ -693,8 +694,8 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
         // observe 结论回流到 messages（下轮 think+act 可见上下文）
         self.ctx.push_user_message(prompt);
         self.ctx.push_assistant_message_raw(Message {
-            role: planned_agent_core::types::MessageRole::Assistant,
-            content: Some(planned_agent_core::types::MessageContent::Text {
+            role: planned_agent_core::ai::types::MessageRole::Assistant,
+            content: Some(planned_agent_core::ai::types::MessageContent::Text {
                 text: response,
             }),
             tool_calls: None,

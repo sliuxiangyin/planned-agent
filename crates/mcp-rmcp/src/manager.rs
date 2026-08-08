@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use anyhow::Result;
 use planned_agent_core::mcp::McpClient;
-use planned_agent_core::types::{Tool, ToolResult, McpServerConfig};
+use planned_agent_core::mcp::types::{Tool, ToolResult, McpServerConfig};
 use serde_json::Value;
 use tracing::{info, error};
 use async_trait::async_trait;

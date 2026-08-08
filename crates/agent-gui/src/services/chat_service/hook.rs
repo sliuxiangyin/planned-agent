@@ -18,7 +18,7 @@ use super::types::ChatServiceSignal;
 ///
 /// `system_prompt_template` 为响应式信号：调用方通过 `use_memo` 将 UI 状态
 /// （如 `plan_mode`）映射为模板路径（相对 `prompts/` 目录、不含 `.toml` 后缀，
-/// 例如 `"chat/thorough_system"`）。信号变化时 effect 自动重建 `ChatService`，
+/// 例如 `"thorough/thorough_system"`）。信号变化时 effect 自动重建 `ChatService`，
 /// 实现运行时热切换 system prompt 模板。
 ///
 /// 其余配置（`temperature`、`max_tokens`、`max_tool_rounds`、`enable_thinking`
@@ -47,10 +47,17 @@ pub(crate) fn use_chat_service(
                     // ChatService<PM> 这里固定实参化为 FilePromptManager
                     // （与 planned-agent 同款风格的 prompt_manager: Arc<PM>）
                     let pm: Arc<FilePromptManager> = p.manager.clone();
-                    // 周密模式（chat/thorough_system）仅暴露 UI 交互工具，禁止直接执行
+                    // 周密模式（thorough/thorough_system）仅暴露 UI 交互工具，禁止直接执行
+                    // Chat 测试页模板（chat/ 前缀）：仅暴露交互工具，便于调试 request_user_action
                     let allowed_tools = match template.as_deref() {
-                        Some("chat/thorough_system") => {
+                        Some("thorough/thorough_system") => {
                             Some(vec!["request_user_action".to_string()])
+                        }
+                        Some(t) if t.starts_with("chat/") => {
+                            Some(vec![
+                                "request_user_action".to_string(),
+                                "builtin_read_documentation".to_string(),
+                            ])
                         }
                         _ => None, // 灵活模式或其他：全部工具可用
                     };

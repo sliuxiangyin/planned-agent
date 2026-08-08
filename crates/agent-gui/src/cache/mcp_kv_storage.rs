@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use planned_agent_core::types::Tool;
+use planned_agent_core::mcp::types::Tool;
 use planned_agent_mcp_rmcp::config::{McpConfigFile, McpServerEntry, ToolEntry};
 use planned_agent_mcp_rmcp::storage::McpConfigStorage;
 

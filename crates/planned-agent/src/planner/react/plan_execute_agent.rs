@@ -24,7 +24,7 @@ use planned_agent_core::ai::AiClient;
 use planned_agent_core::planner::coarse::{CoarseGrainedPlan, CoarsePlanner};
 use planned_agent_core::planner::react::{ReActAgent, ReActAgentConfig, ReActStep};
 use planned_agent_core::prompt::PromptManager;
-use planned_agent_core::types::PlanContext;
+use planned_agent_core::planner::types::PlanContext;
 use planned_agent_tool_manager::ToolRegistry;
 
 use super::default_react_agent::DefaultReActAgent;

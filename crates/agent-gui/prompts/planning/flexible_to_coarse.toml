@@ -31,6 +31,12 @@ text = """
 - 如果步骤描述中包含"提取...并排序"、"解析...并处理"等，说明包含多个操作，必须拆分
 - 如果步骤可以用一个工具完成，就是原子动作
 - 如果步骤需要先用一个工具获取数据，再用另一个工具处理，就不是原子动作
+
+输入参数（input_schema）约束：
+- 如果本计划执行时需要外部输入参数（用户提供的动态值，如搜索关键词、文件路径、数值参数等），
+  必须在 JSON 顶层输出 `input_schema` 字段：一个 JSON 对象，键为参数名（snake_case），
+  值为参数定义对象 {"type": "string|integer|number|boolean|array|object", "description": "参数说明", "example": "示例值"}。
+- 无外部输入参数的计划可省略该字段；input_schema 描述"计划需要什么参数"，不是步骤结果。
 """
 
 [variables]
@@ -128,6 +134,10 @@ type = "string"
 enum = ["low", "medium", "high", "critical"]
 description = "风险等级"
 
+[output_schema.json_schema.properties.input_schema]
+type = "object"
+description = "输入参数定义（可选）：键为参数名（snake_case），值为 {type, description, example} 参数定义对象"
+
 [output_schema.example]
 text = """
 {
@@ -171,7 +181,19 @@ text = """
     }
   ],
   "complexity": "medium",
-  "risk_level": "low"
+  "risk_level": "low",
+  "input_schema": {
+    "keyword": {
+      "type": "string",
+      "description": "搜索关键词",
+      "example": "安仁乡"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "返回结果条数",
+      "example": 3
+    }
+  }
 }"""
 
 [output_schema.constraints]

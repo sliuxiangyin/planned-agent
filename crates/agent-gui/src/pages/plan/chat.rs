@@ -7,13 +7,14 @@ use dioxus::prelude::*;
 use crate::services::chat_service::ChatServiceSignal;
 use crate::storage::repository::MessageRepo;
 use planned_agent::{ChatEvent, ChatService};
-use planned_agent_core::types::{Message, MessageContent, MessageRole, UIAction, UIActionType};
+use planned_agent::chat::{MultiSelectOption, UIAction, UIActionType};
+use planned_agent_core::ai::types::{Message, MessageContent, MessageRole};
 use planned_agent_prompt_manager::FilePromptManager;
 use std::sync::Arc;
 
+use super::states::{ChatState, PlanState};
 use super::types::{
-    display_text, ChatState, ParamDef, PendingUIState, PlanSource, PlanState,
-    WorkflowPhase,
+    display_text, ParamDef, PendingUIState, PlanSource, WorkflowPhase,
 };
 
 /// 持久化一条消息到 DB（fire-and-forget）
@@ -194,10 +195,13 @@ async fn run_flexible_chat_stream(
         auto_requirement
     );
 
-    // ── Phase 1：清晰度检查（独立 clarity prompt + 仅 request_user_action 工具） ──
+    // ── Phase 1：清晰度检查（独立 clarity prompt + 仅 request_user_action/builtin_read_documentation 工具） ──
     let clarity_svc = chat_svc
-        .with_allowed_tools(Some(vec!["request_user_action".to_string()]))
-        .with_system_prompt_template(Some("chat/flexible_clarity".to_string()));
+        .with_allowed_tools(Some(vec![
+            "request_user_action".to_string(),
+            "builtin_read_documentation".to_string(),
+        ]))
+        .with_system_prompt_template(Some("flexible/flexible_clarity_check".to_string()));
 
     // 自动模式：注入指令引导 AI 自行推断，避免追问
     if auto_requirement {
@@ -445,30 +449,42 @@ pub(super) fn handle_user_action(
 
 /// 从 MultiSelect 类型动作中解析用户勾选项为固化参数定义。
 ///
-/// 伴随 MultiSelect 时 `choice` 为勾选选项 ID 的逗号拼接（见 ChatUIActionsView），
-/// 选项 label 形如 "搜索关键词 = 安仁乡"："=" 左侧为描述，右侧为示例值；
-/// 无 "=" 时整段 label 作为描述、示例值留空。
+/// choice 为 `id=value,id=value` 格式（见 ChatUIActionsView），
+/// value 来自 option.value 字段。
 /// 无 MultiSelect 动作、choice 为 "none" 或无匹配选项时返回空 Vec。
 fn parse_selected_params(actions: &[UIAction], choice: &str) -> Vec<ParamDef> {
     if choice == "none" || choice.trim().is_empty() {
         return vec![];
     }
-    let selected: Vec<&str> = choice.split(',').map(str::trim).collect();
-    actions
+
+    // "param_city=北京,param_version=v2.1.0" → [("param_city", "北京"), ...]
+    let selected_pairs: Vec<(&str, &str)> = choice
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| {
+            s.split_once('=').map(|(id, val)| (id.trim(), val.trim()))
+        })
+        .collect();
+
+    // option id → label 查找表
+    let option_map: std::collections::HashMap<&str, &MultiSelectOption> = actions
         .iter()
         .filter(|a| matches!(a.action_type, UIActionType::MultiSelect))
         .flat_map(|a| a.options.iter())
-        .filter(|opt| selected.contains(&opt.id.as_str()))
-        .map(|opt| {
-            let (description, example) = match opt.label.split_once(['=', '＝']) {
-                Some((left, right)) => (left.trim().to_string(), right.trim().to_string()),
-                None => (opt.label.trim().to_string(), String::new()),
-            };
-            ParamDef {
-                name: opt.id.clone(),
-                description,
-                example,
-            }
+        .map(|opt| (opt.id.as_str(), opt))
+        .collect();
+
+    selected_pairs
+        .iter()
+        .filter_map(|(id, value_from_choice)| {
+            option_map.get(id).map(|opt| {
+                ParamDef {
+                    name: opt.id.clone(),
+                    description: opt.label.trim().to_string(),
+                    example: value_from_choice.to_string(),
+                }
+            })
         })
         .collect()
 }

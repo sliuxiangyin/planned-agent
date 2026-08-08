@@ -11,7 +11,7 @@ use planned_agent::planner::{
     trace::{recorder::TraceRecorderConfig, TraceRecorder},
 };
 use planned_agent_core::prompt::{PromptContext, PromptManager};
-use planned_agent_core::types::PlanContext;
+use planned_agent_core::planner::types::PlanContext;
 use planned_agent_core::planner::coarse::CoarsePlanner;
 use serde::{Deserialize, Serialize};
 use serde_json::json;

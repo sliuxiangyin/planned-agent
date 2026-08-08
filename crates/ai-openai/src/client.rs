@@ -2,12 +2,15 @@ use async_trait::async_trait;
 use anyhow::Result;
 use async_openai::{Client, config::OpenAIConfig};
 use planned_agent_core::{
-    ai::{AiClient, ChatCompletionStream},
-    types::{
-        ChatCompletionRequest, ChatCompletionResponse, ChatCompletionChunk,
-        Message, MessageRole, MessageContent, ToolCall, ToolType, FunctionCall,
-        Choice, FinishReason, Usage, ChunkChoice, DeltaMessage, DeltaToolCall, DeltaFunctionCall,
-        ToolDefinition, Conversation, ThinkingConfig,
+    ai::{
+        AiClient, ChatCompletionStream,
+        config::ThinkingConfig,
+        types::{
+            ChatCompletionRequest, ChatCompletionResponse, ChatCompletionChunk,
+            Message, MessageRole, MessageContent, ToolCall, ToolType, FunctionCall,
+            Choice, FinishReason, Usage, ChunkChoice, DeltaMessage, DeltaToolCall, DeltaFunctionCall,
+            ToolDefinition, Conversation,
+        },
     },
 };
 use futures::StreamExt;

@@ -1,8 +1,7 @@
 use std::sync::Arc;
 use serde_json::Value;
 use anyhow::Result;
-use crate::types::Tool;
-use crate::types::ToolResult;
+use crate::mcp::types::{Tool, ToolResult};
 use super::types::ToolCategory;
 
 /// 工具执行器 trait（抽象层）

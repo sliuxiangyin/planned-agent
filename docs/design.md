@@ -97,10 +97,14 @@ planned-agent/
 │               ├── coarse/    # LlmCoarsePlanner
 │               └── react/     # DefaultReActAgent
 ├── prompts/                   # 提示模板目录
-│   ├── chat/                  # 对话提示
-│   │   ├── flexible_system.toml  # 系统角色提示（灵活模式：执行轨迹总结）
-│   │   ├── thorough_system.toml  # 系统角色提示（周密模式：需求确认后生成）
-│   │   └── user.txt              # 用户消息模板
+│   ├── flexible/              # 灵活模式对话提示
+│   │   ├── flexible_system.toml          # 系统角色提示（灵活模式：执行轨迹总结）
+│   │   ├── flexible_clarity_check.toml   # 清晰度判断 message
+│   │   ├── flexible_param_identify.toml  # 参数识别 message
+│   │   ├── flexible_output_suggest.toml  # 输出建议 message
+│   │   └── flexible_trace_extract.toml   # 轨迹提取 message
+│   ├── thorough/              # 周密模式对话提示
+│   │   └── thorough_system.toml          # 系统角色提示（周密模式：需求确认后生成）
 │   ├── analysis/              # 分析提示
 │   │   └── extract_info.toml  # 信息提取提示
 │   └── planning/              # 计划提示

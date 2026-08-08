@@ -3,7 +3,7 @@ use anyhow::Result;
 
 use super::react_types::*;
 use crate::planner::coarse::CoarseGrainedStep;
-use crate::types::PlanContext;
+use crate::planner::types::PlanContext;
 
 /// ReAct Agent trait
 /// 通过行动-观察循环，智能执行任务。

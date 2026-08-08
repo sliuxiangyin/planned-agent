@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use planned_agent_core::ai::AiClient;
-use planned_agent_core::types::AiProviderConfig;
+use planned_agent_core::ai::config::AiProviderConfig;
 use planned_agent_ai_openai::{OpenAiClient, OpenAiClientConfig};
 
 /// AI客户端管理器

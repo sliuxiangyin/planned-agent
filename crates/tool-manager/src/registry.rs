@@ -4,7 +4,7 @@ use anyhow::Result;
 use serde_json::Value;
 use tracing::info;
 
-use planned_agent_core::types::Tool;
+use planned_agent_core::mcp::types::Tool;
 use planned_agent_core::tool_registry::{ToolSource, ToolCategory, ToolExecutor};
 use crate::types::{ToolMetadata, ToolRegistryStats, ToolOutcome};
 use crate::validator::ToolValidator;

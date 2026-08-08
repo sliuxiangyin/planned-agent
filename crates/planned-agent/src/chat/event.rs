@@ -4,7 +4,8 @@
 //! 用于将多轮 assistant 响应、tool 调用过程以增量的方式
 //! 实时下发给上层消费者。
 
-use planned_agent_core::types::{Message, UIAction};
+use crate::chat::UIAction;
+use planned_agent_core::ai::types::Message;
 use serde_json::Value;
 
 /// 流式聊天事件。

@@ -12,6 +12,7 @@ use context::{
     StorageContext, ToolsContext,
 };
 use dioxus::{desktop::Config, prelude::*};
+use pages::chat::ChatPage;
 use pages::home::{HomePage, PageRoute};
 use pages::plan::PlanPage;
 use pages::settings::SettingsPage;
@@ -55,7 +56,7 @@ fn init_logging() {
 
     // 默认 info 级别；强制屏蔽 scraper / html5ever 等 DEBUG 刷屏
     let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"))
+        .unwrap_or_else(|_| EnvFilter::new("debug"))
         .add_directive("html5ever=warn".parse().expect("valid directive"))
         .add_directive("markup5ever=warn".parse().expect("valid directive"))
         .add_directive("scraper=warn".parse().expect("valid directive"))
@@ -145,12 +146,15 @@ fn app() -> Element {
     use_context_provider(|| mcp);
 
     // 5. Tool Registry（同步 init：仅注册内置 provider；MCP 后续延后注入）
-    let tools: Resource<Option<Arc<ToolsContext>>> = use_resource(move || async move {
-        match ToolsContext::init() {
-            Ok(ctx) => Some(Arc::new(ctx)),
-            Err(e) => {
-                tracing::warn!("Tools 不可用: {}", e);
-                None
+    let tools: Resource<Option<Arc<ToolsContext>>> = use_resource(move || {
+        let docs_dir = config.read().prompt_manager.prompt_dir.join("docs");
+        async move {
+            match ToolsContext::init(docs_dir) {
+                Ok(ctx) => Some(Arc::new(ctx)),
+                Err(e) => {
+                    tracing::warn!("Tools 不可用: {}", e);
+                    None
+                }
             }
         }
     });
@@ -255,6 +259,11 @@ fn AppRouter() -> Element {
             },
             PageRoute::Settings => rsx! {
                 SettingsPage {
+                    on_back: move |_| navigate(PageRoute::Home),
+                }
+            },
+            PageRoute::Chat => rsx! {
+                ChatPage {
                     on_back: move |_| navigate(PageRoute::Home),
                 }
             },

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use anyhow::Result;
-use crate::types::{ChatCompletionRequest, ChatCompletionResponse, ChatCompletionChunk};
+use crate::ai::types::{ChatCompletionRequest, ChatCompletionResponse, ChatCompletionChunk};
 
 /// AI 客户端 trait（符合业内规范）
 #[async_trait]

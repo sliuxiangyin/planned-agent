@@ -8,7 +8,8 @@ use dioxus::prelude::*;
 use crate::components::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::textarea::Textarea;
 
-use super::super::types::{PlanFlexibleSnapshot, WorkflowPhase, WorkflowState};
+use super::super::states::WorkflowState;
+use super::super::types::{PlanFlexibleSnapshot, WorkflowPhase};
 
 #[derive(Props, Clone, PartialEq)]
 pub struct RequirementInputProps {

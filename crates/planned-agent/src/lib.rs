@@ -26,7 +26,7 @@ pub use planned_agent_core::planner::react::{
 };
 
 // ─── 从 core 透传：共享上下文 ─────────────────────────────────
-pub use planned_agent_core::types::PlanContext;
+pub use planned_agent_core::planner::types::PlanContext;
 
 // ─── 本 crate：粗粒度实现 ────────────────────────────────────
 pub use crate::planner::coarse::LlmCoarsePlanner;

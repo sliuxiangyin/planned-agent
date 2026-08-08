@@ -11,7 +11,7 @@ use planned_agent_core::ai::AiClient;
 use planned_agent_core::planner::react::ReActStep;
 use planned_agent_core::planner::trace::{ExecutionTrace, GeneralizedAction};
 use planned_agent_core::prompt::{PromptContext, PromptManager};
-use planned_agent_core::types::{ChatCompletionRequest, Message, MessageContent, MessageRole};
+use planned_agent_core::ai::types::{ChatCompletionRequest, Message, MessageContent, MessageRole};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;

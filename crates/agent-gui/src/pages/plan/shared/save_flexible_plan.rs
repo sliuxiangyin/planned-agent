@@ -9,7 +9,8 @@ use planned_agent_prompt_manager::FilePromptManager;
 
 use crate::storage::repository::{MessageRepo, PlanFlexibleRepo, PlanRepo};
 
-use super::super::types::{ParamDef, PlanState, WorkflowState};
+use super::super::states::{PlanState, WorkflowState};
+use super::super::types::ParamDef;
 
 /// 灵活模式：从轨迹提炼粗粒度计划并保存到 `plans_flexible`。
 ///
@@ -27,10 +28,10 @@ pub async fn save_flexible_plan(
     mut plan: PlanState,
     mut workflow: WorkflowState,
 ) {
-    // 1. 提炼 CoarseGrainedPlan + output_schema
-    let (todos_json, output_schema) =
+    // 1. 提炼 CoarseGrainedPlan + output_schema + input_schema
+    let (todos_json, output_schema, input_schema) =
         match chat_svc.generate_coarse_plan_from_trace(&summary).await {
-            Ok((todos, schema)) => (todos, schema),
+            Ok(triple) => triple,
             Err(e) => {
                 tracing::error!("从轨迹提炼粗粒度计划失败: {}", e);
                 workflow.set_phase(super::super::types::WorkflowPhase::Idle);
@@ -60,6 +61,7 @@ pub async fn save_flexible_plan(
             &todos_json,
             &params_json,
             &output_schema,
+            &input_schema,
         )
         .await
     {
@@ -77,13 +79,18 @@ pub async fn save_flexible_plan(
     }
 
     tracing::info!(
-        "灵活计划 v{} 已保存: plan_id={}, output_schema={}",
+        "灵活计划 v{} 已保存: plan_id={}, output_schema={}, input_schema={}",
         version,
         pid,
         if output_schema.is_empty() {
             "(未推断)"
         } else {
             &output_schema[..output_schema.len().min(60)]
+        },
+        if input_schema.is_empty() {
+            "(无输入参数)"
+        } else {
+            &input_schema[..input_schema.len().min(60)]
         }
     );
 

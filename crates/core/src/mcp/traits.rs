@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use anyhow::Result;
 use serde_json::Value;
-use crate::types::{Tool, ToolResult, McpServerConfig, ConnectionStatus};
+use crate::mcp::types::{Tool, ToolResult, McpServerConfig, ConnectionStatus};
 
 /// MCP 客户端 trait
 #[async_trait]

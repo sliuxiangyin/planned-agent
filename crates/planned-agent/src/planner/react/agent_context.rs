@@ -9,7 +9,7 @@ use serde_json::Value;
 use planned_agent_core::planner::coarse::CoarseGrainedStep;
 use planned_agent_core::planner::react::Observation;
 use planned_agent_core::prompt::PromptContext;
-use planned_agent_core::types::{Message, MessageContent, MessageRole};
+use planned_agent_core::ai::types::{Message, MessageContent, MessageRole};
 
 use super::intent_handler::IntentHandler;
 use super::intent_router::IntentRouter;

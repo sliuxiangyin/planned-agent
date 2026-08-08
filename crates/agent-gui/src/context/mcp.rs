@@ -33,7 +33,7 @@ use planned_agent_mcp_rmcp::{
     McpBundle, McpManager, McpServerView, ServerStatus,
 };
 use planned_agent_core::tool_registry::ToolCategory;
-use planned_agent_core::types::{ConnectionError, Tool};
+use planned_agent_core::mcp::types::{ConnectionError, Tool};
 use planned_agent_mcp_rmcp::config::McpServerEntry;
 use planned_agent_tool_manager::ToolRegistry;
 

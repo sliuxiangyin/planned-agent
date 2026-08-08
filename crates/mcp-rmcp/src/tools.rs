@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use planned_agent_core::types::Tool;
+use planned_agent_core::mcp::types::Tool;
 use serde_json::Value;
 use anyhow::Result;
 

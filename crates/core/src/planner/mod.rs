@@ -1,10 +1,12 @@
 //! Planner 模块
 //!
-//! 包含 Coarse Planner、ReAct Agent、RePlanner 等规划器实现。
+//! 包含 Coarse Planner、ReAct Agent、RePlanner 等规划器实现，
+//! 以及 Plan 领域模型（见 [`types`]）。
 
 pub mod coarse;
 pub mod react;
 pub mod replanner;
+pub mod types;
 pub mod validation;
 pub mod trace;
 

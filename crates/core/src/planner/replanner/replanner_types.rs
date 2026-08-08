@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::planner::coarse::{CoarseGrainedPlan, CoarseGrainedStep};
-use crate::types::PlanStepResult;
+use crate::planner::types::PlanStepResult;
 
 /// 重规划动作
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

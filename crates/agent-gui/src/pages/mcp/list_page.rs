@@ -20,7 +20,7 @@ use dioxus_primitives::alert_dialog::{
     AlertDialogRoot, AlertDialogContent, AlertDialogTitle,
     AlertDialogDescription, AlertDialogActions, AlertDialogAction, AlertDialogCancel,
 };
-use planned_agent_core::types::ConnectionError;
+use planned_agent_core::mcp::types::ConnectionError;
 use planned_agent_mcp_rmcp::storage::{LastStatus, ServerStatus};
 
 use crate::context::{McpChangeNotifier, McpContext, ToolsContext};

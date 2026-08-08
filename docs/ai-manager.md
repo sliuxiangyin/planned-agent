@@ -105,7 +105,7 @@ pub struct AiManager {
 
 ```rust
 use planned_agent_ai_manager::AiManager;
-use planned_agent_core::types::AiProviderConfig;
+use planned_agent_core::ai::config::AiProviderConfig;
 
 // 从配置初始化
 let configs = vec![

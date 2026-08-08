@@ -251,7 +251,7 @@ let result = registry.call_tool("tool_name", arguments).await?;
 
 ```rust
 use planned_agent_tool_manager::{CustomTool, ToolCategory, ToolExecutor};
-use planned_agent_core::types::{Tool, ToolResult};
+use planned_agent_core::mcp::types::{Tool, ToolResult};
 
 struct MyCustomTool;
 

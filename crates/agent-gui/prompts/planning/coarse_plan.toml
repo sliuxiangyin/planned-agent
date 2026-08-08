@@ -180,6 +180,13 @@ text = """
 复杂度和风险等级约束：
 - complexity 只能是：simple（简单）、medium（中等）、complex（复杂）
 - risk_level 只能是：low（低）、medium（中）、high（高）、critical（紧急）
+
+输入参数（input_schema）约束：
+- 如果本计划执行时需要外部输入参数（用户提供的动态值，如搜索关键词、文件路径、数值参数等），
+  必须在 JSON 顶层输出 `input_schema` 字段：一个 JSON 对象，键为参数名，值为参数定义对象。
+- 参数定义对象格式：{"type": "string|integer|number|boolean|array|object", "description": "参数说明", "example": "示例值"}
+- 参数名使用小写蛇形命名（snake_case）；无外部输入参数的计划可省略该字段。
+- input_schema 描述的是"计划需要什么参数"，不是步骤结果；用户输入中的实体值保留在参数 example 中。
 """
 
 [variables]
@@ -282,6 +289,10 @@ type = "string"
 enum = ["low", "medium", "high", "critical"]
 description = "风险等级"
 
+[output_schema.json_schema.properties.input_schema]
+type = "object"
+description = "输入参数定义（可选）：键为参数名（snake_case），值为 {type, description, example} 参数定义对象"
+
 [output_schema.example]
 text = """
 {
@@ -325,7 +336,19 @@ text = """
     }
   ],
   "complexity": "medium",
-  "risk_level": "low"
+  "risk_level": "low",
+  "input_schema": {
+    "keyword": {
+      "type": "string",
+      "description": "搜索关键词",
+      "example": "安仁乡"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "返回结果条数",
+      "example": 3
+    }
+  }
 }"""
 
 [output_schema.constraints]

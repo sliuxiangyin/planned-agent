@@ -12,12 +12,15 @@
 //! | [`ChatService`] | [`service`] | 聊天服务入口 |
 //! | [`ChatResponse`] | [`service`] | 完整响应(由 `chat_with_callback` 返回) |
 //! | [`ChatEvent`] | [`event`] | 流式事件枚举(通过回调实时下发) |
+//! | [`UIAction`] | [`ui_action`] | UI 交互动作(通过 `ChatEvent::UIActionRequest` 下发) |
 
 pub mod config;
 pub mod event;
 pub mod service;
+pub mod ui_action;
 
 // 公开给外部使用的核心类型(符合 "只导出三个主类型" 的设计决策)
 pub use config::ChatConfig;
 pub use event::ChatEvent;
 pub use service::{ChatResponse, ChatService, PendingUIAction};
+pub use ui_action::{MultiSelectOption, UIAction, UIActionType};

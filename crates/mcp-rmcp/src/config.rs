@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::info;
 
-use planned_agent_core::types::{Tool, McpServerConfig, ConnectionError};
+use planned_agent_core::mcp::types::{Tool, McpServerConfig, ConnectionError};
 use planned_agent_core::mcp::McpClient;
 
 use crate::client::McpClientImpl;

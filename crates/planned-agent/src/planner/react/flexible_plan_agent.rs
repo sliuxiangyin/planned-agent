@@ -26,7 +26,7 @@ use tracing::{info, warn};
 use planned_agent_core::planner::coarse::{CoarseGrainedPlan, CoarseGrainedStep};
 use planned_agent_core::planner::react::{Action, Observation, ReActStep, Thought};
 use planned_agent_core::prompt::{PromptContext, PromptManager};
-use planned_agent_core::types::{Message, MessageContent, MessageRole};
+use planned_agent_core::ai::types::{Message, MessageContent, MessageRole};
 
 use crate::chat::{ChatEvent, ChatService};
 use crate::planner::trace::TraceRecorder;
