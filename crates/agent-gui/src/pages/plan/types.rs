@@ -42,6 +42,17 @@ pub(super) struct PendingUIState {
     pub(super) actions: Vec<UIAction>,
     /// 当时的对话历史快照（用于用户操作后继续 chat）
     pub(super) history_snapshot: Vec<Message>,
+    /// 触发该 pending 的工作流阶段（用于用户操作后确定下一步）
+    pub(super) trigger_phase: WorkflowPhase,
+}
+
+impl PartialEq for PendingUIState {
+    fn eq(&self, other: &Self) -> bool {
+        // history_snapshot 仅用于恢复对话，不参与渲染 diff
+        self.message == other.message
+            && self.actions == other.actions
+            && self.trigger_phase == other.trigger_phase
+    }
 }
 
 // ── 计划生成事件 ──
@@ -121,17 +132,31 @@ pub(super) struct PlanState {
 // ── 灵活模式工作流类型 ──
 
 /// 灵活模式工作流阶段。
+///
+/// Agent 在多次独立对话中依次经历：
+/// ① 清晰度判断 → ③ 执行任务 → ② [条件] 参数识别 → ④ 输出类型确认 → ⑤ 轨迹提取。
+/// 任意阶段都可能因 `request_user_action` 进入 `AwaitingUserAction` 等待用户响应。
+///
+/// 注意：`Executing` 仅由周密模式（`chat.rs`）使用，灵活模式已拆分为下方三个独立阶段。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum WorkflowPhase {
     /// 等待用户输入任务描述
     Idle,
-    /// Phase 1 清晰度检查中
-    ClarityChecking,
-    /// 等待用户回复追问卡片
-    AwaitingUserAction,
-    /// Phase 2 灵活执行中
+    /// 周密模式专用：Agent 执行中
     Executing,
-    /// 执行完成，提炼计划中
+    /// 灵活模式 ①：清晰度判断 + 追问（仅 request_user_action 工具）
+    ClarityCheck,
+    /// 灵活模式 ③：执行任务（全量工具）
+    Execute,
+    /// 灵活模式 ② [条件]：可参数化动态值识别（输入参数开关控制）
+    ParamIdentify,
+    /// ④ 输出类型建议与确认中（仅输出参数开启时触发）
+    OutputSuggesting,
+    /// ⑤ 从对话上下文提取执行轨迹中
+    TraceExtracting,
+    /// 等待用户回复追问/确认卡片
+    AwaitingUserAction,
+    /// ⑥ 执行完成，提炼计划 + 保存中
     Solidifying,
 }
 
@@ -195,6 +220,12 @@ pub(super) struct WorkflowState {
     pub context_snapshot: Signal<Option<PlanFlexibleSnapshot>, SyncStorage>,
     /// 参数值（由 RequirementInput 表单收集，执行时注入 prompt）
     pub param_values: Signal<Vec<(String, String)>, SyncStorage>,
+    /// 是否启用输入参数识别（每次执行时设置，不持久化）
+    pub input_params_enabled: Signal<bool, SyncStorage>,
+    /// 是否启用输出类型建议（每次执行时设置，不持久化）
+    pub output_params_enabled: Signal<bool, SyncStorage>,
+    /// 当前阶段的 AI 输出文本（非 Execute 阶段使用，如 ClarityCheck / ParamIdentify）
+    pub phase_output: Signal<String, SyncStorage>,
 }
 
 impl WorkflowState {
@@ -234,6 +265,16 @@ impl WorkflowState {
         self.pending_ui.set(None);
     }
 
+    /// 设置当前阶段 AI 输出文本（覆盖）。
+    pub fn set_phase_output(&mut self, text: String) {
+        self.phase_output.set(text);
+    }
+
+    /// 追加当前阶段 AI 输出文本（流式）。
+    pub fn append_phase_output(&mut self, text: &str) {
+        self.phase_output.with_mut(|s| s.push_str(text));
+    }
+
     /// 重置为 Idle（保留 context_snapshot）。
     pub fn reset(&mut self) {
         self.phase.set(WorkflowPhase::Idle);
@@ -241,6 +282,7 @@ impl WorkflowState {
         self.execution_steps.set(vec![]);
         self.pending_ui.set(None);
         self.param_values.set(vec![]);
+        self.phase_output.set(String::new());
     }
 }
 

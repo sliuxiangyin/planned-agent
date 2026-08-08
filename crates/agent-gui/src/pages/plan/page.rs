@@ -74,6 +74,9 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
     let workflow_pending_ui = use_signal_sync(|| None::<PendingUIState>);
     let workflow_context_snapshot = use_signal_sync(|| None::<PlanFlexibleSnapshot>);
     let workflow_param_values = use_signal_sync(|| vec![]);
+    let workflow_input_params_enabled = use_signal_sync(|| false);
+    let workflow_output_params_enabled = use_signal_sync(|| false);
+    let workflow_phase_output = use_signal_sync(String::new);
 
     let mut workflow = WorkflowState {
         phase: workflow_phase,
@@ -82,6 +85,9 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
         pending_ui: workflow_pending_ui,
         context_snapshot: workflow_context_snapshot,
         param_values: workflow_param_values,
+        input_params_enabled: workflow_input_params_enabled,
+        output_params_enabled: workflow_output_params_enabled,
+        phase_output: workflow_phase_output,
     };
 
     // ── 清除消息确认弹窗 ──

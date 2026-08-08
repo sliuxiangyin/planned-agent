@@ -66,10 +66,15 @@ pub fn RequirementInput(props: RequirementInputProps) -> Element {
 
     let phase_label = match phase {
         WorkflowPhase::Idle => "",
-        WorkflowPhase::ClarityChecking => "🔍 清晰度检查中...",
         WorkflowPhase::AwaitingUserAction => "⏳ 等待用户操作",
-        WorkflowPhase::Executing => "⚡ 灵活执行中...",
-        WorkflowPhase::Solidifying => "📝 固化计划中...",
+        WorkflowPhase::ClarityCheck => "🔍 分析需求清晰度...",
+        WorkflowPhase::Execute => "⚡ 灵活执行中...",
+        WorkflowPhase::ParamIdentify => "🏷️ 识别可参数化动态值...",
+        WorkflowPhase::OutputSuggesting => "📋 确认输出类型...",
+        WorkflowPhase::TraceExtracting => "📝 提取执行轨迹...",
+        WorkflowPhase::Solidifying => "💾 固化计划中...",
+        // 周密模式 Executing 按 Idle 处理（灵活模式不会走到这里）
+        WorkflowPhase::Executing => "",
     };
 
     rsx! {
@@ -150,6 +155,44 @@ pub fn RequirementInput(props: RequirementInputProps) -> Element {
                             }
                         }
                     },
+                }
+            }
+
+            // 功能开关（仅 Idle 时显示）
+            if phase == WorkflowPhase::Idle {
+                div { class: "requirement-input__toggles",
+                    label { class: "requirement-input__toggle",
+                        input {
+                            r#type: "checkbox",
+                            checked: *props.workflow.input_params_enabled.read(),
+                            disabled: is_running,
+                            onclick: {
+                                let mut wf = props.workflow;
+                                move |_| {
+                                    let cur = *wf.input_params_enabled.read();
+                                    wf.input_params_enabled.set(!cur);
+                                }
+                            },
+                        }
+                        span { class: "requirement-input__toggle-label", "输入参数" }
+                        span { class: "requirement-input__toggle-hint", "识别可参数化的动态值" }
+                    }
+                    label { class: "requirement-input__toggle",
+                        input {
+                            r#type: "checkbox",
+                            checked: *props.workflow.output_params_enabled.read(),
+                            disabled: is_running,
+                            onclick: {
+                                let mut wf = props.workflow;
+                                move |_| {
+                                    let cur = *wf.output_params_enabled.read();
+                                    wf.output_params_enabled.set(!cur);
+                                }
+                            },
+                        }
+                        span { class: "requirement-input__toggle-label", "输出参数" }
+                        span { class: "requirement-input__toggle-hint", "确认返回数据类型" }
+                    }
                 }
             }
 

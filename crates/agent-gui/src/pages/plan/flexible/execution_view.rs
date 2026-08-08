@@ -1,32 +1,66 @@
-//! ExecutionView 组件：中间滚动区的步骤化执行展示。
+//! ExecutionView 组件：竖向时间轴阶段卡片。
 //!
-//! 替代 MessageListView 的对话气泡，展示为步骤列表：
-//! 工具名 + 参数摘要 + 耗时 + 状态图标（✓/⬤/⚠/○）+ 意外调整说明。
+//! 每个 WorkflowPhase 对应一个时间轴节点，通过竖线串联：
+//! - done：折叠（icon + ✓ + 标题 + 一行摘要）
+//! - active：展开（标题 + body 固定 200px + 可选 action 区）
+//! - pending：灰显（icon + ○ + 标题）
 
 use dioxus::prelude::*;
+use planned_agent_core::types::UIAction;
+use tracing;
 
-use super::super::types::{ExecutionStep, StepStatus, WorkflowPhase};
+use super::super::components::chat_ui_actions_view::ChatUIActionsView;
+use super::super::types::{ExecutionStep, PendingUIState, StepStatus, WorkflowPhase};
+
+// ── 阶段定义 ──────────────────────────────────────────────────────────────────
+
+/// 时间轴阶段条目（不含 conditional，运行时按开关过滤）。
+struct PhaseEntry {
+    phase: WorkflowPhase,
+    icon: &'static str,
+    title: &'static str,
+}
+
+/// 阶段在时间轴上的显示状态。
+#[derive(Clone, Copy, PartialEq)]
+enum PhaseStatus {
+    Done,
+    Active,
+    Pending,
+}
+
+// ── Props ─────────────────────────────────────────────────────────────────────
 
 #[derive(Props, Clone, PartialEq)]
 pub struct ExecutionViewProps {
-    /// 执行步骤列表
-    pub steps: Vec<ExecutionStep>,
     /// 当前工作流阶段
     pub phase: WorkflowPhase,
+    /// 执行步骤列表（Execute 阶段使用）
+    pub steps: Vec<ExecutionStep>,
+    /// 待处理的 UI 交互（追问/确认卡片）
+    pub pending: Option<PendingUIState>,
+    /// 当前阶段的 AI 输出文本（非 Execute 阶段使用）
+    pub phase_output: String,
+    /// 是否启用输入参数识别
+    pub input_params_enabled: bool,
+    /// 是否启用输出类型建议
+    pub output_params_enabled: bool,
+    /// action 回调：(action, choice, pending_state)
+    pub on_action: EventHandler<(UIAction, String, PendingUIState)>,
 }
 
-/// 步骤状态 → CSS class
+// ── 步骤状态辅助 ──────────────────────────────────────────────────────────────
+
 fn status_class(status: &StepStatus) -> &'static str {
     match status {
-        StepStatus::Pending => "execution-step--pending",
-        StepStatus::Running => "execution-step--running",
-        StepStatus::Done => "execution-step--done",
-        StepStatus::Warning => "execution-step--warning",
-        StepStatus::Failed => "execution-step--failed",
+        StepStatus::Pending => "workflow-step--pending",
+        StepStatus::Running => "workflow-step--running",
+        StepStatus::Done => "workflow-step--done",
+        StepStatus::Warning => "workflow-step--warning",
+        StepStatus::Failed => "workflow-step--failed",
     }
 }
 
-/// 步骤状态 → 图标
 fn status_icon(status: &StepStatus) -> &'static str {
     match status {
         StepStatus::Pending => "○",
@@ -37,119 +71,235 @@ fn status_icon(status: &StepStatus) -> &'static str {
     }
 }
 
+// ── 组件 ──────────────────────────────────────────────────────────────────────
+
 #[component]
 pub fn ExecutionView(props: ExecutionViewProps) -> Element {
     let steps = &props.steps;
     let phase = props.phase;
+    let has_steps = !steps.is_empty();
+    let is_idle = phase == WorkflowPhase::Idle;
+
+    // Idle + 无步骤 → 占位提示
+    if is_idle && !has_steps {
+        return rsx! {
+            div { class: "workflow-timeline__placeholder",
+                "描述你的任务，然后点击「开始执行」"
+            }
+        };
+    }
+
+    // 构建阶段列表（条件阶段按开关过滤）
+    let mut phases: Vec<PhaseEntry> = vec![
+        PhaseEntry { phase: WorkflowPhase::ClarityCheck, icon: "🔍", title: "需求分析" },
+        PhaseEntry { phase: WorkflowPhase::Execute, icon: "⚡", title: "灵活执行" },
+    ];
+    if props.input_params_enabled {
+        phases.push(PhaseEntry { phase: WorkflowPhase::ParamIdentify, icon: "🔧", title: "参数识别" });
+    }
+    if props.output_params_enabled {
+        phases.push(PhaseEntry { phase: WorkflowPhase::OutputSuggesting, icon: "📤", title: "输出类型" });
+    }
+    phases.push(PhaseEntry { phase: WorkflowPhase::TraceExtracting, icon: "📝", title: "轨迹提取" });
+    phases.push(PhaseEntry { phase: WorkflowPhase::Solidifying, icon: "💾", title: "固化计划" });
+
+    // 解析"有效当前阶段"：AwaitingUserAction 回退到触发阶段
+    let effective_phase = if phase == WorkflowPhase::AwaitingUserAction {
+        props.pending.as_ref().map(|p| p.trigger_phase).unwrap_or(WorkflowPhase::Idle)
+    } else {
+        phase
+    };
+
+    // 找到 effective_phase 在列表中的位置
+    let active_idx = phases.iter().position(|e| e.phase == effective_phase);
+
+    // 判断每个阶段的显示状态
+    let get_status = |entry_phase: WorkflowPhase| -> PhaseStatus {
+        // 全部完成（Idle + 有步骤 = 流程已结束）
+        if is_idle {
+            return PhaseStatus::Done;
+        }
+        // 当前阶段
+        if entry_phase == effective_phase {
+            return PhaseStatus::Active;
+        }
+        // 根据位置判断前后
+        let entry_idx = phases.iter().position(|e| e.phase == entry_phase).unwrap_or(0);
+        match active_idx {
+            Some(ai) if entry_idx < ai => PhaseStatus::Done,
+            _ => PhaseStatus::Pending,
+        }
+    };
+
+    // 已完成阶段的摘要文本
+    let done_summary = |entry: &PhaseEntry| -> String {
+        match entry.phase {
+            WorkflowPhase::Execute if has_steps => {
+                format!("{} 个步骤已完成", steps.len())
+            }
+            WorkflowPhase::ClarityCheck => "需求明确".to_string(),
+            WorkflowPhase::ParamIdentify => "已识别参数".to_string(),
+            WorkflowPhase::OutputSuggesting => "已确认输出".to_string(),
+            WorkflowPhase::TraceExtracting => "已提取轨迹".to_string(),
+            WorkflowPhase::Solidifying => "已固化计划".to_string(),
+            _ => String::new(),
+        }
+    };
+
+    // 是否是"等待用户操作"状态（当前阶段 active + 有 pending）
+    let is_awaiting = phase == WorkflowPhase::AwaitingUserAction;
 
     rsx! {
-        div { class: "execution-view",
-            // 清晰度检查阶段
-            if matches!(phase, WorkflowPhase::ClarityChecking) {
-                div { class: "execution-phase",
-                    div { class: "execution-phase__header execution-phase__header--active",
-                        "Step 1  🔍 清晰度检查"
-                    }
-                    div { class: "execution-phase__body",
-                        span { class: "execution-phase__spinner" }
-                        " 正在分析需求..."
-                    }
-                }
-            }
+        div { class: "workflow-timeline",
+            for entry in &phases {
+                {
+                    let status = get_status(entry.phase);
+                    let is_active = status == PhaseStatus::Active;
+                    let is_last = entry.phase == phases.last().map(|e| e.phase).unwrap_or(WorkflowPhase::Idle);
+                    let node_class = match status {
+                        PhaseStatus::Done => "workflow-timeline__node workflow-timeline__node--done",
+                        PhaseStatus::Active => "workflow-timeline__node workflow-timeline__node--active",
+                        PhaseStatus::Pending => "workflow-timeline__node workflow-timeline__node--pending",
+                    };
 
-            // 执行阶段
-            if matches!(phase, WorkflowPhase::Executing | WorkflowPhase::Solidifying)
-                || (matches!(phase, WorkflowPhase::Idle) && !steps.is_empty())
-            {
-                div { class: "execution-phase",
-                    div {
-                        class: if matches!(phase, WorkflowPhase::Executing) {
-                            "execution-phase__header execution-phase__header--active"
-                        } else {
-                            "execution-phase__header execution-phase__header--done"
-                        },
-                        if phase == WorkflowPhase::Solidifying {
-                            "Step 2  ⚡ 灵活执行"
-                        } else {
-                            "Step 2  ⚡ 灵活执行"
-                        }
-                    }
-                    if steps.is_empty() && phase == WorkflowPhase::Executing {
-                        div { class: "execution-phase__body",
-                            span { class: "execution-phase__spinner" }
-                            " 准备执行..."
-                        }
-                    }
-                    for step in steps {
-                        {
-                            let duration_str = step.duration_ms
-                                .map(|ms| format!("{:.1}s", ms as f64 / 1000.0))
-                                .unwrap_or_else(|| "—".to_string());
-                            rsx! {
-                                div {
-                                    class: "execution-step {status_class(&step.status)}",
-                                    div { class: "execution-step__header",
-                                        span {
-                                            class: "execution-step__icon",
-                                            "{status_icon(&step.status)}"
-                                        }
-                                        span { class: "execution-step__index",
-                                            "#{step.index}"
-                                        }
-                                        span { class: "execution-step__tool",
-                                            "{step.tool_name}"
-                                        }
-                                        span { class: "execution-step__duration",
-                                            "{duration_str}"
-                                        }
+                    // 状态标记
+                    let dot = match status {
+                        PhaseStatus::Done => "✓",
+                        PhaseStatus::Active if is_awaiting => "⏳",
+                        PhaseStatus::Active => "⬤",
+                        PhaseStatus::Pending => "○",
+                    };
+
+                    rsx! {
+                        div { class: "{node_class}",
+                            // ── 连接线（非最后一个节点） ──
+                            if !is_last {
+                                div { class: "workflow-timeline__connector" }
+                            }
+
+                            // ── Header ──
+                            div { class: "workflow-timeline__header",
+                                span { class: "workflow-timeline__dot", "{dot}" }
+                                span { class: "workflow-timeline__icon", "{entry.icon}" }
+                                span { class: "workflow-timeline__title", "{entry.title}" }
+                                if status == PhaseStatus::Done {
+                                    span { class: "workflow-timeline__summary",
+                                        "{done_summary(entry)}"
                                     }
-                                    if !step.params_summary.is_empty() {
-                                        div { class: "execution-step__params",
-                                            "→ {step.params_summary}"
-                                        }
-                                    }
-                                    if !step.result_summary.is_empty() {
-                                        div { class: "execution-step__result",
-                                            if matches!(step.status, StepStatus::Warning | StepStatus::Failed) {
-                                                "! "
+                                }
+                            }
+
+                            // ── Body（仅 active 展开） ──
+                            if is_active {
+                                div { class: "workflow-timeline__body",
+                                    // Execute 阶段：步骤列表
+                                    if entry.phase == WorkflowPhase::Execute {
+                                        if steps.is_empty() {
+                                            div { class: "workflow-timeline__spinner-wrap",
+                                                span { class: "workflow-timeline__spinner" }
+                                                " 准备执行..."
                                             }
-                                            "{step.result_summary}"
+                                        }
+                                        for step in steps {
+                                            {
+                                                let duration_str = step.duration_ms
+                                                    .map(|ms| format!("{:.1}s", ms as f64 / 1000.0))
+                                                    .unwrap_or_else(|| "—".to_string());
+                                                rsx! {
+                                                    div {
+                                                        class: "workflow-step {status_class(&step.status)}",
+                                                        div { class: "workflow-step__header",
+                                                            span {
+                                                                class: "workflow-step__icon",
+                                                                "{status_icon(&step.status)}"
+                                                            }
+                                                            span { class: "workflow-step__index",
+                                                                "#{step.index}"
+                                                            }
+                                                            span { class: "workflow-step__tool",
+                                                                "{step.tool_name}"
+                                                            }
+                                                            span { class: "workflow-step__duration",
+                                                                "{duration_str}"
+                                                            }
+                                                        }
+                                                        if !step.params_summary.is_empty() {
+                                                            div { class: "workflow-step__params",
+                                                                "→ {step.params_summary}"
+                                                            }
+                                                        }
+                                                        if !step.result_summary.is_empty() {
+                                                            div { class: "workflow-step__result",
+                                                                if matches!(step.status, StepStatus::Warning | StepStatus::Failed) {
+                                                                    "! "
+                                                                }
+                                                                "{step.result_summary}"
+                                                            }
+                                                        }
+                                                        if let Some(ref detail) = step.warning_detail {
+                                                            div { class: "workflow-step__warning-detail",
+                                                                "  调整: {detail}"
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else if matches!(entry.phase, WorkflowPhase::TraceExtracting | WorkflowPhase::Solidifying) {
+                                        // 纯 spinner 阶段
+                                        div { class: "workflow-timeline__spinner-wrap",
+                                            span { class: "workflow-timeline__spinner" }
+                                            if entry.phase == WorkflowPhase::TraceExtracting {
+                                                " 正在从对话中提取执行轨迹..."
+                                            } else {
+                                                " 正在提炼执行计划..."
+                                            }
+                                        }
+                                    } else {
+                                        // 其他阶段：AI 输出文本
+                                        if props.phase_output.is_empty() {
+                                            div { class: "workflow-timeline__spinner-wrap",
+                                                span { class: "workflow-timeline__spinner" }
+                                                " 分析中..."
+                                            }
+                                        } else {
+                                            div { class: "workflow-timeline__text",
+                                                "{props.phase_output}"
+                                            }
                                         }
                                     }
-                                    if let Some(ref detail) = step.warning_detail {
-                                        div { class: "execution-step__warning-detail",
-                                            "  调整: {detail}"
+                                }
+
+                                // ── Action 区（有 pending 时显示） ──
+                                if let Some(ref p) = props.pending {
+                                    {
+                                        let p_clone = p.clone();
+                                        let on_action = props.on_action;
+                                        rsx! {
+                                            div { class: "workflow-timeline__actions",
+                                                ChatUIActionsView {
+                                                    message: p_clone.message.clone(),
+                                                    actions: p_clone.actions.clone(),
+                                                    on_action: move |(action, choice)| {
+                                                        // 打印原始 action / choice UI action 选择结构
+                                                        tracing::debug!(
+                                                            action_id = %action.id,
+                                                            action_type = ?action.action_type,
+                                                            label = %action.label,
+                                                            choice = %choice,
+                                                            "UI action 回调原始入参"
+                                                        );
+
+                                                        on_action.call((action, choice, p_clone.clone()));
+                                                    },
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                }
-            }
-
-            // 固化阶段
-            if matches!(phase, WorkflowPhase::Solidifying) {
-                div { class: "execution-phase",
-                    div {
-                        class: if steps.is_empty() || steps.last().map(|s| &s.status) == Some(&StepStatus::Done) {
-                            "execution-phase__header execution-phase__header--active"
-                        } else {
-                            "execution-phase__header"
-                        },
-                        "Step 3  📝 固化计划"
-                    }
-                    div { class: "execution-phase__body",
-                        span { class: "execution-phase__spinner" }
-                        " 正在提炼执行计划..."
-                    }
-                }
-            }
-
-            // Idle 且无步骤（首次或刚重置）
-            if matches!(phase, WorkflowPhase::Idle) && steps.is_empty() {
-                div { class: "execution-view__placeholder",
-                    "描述你的任务，然后点击「开始执行」"
                 }
             }
         }

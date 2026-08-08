@@ -181,6 +181,20 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         }
     }
 
+    /// 渲染一个 prompt 模板，返回渲染后的文本。
+    ///
+    /// 用于加载条件注入的 message 模板（如参数识别、输出类型建议、轨迹提取），
+    /// 调用方拿到文本后自行封装为 `Message` 加入 `history`。
+    ///
+    /// 与 `inject_system_prompt` 使用相同的 `PromptManager::render` 路径。
+    pub async fn render_message_template(
+        &self,
+        template_name: &str,
+        context: &PromptContext,
+    ) -> Result<String> {
+        self.prompt_manager.render(template_name, context).await
+    }
+
     /// 请求取消当前正在进行的聊天流。
     ///
     /// 调用后 `chat_with_callback` 会在下一个 stream chunk 或下一轮开始时

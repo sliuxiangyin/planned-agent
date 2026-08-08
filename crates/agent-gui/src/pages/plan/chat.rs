@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use super::types::{
     display_text, ChatState, ParamDef, PendingUIState, PlanSource, PlanState,
+    WorkflowPhase,
 };
 
 /// 持久化一条消息到 DB（fire-and-forget）
@@ -128,6 +129,7 @@ async fn run_chat_stream_with_history(
                     message,
                     actions,
                     history_snapshot: snapshot,
+                    trigger_phase: WorkflowPhase::Executing,
                 });
             }
             _ => {}
@@ -295,6 +297,7 @@ async fn run_flexible_chat_stream(
                 message: pending.message.clone(),
                 actions: pending.actions.clone(),
                 history_snapshot: phase2_ready,
+                trigger_phase: WorkflowPhase::Executing,
             });
             chat.stop_streaming();
 
@@ -405,6 +408,7 @@ pub(super) fn handle_user_action(
                         message,
                         actions,
                         history_snapshot: snapshot,
+                        trigger_phase: WorkflowPhase::Executing,
                     });
                 }
                 _ => {}
