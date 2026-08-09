@@ -1,5 +1,7 @@
 //! 灵活模式工作流类型：阶段枚举、历史快照、执行步骤。
 
+use serde_json::Value;
+
 /// 灵活模式工作流阶段。
 ///
 /// Agent 在多次独立对话中依次经历：
@@ -64,6 +66,10 @@ pub(crate) struct ExecutionStep {
     pub warning_detail: Option<String>,
     /// 耗时（毫秒）
     pub duration_ms: Option<u64>,
+    /// 完整参数（工具调用完整 JSON，不截断；未完成时 None）
+    pub params_data: Option<Value>,
+    /// 完整输出（工具返回的原始内容，不截断；未完成时 None）
+    pub result_data: Option<Value>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

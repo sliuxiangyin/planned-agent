@@ -339,6 +339,51 @@
     color: var(--secondary-warning-color);
 }
 
+/* 完整数据展开区 */
+.workflow-step__expand {
+    margin: 4px 0 0 22px;
+    font-size: 0.75rem;
+}
+
+.workflow-step__expand-toggle {
+    display: inline-block;
+    cursor: pointer;
+    color: var(--secondary-color-2);
+    user-select: none;
+}
+
+.workflow-step__expand-toggle:hover {
+    color: var(--focused-border-color);
+}
+
+.workflow-step__expand-body {
+    margin-top: 4px;
+    padding: 6px 8px;
+    background: var(--primary-color-5);
+    border: 1px solid var(--primary-color-6);
+    border-radius: 4px;
+    max-height: 240px;
+    overflow: auto;
+}
+
+.workflow-step__expand-section + .workflow-step__expand-section {
+    margin-top: 6px;
+}
+
+.workflow-step__expand-label {
+    color: var(--secondary-color-5);
+    font-size: 0.7rem;
+    margin-bottom: 2px;
+}
+
+.workflow-step__expand-pre {
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-all;
+    font-family: ui-monospace, "SF Mono", "Consolas", "Monaco", monospace;
+    color: var(--secondary-color-3);
+}
+
 /* 步骤状态着色 */
 .workflow-step--running .workflow-step__icon {
     color: var(--focused-border-color);

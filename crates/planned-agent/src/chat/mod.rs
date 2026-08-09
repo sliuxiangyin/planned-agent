@@ -23,4 +23,4 @@ pub mod ui_action;
 pub use config::ChatConfig;
 pub use event::ChatEvent;
 pub use service::{ChatResponse, ChatService, PendingUIAction};
-pub use ui_action::{MultiSelectOption, UIAction, UIActionType};
+pub use ui_action::{FALLBACK_CONFIRM_ID, FALLBACK_CONFIRM_LABEL, MultiSelectOption, UIAction, UIActionType};

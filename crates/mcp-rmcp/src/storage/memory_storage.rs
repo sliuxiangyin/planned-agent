@@ -141,6 +141,7 @@ mod tests {
             server_args: vec![],
             transport: "stdio".into(),
             timeout_secs: None,
+            handshake_timeout_secs: None,
             max_retries: None,
             is_default: false,
             categories: None,

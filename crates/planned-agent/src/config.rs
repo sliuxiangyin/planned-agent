@@ -143,6 +143,7 @@ impl AppConfig {
                     transport: "stdio".to_string(),
                     // 覆盖完整冷启动链：spawn npx → 首次拉包（可达数十秒）→ MCP initialize 握手
                     timeout_secs: Some(120),
+                    handshake_timeout_secs: None,
                     max_retries: Some(3),
                     is_default: true,
                     tools_filter: None,

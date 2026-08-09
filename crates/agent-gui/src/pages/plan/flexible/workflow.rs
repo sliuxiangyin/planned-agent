@@ -10,6 +10,7 @@
 //! ③ RequirementInput — 固定底部输入区
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use dioxus::prelude::*;
 use planned_agent::{ChatEvent, ChatService};
@@ -32,6 +33,10 @@ use super::super::types::{ExecutionStep, PendingUIState, StepStatus, WorkflowPha
 
 /// 灵活模式三段式布局样式（仅本组件渲染时按需加载）。
 const FLEXIBLE_CSS: Asset = asset!("/assets/plan-flexible.css");
+
+/// 需求分析结论在时间轴上的停留时长（毫秒）：AI 输出结论后先停留展示，
+/// 再自动流转到「灵活执行」阶段，避免结论一闪而过。
+const CLARITY_DONE_PAUSE_MS: u64 = 1800;
 
 #[derive(Props, Clone, PartialEq)]
 pub struct FlexibleWorkflowProps {
@@ -328,6 +333,13 @@ async fn run_clarity_check_stage(
     let output = extract_last_assistant_text(&result.history);
     if !output.is_empty() {
         workflow.set_phase_output(output);
+        // 停留展示 AI 结论（ClarityCheck 保持 active，ExecutionView 渲染 phase_output），
+        // 用户可在此时点「停止」取消；停留结束且未被取消再自动进入执行。
+        tokio::time::sleep(Duration::from_millis(CLARITY_DONE_PAUSE_MS)).await;
+        if chat_svc.is_cancelled() {
+            workflow.set_phase(WorkflowPhase::Idle);
+            return (WorkflowPhase::Idle, vec![]);
+        }
     }
     (WorkflowPhase::Execute, result.history)
 }
@@ -677,6 +689,8 @@ fn handle_exec_event(event: ChatEvent, workflow: &mut WorkflowState) {
                 status: StepStatus::Running,
                 warning_detail: None,
                 duration_ms: None,
+                params_data: None,
+                result_data: None,
             });
         }
         ChatEvent::ToolCallArgsDelta { delta, .. } => {
@@ -685,6 +699,14 @@ fn handle_exec_event(event: ChatEvent, workflow: &mut WorkflowState) {
                     if last.params_summary.len() < 80 {
                         last.params_summary.push_str(&delta);
                     }
+                }
+            });
+        }
+        ChatEvent::ToolCallComplete { arguments, .. } => {
+            // 保存完整参数（不截断），供展开查看
+            workflow.execution_steps.with_mut(|steps| {
+                if let Some(last) = steps.last_mut() {
+                    last.params_data = Some(arguments);
                 }
             });
         }
@@ -713,6 +735,12 @@ fn handle_exec_event(event: ChatEvent, workflow: &mut WorkflowState) {
             } else {
                 StepStatus::Done
             };
+            // 保留完整输出（不截断），供展开查看
+            workflow.execution_steps.with_mut(|steps| {
+                if let Some(last) = steps.last_mut() {
+                    last.result_data = Some(content.clone());
+                }
+            });
             workflow.update_last_step(status, &result_str, None);
         }
         _ => {}

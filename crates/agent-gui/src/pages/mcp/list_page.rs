@@ -20,7 +20,6 @@ use dioxus_primitives::alert_dialog::{
     AlertDialogRoot, AlertDialogContent, AlertDialogTitle,
     AlertDialogDescription, AlertDialogActions, AlertDialogAction, AlertDialogCancel,
 };
-use planned_agent_core::mcp::types::ConnectionError;
 use planned_agent_mcp_rmcp::storage::{LastStatus, ServerStatus};
 
 use crate::context::{McpChangeNotifier, McpContext, ToolsContext};
@@ -35,38 +34,41 @@ enum CardStatus {
     /// 等待连接：已添加但尚未进行首次连接尝试（灰色，默认状态）
     Pending,
     /// 刷新失败（红色，可点击弹错误详情）
-    Failed(ConnectionError),
+    /// `kind` 为持久化的 error_kind（`"spawn"` / `"handshake"` / `"timeout"`），
+    /// `message` 为持久化的完整错误消息（已截断 ≤200 字符）。
+    Failed { kind: String, message: String },
 }
 
-/// 错误类别标签
-fn error_kind_label(err: &ConnectionError) -> &'static str {
-    match err {
-        ConnectionError::Timeout { .. } => "超时",
-        ConnectionError::Spawn { .. } => "启动失败",
-        ConnectionError::Handshake { .. } => "握手失败",
+/// 错误类别标签（按持久化的 error_kind 字符串分类）
+fn error_kind_label(kind: &str) -> &'static str {
+    match kind {
+        "timeout" => "超时",
+        "spawn" => "启动失败",
+        "handshake" => "握手失败",
+        _ => "未知",
     }
 }
 
 /// 从持久化的 [`ServerStatus`] 还原成 UI 的 [`CardStatus`]
 ///
-/// 由于 [`ServerStatus`] 不保留完整 `ConnectionError`（只保留 kind + 截断消息），
-/// 这里对于 Failed 状态重建一个最小化的 `ConnectionError::Handshake` 仅供 dialog 展示。
+/// 直接透出持久化的 `error_kind` + `error_message`（二者由 bundle 写入时
+/// 截断到 ≤200 字符），**不**重建 `ConnectionError` 变体：
+/// 此前把所有 Failed 一律重建为 `Handshake`，会把 spawn 错误错误地显示成
+/// "握手失败"，且消息被套上 "MCP handshake failed: " 前缀。
 fn to_card_status(s: &ServerStatus) -> Option<CardStatus> {
     match s.status {
         LastStatus::Ready { tool_count } => Some(CardStatus::Ready(tool_count)),
         LastStatus::Connecting => Some(CardStatus::Connecting),
         LastStatus::Pending => Some(CardStatus::Pending),
         LastStatus::Failed => {
-            let reason = s.error_message.clone().unwrap_or_else(|| {
+            let message = s.error_message.clone().unwrap_or_else(|| {
                 format!(
                     "（上次连接失败：kind={}）",
                     s.error_kind.as_deref().unwrap_or("unknown")
                 )
             });
-            Some(CardStatus::Failed(ConnectionError::Handshake {
-                reason,
-                stderr_tail: None,
-            }))
+            let kind = s.error_kind.clone().unwrap_or_else(|| "unknown".to_string());
+            Some(CardStatus::Failed { kind, message })
         }
     }
 }
@@ -172,7 +174,7 @@ pub fn McpListPage(
                                                         }
                                                     }
                                                 }
-                                                Some(CardStatus::Failed(_)) => {
+                                                Some(CardStatus::Failed { .. }) => {
                                                     let srv = server_name.clone();
                                                     rsx! {
                                                         span {
@@ -325,7 +327,7 @@ pub fn McpListPage(
                     .unwrap_or(false)
             };
 
-            let error_info: Option<(String, ConnectionError)> =
+            let error_info: Option<(String, String, String)> =
                 if dname.is_empty() {
                     None
                 } else {
@@ -334,14 +336,15 @@ pub fn McpListPage(
                         .and_then(|v| v.status.as_ref())
                         .and_then(|s| to_card_status(s))
                         .and_then(|cs| match cs {
-                            CardStatus::Failed(err) => Some((dname.clone(), err)),
+                            CardStatus::Failed { kind, message } => {
+                                Some((dname.clone(), kind, message))
+                            }
                             _ => None,
                         })
                 };
 
-            if let Some((server_name, ref err)) = error_info {
-                let error_msg = err.message();
-                let kind = error_kind_label(err);
+            if let Some((server_name, kind, error_msg)) = error_info {
+                let kind_label = error_kind_label(&kind);
 
                 rsx! {
                     AlertDialogRoot {
@@ -358,7 +361,7 @@ pub fn McpListPage(
                                     }
                                     p { class: "mcp-error-dialog__row",
                                         span { class: "mcp-error-dialog__label", "类别" }
-                                        span { class: "mcp-error-dialog__value", "{kind}" }
+                                        span { class: "mcp-error-dialog__value", "{kind_label}" }
                                     }
                                 }
                                 div { class: "mcp-error-dialog__detail",

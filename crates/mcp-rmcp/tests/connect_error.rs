@@ -21,6 +21,7 @@ fn sleep_config(timeout_secs: u64) -> McpServerConfig {
         server_args: vec!["999".into()],
         transport: "stdio".into(),
         timeout_secs: Some(timeout_secs),
+        handshake_timeout_secs: None,
         max_retries: None,
         is_default: false,
         tools_filter: None,
@@ -35,6 +36,39 @@ fn nonexistent_config() -> McpServerConfig {
         server_args: vec![],
         transport: "stdio".into(),
         timeout_secs: Some(2),
+        handshake_timeout_secs: None,
+        max_retries: None,
+        is_default: false,
+        tools_filter: None,
+        categories: None,
+    }
+}
+
+/// 静默进程（stderr 无任何输出，如 sleep）：用于验证"无输出按握手线提前失败"
+fn silent_sleep_config(timeout_secs: u64, handshake_secs: u64) -> McpServerConfig {
+    McpServerConfig {
+        name: "silent-sleep".into(),
+        server_command: "sleep".into(),
+        server_args: vec!["999".into()],
+        transport: "stdio".into(),
+        timeout_secs: Some(timeout_secs),
+        handshake_timeout_secs: Some(handshake_secs),
+        max_retries: None,
+        is_default: false,
+        tools_filter: None,
+        categories: None,
+    }
+}
+
+/// 有输出的进程（stderr 写一行后长睡）：用于验证"有输出按总上限等待"
+fn noisy_sleep_config(timeout_secs: u64, handshake_secs: u64) -> McpServerConfig {
+    McpServerConfig {
+        name: "noisy-sleep".into(),
+        server_command: "bash".into(),
+        server_args: vec!["-c".into(), "echo alive 1>&2; sleep 5".into()],
+        transport: "stdio".into(),
+        timeout_secs: Some(timeout_secs),
+        handshake_timeout_secs: Some(handshake_secs),
         max_retries: None,
         is_default: false,
         tools_filter: None,
@@ -62,6 +96,7 @@ exit 1"#
         ],
         transport: "stdio".into(),
         timeout_secs: Some(3),
+        handshake_timeout_secs: None,
         max_retries: None,
         is_default: false,
         tools_filter: None,
@@ -224,4 +259,75 @@ async fn connection_error_serializes_to_json() {
         !json2.contains("stderr_tail"),
         "stderr_tail=None 应被 skip_serializing_if 跳过"
     );
+}
+
+#[tokio::test]
+async fn silent_process_times_out_early_on_handshake_limit() {
+    // 静默进程（sleep，stderr 无输出）：应走"握手提前失败线"，≈1s 快速失败，
+    // 而不是干等总上限 10s
+    let mut client = McpClientImpl::new();
+    let result = client.connect(silent_sleep_config(10, 1)).await;
+
+    assert!(result.is_err(), "静默进程应超时");
+
+    let status = client.connection_status().await;
+    match &status.last_error {
+        Some(ConnectionError::Timeout {
+            elapsed_secs,
+            timeout_secs,
+            ..
+        }) => {
+            assert!(
+                *elapsed_secs >= 1 && *elapsed_secs < 10,
+                "无输出时应约 1s 提前失败（握手线），实际 {}s",
+                elapsed_secs
+            );
+            assert_eq!(
+                *timeout_secs, 1,
+                "无输出时应报握手线 1s，实际 {}",
+                timeout_secs
+            );
+        }
+        other => panic!("期望 Timeout，实际: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn noisy_process_waits_full_startup_timeout() {
+    // 有输出的进程（bash 向 stderr 写一行后长睡）：stderr 有数据 → 确认进程激活，
+    // 应切回总上限 3s 等待（而非握手线 1s 提前失败）
+    let mut client = McpClientImpl::new();
+    let result = client.connect(noisy_sleep_config(3, 1)).await;
+
+    assert!(result.is_err(), "有输出但未握手应超时");
+
+    let status = client.connection_status().await;
+    match &status.last_error {
+        Some(ConnectionError::Timeout {
+            elapsed_secs,
+            timeout_secs,
+            stderr_tail,
+        }) => {
+            assert!(
+                *elapsed_secs >= 3 && *elapsed_secs < 10,
+                "有输出时应等总上限约 3s，实际 {}s",
+                elapsed_secs
+            );
+            assert_eq!(
+                *timeout_secs, 3,
+                "有输出时应报总上限 3s，实际 {}",
+                timeout_secs
+            );
+            // 关键：stderr_tail 应完整包含探测前缀 + 剩余内容（首字符不丢）
+            let stderr = stderr_tail
+                .as_deref()
+                .expect("有输出的进程应产生 stderr_tail");
+            assert!(
+                stderr.contains("alive"),
+                "stderr_tail 应包含完整内容（含探测读走的首字节），实际: {}",
+                stderr
+            );
+        }
+        other => panic!("期望 Timeout，实际: {:?}", other),
+    }
 }

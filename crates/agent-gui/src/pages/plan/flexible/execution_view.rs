@@ -71,6 +71,14 @@ fn status_icon(status: &StepStatus) -> &'static str {
     }
 }
 
+/// 将完整数据格式化为可读文本：字符串直接展示，其余按 pretty JSON。
+fn pretty_data(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+    }
+}
+
 // ── 组件 ──────────────────────────────────────────────────────────────────────
 
 #[component]
@@ -239,6 +247,36 @@ pub fn ExecutionView(props: ExecutionViewProps) -> Element {
                                                         if let Some(ref detail) = step.warning_detail {
                                                             div { class: "workflow-step__warning-detail",
                                                                 "  调整: {detail}"
+                                                            }
+                                                        }
+                                                        // ── 完整数据展开区（仅步骤完成且有数据时显示） ──
+                                                        if step.params_data.is_some() || step.result_data.is_some() {
+                                                            details { class: "workflow-step__expand",
+                                                                summary { class: "workflow-step__expand-toggle",
+                                                                    "查看完整数据"
+                                                                }
+                                                                div { class: "workflow-step__expand-body",
+                                                                    if let Some(params) = &step.params_data {
+                                                                        div { class: "workflow-step__expand-section",
+                                                                            div { class: "workflow-step__expand-label",
+                                                                                "参数"
+                                                                            }
+                                                                            pre { class: "workflow-step__expand-pre",
+                                                                                "{pretty_data(params)}"
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    if let Some(result) = &step.result_data {
+                                                                        div { class: "workflow-step__expand-section",
+                                                                            div { class: "workflow-step__expand-label",
+                                                                                "输出"
+                                                                            }
+                                                                            pre { class: "workflow-step__expand-pre",
+                                                                                "{pretty_data(result)}"
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
                                                             }
                                                         }
                                                     }

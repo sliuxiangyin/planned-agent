@@ -87,9 +87,13 @@ pub struct McpServerEntry {
     pub transport: String,
     /// 连接超时上限（秒）。覆盖完整冷启动链：
     /// spawn 子进程 → npx 拉包（首次可达数十秒）→ MCP initialize 握手。
-    /// None 时使用 client 的默认 120s。
+    /// None 时使用 client 的默认 180s。
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// 握手阶段超时（秒）：进程激活（stderr 有输出）前的提前失败线。
+    /// None 时使用 client 的默认 30s。详见 [`McpServerConfig::handshake_timeout_secs`]。
+    #[serde(default)]
+    pub handshake_timeout_secs: Option<u64>,
     #[serde(default)]
     pub max_retries: Option<u32>,
     #[serde(default)]
@@ -128,6 +132,7 @@ impl McpServerEntry {
             server_args: self.server_args.clone(),
             transport: self.transport.clone(),
             timeout_secs: self.timeout_secs,
+            handshake_timeout_secs: self.handshake_timeout_secs,
             max_retries: self.max_retries,
             is_default: self.is_default,
             tools_filter: self.tools_filter.clone(),

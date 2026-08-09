@@ -133,6 +133,20 @@ pub fn McpEditorPage(
                 .unwrap_or_default()
         }
     });
+    let mut form_handshake_timeout = use_signal({
+        let editing_name = editing_name.clone();
+        let cfg_mgr = config_mgr.clone();
+        move || {
+            cfg_mgr
+                .as_ref()
+                .map(|m| {
+                    lookup_initial(&editing_name, m, 30u64, |s| {
+                        s.handshake_timeout_secs.unwrap_or(30)
+                    })
+                })
+                .unwrap_or_default()
+        }
+    });
     let mut form_max_retries = use_signal({
         let editing_name = editing_name.clone();
         let cfg_mgr = config_mgr.clone();
@@ -242,7 +256,7 @@ pub fn McpEditorPage(
 
             div { class: "settings-mcp-form__row",
                 div { class: "settings-mcp-form__field",
-                    label { "超时(秒)" }
+                    label { "冷启动超时(秒)" }
                     input {
                         class: "settings-mcp-form__input settings-mcp-form__input--small",
                         r#type: "number",
@@ -254,6 +268,22 @@ pub fn McpEditorPage(
                             }
                         },
                     }
+                    span { class: "settings-mcp-form__hint", "含首次 npx 拉包 + 握手总上限" }
+                }
+                div { class: "settings-mcp-form__field",
+                    label { "握手超时(秒)" }
+                    input {
+                        class: "settings-mcp-form__input settings-mcp-form__input--small",
+                        r#type: "number",
+                        value: "{form_handshake_timeout}",
+                        disabled: *is_saving.read(),
+                        oninput: move |e: FormEvent| {
+                            if let Ok(v) = e.value().parse() {
+                                form_handshake_timeout.set(v);
+                            }
+                        },
+                    }
+                    span { class: "settings-mcp-form__hint", "进程无输出时的快速失败线" }
                 }
                 div { class: "settings-mcp-form__field",
                     label { "重试次数" }
@@ -355,6 +385,7 @@ pub fn McpEditorPage(
                                     .collect(),
                                 transport: "stdio".into(),
                                 timeout_secs: Some(*form_timeout.read()),
+                                handshake_timeout_secs: Some(*form_handshake_timeout.read()),
                                 max_retries: Some(*form_max_retries.read()),
                                 is_default: false,
                                 categories: if cats_selected.is_empty() {

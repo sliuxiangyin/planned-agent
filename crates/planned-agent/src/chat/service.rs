@@ -133,6 +133,10 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
     /// 灵活模式通过此方法在清晰度检查阶段限制工具为 `["request_user_action"]`，
     /// 确认需求明确后再用完整工具集执行。内部组件（AiManager、ToolRegistry、
     /// PromptManager）均为浅拷贝，开销极小。
+    ///
+    /// `cancelled` 与源实例共享同一 `Arc<AtomicBool>`：派生副本与源实例属于
+    /// 同一次逻辑执行，调用方对任意一个调用 [`Self::stop`] 都能中断所有副本的
+    /// `chat_with_callback`（否则灵活模式在派生副本上执行时 UI 的停止按钮无效）。
     pub fn with_allowed_tools(&self, allowed_tools: Option<Vec<String>>) -> Self {
         Self {
             ai_manager: self.ai_manager.clone(),
@@ -142,13 +146,14 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
                 allowed_tools,
                 ..self.config.clone()
             },
-            cancelled: Arc::new(AtomicBool::new(false)),
+            cancelled: self.cancelled.clone(),
         }
     }
 
     /// 派生一个仅 `system_prompt_template` 不同的副本。
     ///
     /// 灵活模式 Phase 1（清晰度检查）与 Phase 2（执行）使用不同的 system prompt。
+    /// `cancelled` 与源实例共享，参见 [`Self::with_allowed_tools`]。
     pub fn with_system_prompt_template(&self, template: Option<String>) -> Self {
         Self {
             ai_manager: self.ai_manager.clone(),
@@ -158,7 +163,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
                 system_prompt_template: template,
                 ..self.config.clone()
             },
-            cancelled: Arc::new(AtomicBool::new(false)),
+            cancelled: self.cancelled.clone(),
         }
     }
 
@@ -166,6 +171,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
     ///
     /// 灵活模式第二阶段传入上版本四字段（todos/summary/params/output_schema），
     /// 渲染到 `flexible_system.toml` 的 `{{ context }}` 变量。
+    /// `cancelled` 与源实例共享，参见 [`Self::with_allowed_tools`]。
     pub fn with_context(&self, context: Option<String>) -> Self {
         Self {
             ai_manager: self.ai_manager.clone(),
@@ -175,7 +181,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
                 context: context.or(self.config.context.clone()),
                 ..self.config.clone()
             },
-            cancelled: Arc::new(AtomicBool::new(false)),
+            cancelled: self.cancelled.clone(),
         }
     }
 
@@ -201,8 +207,8 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         self.cancelled.store(true, Ordering::SeqCst);
     }
 
-    /// 内部取消检查。
-    fn is_cancelled(&self) -> bool {
+    /// 取消状态查询（供调用方在阶段间检查，如等待用户操作后的恢复流程）。
+    pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
     }
 
@@ -314,7 +320,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
                             let index = d.index;
                             let acc = accumulators
                                 .entry(index)
-                                .or_insert_with(ToolCallAccumulator::new);
+                            .or_insert_with(ToolCallAccumulator::new);
 
                             // id 第一次设上 → 发 ToolCallStart
                             if let Some(id) = &d.id {
@@ -426,6 +432,19 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
                     self.config.max_tool_rounds
                 );
                 finish_reason = None; // 截断标记
+
+                // 该轮 assistant 消息的 tool_calls 从未执行、也没有 tool 结果跟随。
+                // 若原样保留在 history 中，用户点「继续执行」再次发起对话时，
+                // 模型会看到"未闭合"的 assistant tool_calls（无对应 tool 结果），
+                // 导致后续阶段（参数识别/输出确认等）行为异常、确认卡片不出现。
+                // 这里直接移除这条未执行的 assistant 消息，保持上下文干净。
+                if let Some(last) = history.last() {
+                    if matches!(last.role, MessageRole::Assistant)
+                        && last.tool_calls.is_some()
+                    {
+                        history.pop();
+                    }
+                }
 
                 // 通知用户工具调用已达上限，请求确认是否继续
                 let msg = format!(
@@ -546,6 +565,32 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
                 }
                 if message.is_empty() {
                     warn!("request_user_action: message 为空，卡片缺少引导文本");
+                }
+
+                // ── 组合校验：multi_select 必须伴随 confirm 提交按钮 ──
+                // 纯 MultiSelect 无 confirm → 前端只有复选框、没有提交入口，交互卡死。
+                // 自动补「确定」按钮兜底；插到 actions 开头，不改变
+                // 调用方（auto 模式）取 actions.last() 作为默认动作的语义。
+                if actions
+                    .iter()
+                    .any(|a| matches!(a.action_type, crate::chat::UIActionType::MultiSelect))
+                    && !actions
+                        .iter()
+                        .any(|a| matches!(a.action_type, crate::chat::UIActionType::Confirm))
+                {
+                    warn!(
+                        "request_user_action: 含 multi_select 但无 confirm 按钮，自动补「确定」按钮（防交互卡死）"
+                    );
+                    actions.insert(
+                        0,
+                        UIAction {
+                            id: crate::chat::FALLBACK_CONFIRM_ID.to_string(),
+                            action_type: crate::chat::UIActionType::Confirm,
+                            label: crate::chat::FALLBACK_CONFIRM_LABEL.to_string(),
+                            description: None,
+                            options: vec![],
+                        },
+                    );
                 }
 
                 on_event(ChatEvent::UIActionRequest {
@@ -737,5 +782,126 @@ impl ToolCallAccumulator {
             arguments: String::new(),
             start_emitted: false,
         }
+    }
+}
+
+// ── 测试 ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use planned_agent_core::ai::config::AiProviderConfig;
+    use planned_agent_core::prompt::{PromptContext, PromptInfo, PromptManager, PromptTemplate};
+
+    use super::*;
+
+    /// Mock PromptManager：仅 `render` 返回固定文本，其余方法测试中不会被调用。
+    struct MockPromptManager;
+
+    #[async_trait::async_trait]
+    impl PromptManager for MockPromptManager {
+        async fn load_template(&self, _name: &str) -> Result<PromptTemplate> {
+            unimplemented!()
+        }
+
+        async fn render(&self, _name: &str, _ctx: &PromptContext) -> Result<String> {
+            Ok("mock".to_string())
+        }
+
+        async fn list_prompts(&self) -> Result<Vec<PromptInfo>> {
+            Ok(vec![])
+        }
+
+        async fn exists(&self, _name: &str) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn reload(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn get_output_schema(&self, _name: &str) -> Result<Option<Value>> {
+            Ok(None)
+        }
+
+        async fn parse_response<T: serde::de::DeserializeOwned>(
+            &self,
+            _name: &str,
+            _response: &str,
+        ) -> Result<T> {
+            unimplemented!()
+        }
+
+        async fn validate_response(&self, _name: &str, _response: &str) -> Result<bool> {
+            Ok(true)
+        }
+    }
+
+    fn make_service() -> ChatService<MockPromptManager> {
+        let ai_manager = AiManager::from_config(vec![AiProviderConfig {
+            name: "mock".to_string(),
+            provider: "openai".to_string(),
+            api_key: "test-key".to_string(),
+            model: "mock-model".to_string(),
+            max_tokens: None,
+            temperature: None,
+            base_url: None,
+            is_default: true,
+            thinking_config: None,
+        }])
+        .expect("构造 AiManager 失败");
+        ChatService::new(
+            ai_manager,
+            Arc::new(ToolRegistry::new()),
+            Arc::new(MockPromptManager),
+            ChatConfig::new(),
+        )
+    }
+
+    /// 回归测试：`with_*` 派生副本必须与源实例共享 `cancelled` 标志，
+    /// 否则灵活模式在派生副本上执行时，UI 对源实例调用 `stop()` 无法中断执行。
+    #[test]
+    fn derived_copies_share_cancel_flag() {
+        let svc = make_service();
+
+        let derived_tools =
+            svc.with_allowed_tools(Some(vec!["request_user_action".to_string()]));
+        let derived_system =
+            svc.with_system_prompt_template(Some("flexible/flexible_system".to_string()));
+        let derived_ctx = svc.with_context(Some("ctx".to_string()));
+        // 链式派生：模拟 run_pipeline 中 base_svc = chat_svc.with_system_prompt_template().with_context()
+        let chain = svc
+            .with_system_prompt_template(Some("flexible/flexible_system".to_string()))
+            .with_context(Some("ctx".to_string()))
+            .with_allowed_tools(None);
+
+        // 未停止前全部为 false
+        assert!(!svc.is_cancelled());
+        assert!(!derived_tools.is_cancelled());
+        assert!(!derived_system.is_cancelled());
+        assert!(!derived_ctx.is_cancelled());
+        assert!(!chain.is_cancelled());
+
+        // 对源实例 stop() → 所有派生副本都应感知取消
+        svc.stop();
+
+        assert!(svc.is_cancelled());
+        assert!(derived_tools.is_cancelled());
+        assert!(derived_system.is_cancelled());
+        assert!(derived_ctx.is_cancelled());
+        assert!(chain.is_cancelled());
+    }
+
+    /// 派生副本调用 `stop()` 同样应反向传播到源实例与其它副本。
+    #[test]
+    fn stop_on_derived_copy_propagates() {
+        let svc = make_service();
+        let derived = svc.with_allowed_tools(None);
+
+        derived.stop();
+
+        assert!(svc.is_cancelled());
+        assert!(derived.is_cancelled());
     }
 }

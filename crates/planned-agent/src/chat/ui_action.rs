@@ -1,5 +1,11 @@
 use serde::{Deserialize, Serialize};
 
+/// 兜底确认按钮的固定 id —— 后端组合校验（service 层补按钮）与
+/// 前端渲染兜底共用，避免两处硬编码漂移。
+pub const FALLBACK_CONFIRM_ID: &str = "confirm";
+/// 兜底确认按钮的固定展示文本。
+pub const FALLBACK_CONFIRM_LABEL: &str = "确定";
+
 /// UI 交互动作 —— Agent 通过 tool call 请求前端渲染交互组件。
 ///
 /// 当 `ChatService` 检测到 `request_user_action` tool call 时，

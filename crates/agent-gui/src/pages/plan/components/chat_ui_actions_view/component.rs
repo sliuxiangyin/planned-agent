@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use dioxus::prelude::*;
-use planned_agent::chat::{UIAction, UIActionType};
+use planned_agent::chat::{FALLBACK_CONFIRM_ID, FALLBACK_CONFIRM_LABEL, UIAction, UIActionType};
 
 use crate::components::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::input::Input;
@@ -29,6 +29,8 @@ struct Styles;
 /// - Input + Select 混搭 → 只渲染 Input，丢弃 Select（两个不同问题不能混在一次交互）
 /// - Input + Confirm 混搭 → 正常渲染（同一问题不同回答方式，如"输入路径 / 当前目录"）
 /// - MultiSelect + Confirm → Confirm 按钮读取复选框勾选状态作为 choice 值
+/// - 纯 MultiSelect（无任何 confirm/select/input）→ 自动补「确定」按钮读取勾选状态，
+///   防止只有复选框、无提交入口导致交互卡死（后端 service 层也会自动补齐，此处为二道防线）
 #[component]
 pub fn ChatUIActionsView(
     message: String,
@@ -81,6 +83,49 @@ pub fn ChatUIActionsView(
         })
         .cloned()
         .collect();
+
+    // ── 多选勾选 → choice 字符串（"id=value" 逗号拼接；未勾选回 "none"）──
+    let build_multi_choice = move || {
+        let state = checkbox_state.read();
+        let values = option_value_map.read();
+        let ids: Vec<String> = state
+            .iter()
+            .filter(|(_, &v)| v)
+            .filter_map(|(k, _)| {
+                values
+                    .get(k)
+                    .and_then(|v| v.as_ref())
+                    // 有 value → id=value；无 value → 仅回传 id（schema 允许 value 缺省，不丢弃勾选项）
+                    .map(|val| format!("{}={}", k, val))
+                    .or_else(|| Some(k.clone()))
+            })
+            .collect();
+        if ids.is_empty() {
+            "none".to_string()
+        } else {
+            ids.join(",")
+        }
+    };
+
+    // ── 兜底：有 MultiSelect 但无 confirm 提交按钮（LLM 违规）→ 自动补「确定」按钮，防止交互卡死 ──
+    // 与后端 service 层组合校验同条件（有 ms 无 confirm）；Input 的确认按钮回传的是输入文本
+    // 而非勾选结果，Select 同样只回传自身 label，故二者都不能替代 confirm 提交勾选状态。
+    let has_confirm_btn = actions
+        .iter()
+        .any(|a| matches!(a.action_type, UIActionType::Confirm));
+    let need_fallback_confirm = has_multi_select && !has_confirm_btn;
+    if need_fallback_confirm {
+        tracing::warn!(
+            "ChatUIActionsView: MultiSelect 无 confirm 按钮（LLM 违规），自动补「确定」按钮"
+        );
+    }
+    let fallback_action = UIAction {
+        id: FALLBACK_CONFIRM_ID.to_string(),
+        action_type: UIActionType::Confirm,
+        label: FALLBACK_CONFIRM_LABEL.to_string(),
+        description: None,
+        options: vec![],
+    };
 
     rsx! {
         div { class: Styles::chat_ui_actions,
@@ -149,6 +194,28 @@ pub fn ChatUIActionsView(
                 }
             }
 
+            // ── 兜底：MultiSelect 自动补的「确定」按钮（读取勾选状态）──
+            // 独立于下方按钮组渲染：不受 show_button_group（Input+Select 混搭）影响，
+            // 保证任何组合下多选都有提交入口。
+            if need_fallback_confirm {
+                div { class: Styles::action_buttons,
+                    {
+                        let fallback_action = fallback_action.clone();
+                        let build = build_multi_choice.clone();
+                        rsx! {
+                            Button {
+                                variant: ButtonVariant::Secondary,
+                                size: ButtonSize::Sm,
+                                onclick: move |_| {
+                                    on_action.call((fallback_action.clone(), build()));
+                                },
+                                "{FALLBACK_CONFIRM_LABEL}"
+                            }
+                        }
+                    }
+                }
+            }
+
             // ── Confirm / Select 按钮：flex-wrap 同行排列 ──
             if show_button_group {
                 div { class: Styles::action_buttons,
@@ -161,27 +228,16 @@ pub fn ChatUIActionsView(
                                     let display_label = label.clone();
                                     let desc = action.description.clone().unwrap_or_default();
                                     // 若伴随 MultiSelect，choice 取复选框勾选 ID 集合（含 value）
-                                    let checkbox_state = checkbox_state.clone();
-                                    let option_value_map = option_value_map.clone();
+                                    let build = build_multi_choice.clone();
+                                    let has_ms = has_multi_select;
                                     rsx! {
                                         Button {
                                             variant: ButtonVariant::Secondary,
                                             size: ButtonSize::Sm,
                                             title: if desc.is_empty() { None } else { Some(desc) },
                                             onclick: move |_| {
-                                                let choice = if has_multi_select {
-                                                    let state = checkbox_state.read();
-                                                    let values = option_value_map.read();
-                                                    let ids: Vec<String> = state.iter()
-                                                        .filter(|(_, &v)| v)
-                                                        .filter_map(|(k, _)| {
-                                                            values.get(k).and_then(|v| v.as_ref())
-                                                                // 有 value → id=value；无 value → 仅回传 id（schema 允许 value 缺省，不丢弃勾选项）
-                                                                .map(|val| format!("{}={}", k, val))
-                                                                .or_else(|| Some(k.clone()))
-                                                        })
-                                                        .collect();
-                                                    if ids.is_empty() { "none".to_string() } else { ids.join(",") }
+                                                let choice = if has_ms {
+                                                    build()
                                                 } else {
                                                     label.clone()
                                                 };

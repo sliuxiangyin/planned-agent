@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+use crate::command_resolver::resolve_command;
+
 /// 读取子进程 stderr 末尾内容的超时（毫秒）。
 ///
 /// 当子进程崩溃后，我们尝试从捕获的 stderr 管道中读取剩余数据。
@@ -20,15 +22,22 @@ const STDERR_DRAIN_TIMEOUT_MS: u64 = 500;
 
 /// 排空子进程 stderr 管道，返回剩余内容（如果有）。
 ///
+/// `prefix` 是 stderr 探测阶段已被消费的前缀字节（如探测"进程是否激活"
+/// 时读走的首字节），先回填再读取剩余，避免首字符丢失
+/// （如 `MODULE_NOT_FOUND` 变成 `ODULE_NOT_FOUND`）。
+///
 /// 仅返回**非空**结果；空 stderr 会返回 None 以避免污染 UI 显示。
-async fn drain_stderr(stderr: Option<ChildStderr>) -> Option<String> {
-    let mut stderr = stderr?;
-    let mut buf = String::new();
-    let _ = tokio::time::timeout(
-        Duration::from_millis(STDERR_DRAIN_TIMEOUT_MS),
-        stderr.read_to_string(&mut buf),
-    )
-    .await;
+async fn drain_stderr(stderr: Option<ChildStderr>, prefix: &[u8]) -> Option<String> {
+    let mut buf = String::from_utf8_lossy(prefix).into_owned();
+    if let Some(mut stderr) = stderr {
+        let mut rest = String::new();
+        let _ = tokio::time::timeout(
+            Duration::from_millis(STDERR_DRAIN_TIMEOUT_MS),
+            stderr.read_to_string(&mut rest),
+        )
+        .await;
+        buf.push_str(&rest);
+    }
     let trimmed = buf.trim();
     if trimmed.is_empty() {
         None
@@ -39,9 +48,16 @@ async fn drain_stderr(stderr: Option<ChildStderr>) -> Option<String> {
 
 /// MCP 冷启动链路的默认超时上限（秒）。
 ///
-/// 覆盖完整链：spawn 子进程 → npx 拉包（首次可达数十秒）→ 真实 MCP server 启动 → initialize 握手。
+/// 覆盖完整链：spawn 子进程 → npx 拉包（首次可达数十秒）→ MCP initialize 握手。
 /// 该常量是 `McpServerConfig::timeout_secs` 为 None 时的兜底。
-pub const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 120;
+pub const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 180;
+
+/// 握手阶段默认超时（秒）：子进程**无任何输出**时的提前失败线。
+///
+/// 一旦子进程 stderr 产生输出（进程已激活：npx 开始拉包 / server 打日志），
+/// 说明进程活着，改由 [`DEFAULT_CONNECT_TIMEOUT_SECS`] 耐心等待拉包完成；
+/// 若进程始终无输出（疑似卡死 / 静默失败），则在此时间内快速失败。
+pub const DEFAULT_HANDSHAKE_TIMEOUT_SECS: u64 = 30;
 
 /// MCP 客户端实现
 pub struct McpClientImpl {
@@ -116,17 +132,42 @@ impl McpClient for McpClientImpl {
     async fn connect(&mut self, config: McpServerConfig) -> Result<()> {
         info!("Connecting to MCP server: {} ({:?})", config.server_command, config.server_args);
 
-        // 1. 读取/兜底超时上限
+        // 1. 读取/兜底超时上限（两级，见 McpServerConfig 字段文档）
         let timeout_secs = config.timeout_secs.unwrap_or(DEFAULT_CONNECT_TIMEOUT_SECS);
+        let handshake_timeout_secs = config
+            .handshake_timeout_secs
+            .unwrap_or(DEFAULT_HANDSHAKE_TIMEOUT_SECS);
 
         // 2. spawn 子进程（npx / node / python 等）
         //    这一步的失败通常是命令不存在或权限问题，单独捕获以便于 UI 区分
         //
+        // 注意：spawn 前先按当前系统环境解析命令名，而不是直接 `Command::new(命令名)`：
+        // - Windows 下 `npx` 实为 `npx.cmd`（无 npx.exe），直接 spawn "npx" 会得到
+        //   模糊的 "program not found"；解析后拿到 npx.cmd 完整路径，std 识别
+        //   `.cmd`/`.bat` 会自动经 cmd.exe 包装执行，Windows 下也能正常拉起。
+        // - 命令确实不存在时，返回明确的"命令不存在: xxx"错误，而非裸 io::Error。
+        //
         // 注意：这里用 builder 而非 new()，目的是把 stderr 接管为 Stdio::piped()，
         //       这样子进程（如 npx / pdf-lib）崩溃时的真实报错能被我们读取并展示给用户，
         //       而不是仅仅通过 rmcp 的"connection closed"二手消息告诉用户。
-        let (transport, stderr_handle) = match TokioChildProcess::builder(
-            Command::new(&config.server_command).configure(|cmd| {
+        let resolved_command = match resolve_command(&config.server_command) {
+            Ok(p) => p,
+            Err(msg) => {
+                let err = ConnectionError::Spawn { reason: msg.clone() };
+                warn!(
+                    "MCP server '{}' 启动命令不存在: {} (command: {})",
+                    config.name, msg, config.server_command
+                );
+                *self.last_error.lock().await = Some(err);
+                anyhow::bail!(
+                    "Failed to spawn MCP server '{}' (command: {}): {}",
+                    config.name, config.server_command, msg
+                );
+            }
+        };
+
+        let (transport, mut stderr_handle) = match TokioChildProcess::builder(
+            Command::new(&resolved_command).configure(|cmd| {
                 for arg in &config.server_args {
                     cmd.arg(arg);
                 }
@@ -150,20 +191,74 @@ impl McpClient for McpClientImpl {
 
         // 3. 等待 MCP initialize 握手完成
         //    这一段覆盖：npx 拉包（首次可达数十秒）→ 真实 MCP server 启动 → initialize 握手
-        //    用 tokio::time::timeout 强制兜底，避免无限挂起
+        //
+        //    超时拆成两级（rmcp 的 serve 是不可拆分的单 future，无法直接分段）：
+        //    - `timeout_secs`（默认 180s）：冷启动**总**上限，全程硬兜底；
+        //    - `handshake_timeout_secs`（默认 30s）：子进程**无任何输出**时的提前失败线。
+        //      一旦 stderr 出现数据（进程已激活：npx 开始拉包 / server 打日志），
+        //      确认进程活着，切换回 `timeout_secs` 耐心等待。
+        //    用 tokio::select! 同时监听：serve 完成 / stderr 首个输出 / deadline 到期。
         let started = Instant::now();
-        let serve_result = tokio::time::timeout(
-            Duration::from_secs(timeout_secs),
-            ().serve(transport),
-        )
-        .await;
+        let hard_deadline = started + Duration::from_secs(timeout_secs);
+        let mut deadline = hard_deadline
+            .min(started + Duration::from_secs(handshake_timeout_secs));
 
-        // 无论成败，都尝试排空 stderr —— 拿到子进程崩溃时的真实错误（如 MODULE_NOT_FOUND）
-        let stderr_tail = drain_stderr(stderr_handle).await;
+        // serve future（内部完成 spawn → 拉包 → initialize 握手）
+        let serve_fut = ().serve(transport);
+        tokio::pin!(serve_fut);
+
+        // stderr 探测：只取第一个字节判断"进程是否激活"；
+        // serve 结束后仍会 drain 剩余内容作为 stderr_tail。
+        let mut probe = [0u8; 1];
+        // stderr 探测阶段实际读到的首字节数（供 drain 回填，避免首字符丢失）
+        let mut probe_read = 0usize;
+        let stderr_probe = async {
+            match stderr_handle.as_mut() {
+                Some(h) => h.read(&mut probe).await,
+                None => Ok(0),
+            }
+        };
+        tokio::pin!(stderr_probe);
+
+        let mut saw_stderr = false;
+        let mut stderr_probe_done = false;
+
+        let serve_result = loop {
+            // deadline 已到 → 超时
+            if Instant::now() >= deadline {
+                break None;
+            }
+            let sleep = tokio::time::sleep(deadline - Instant::now());
+            tokio::pin!(sleep);
+            tokio::select! {
+                _ = &mut sleep => break None,
+                res = &mut serve_fut => break Some(res),
+                n = &mut stderr_probe, if !saw_stderr && !stderr_probe_done => {
+                    match n {
+                        Ok(k) if k > 0 => {
+                            // 进程已激活：撤销提前失败线，交给总上限兜底
+                            saw_stderr = true;
+                            probe_read = k;
+                            deadline = hard_deadline;
+                        }
+                        _ => {
+                            // EOF（子进程已退出）或无 stderr 管道：不再探测
+                            stderr_probe_done = true;
+                        }
+                    }
+                }
+            }
+        };
+        // 释放对 stderr_handle 的借用，以便随后 drain 剩余内容
+        drop(stderr_probe);
+
+        // 无论成败，都尝试排空 stderr —— 拿到子进程崩溃时的真实错误（如 MODULE_NOT_FOUND）。
+        // 探测阶段读走的首字节作为前缀回填，保证完整内容（MODULE_NOT_FOUND 不会变成 ODULE_NOT_FOUND）。
+        let stderr_tail = drain_stderr(stderr_handle, &probe[..probe_read]).await;
 
         let client = match serve_result {
-            Ok(Ok(client)) => client,
-            Ok(Err(e)) => {
+            Some(Ok(client)) => client,
+            Some(Err(e)) => {
                 // 进程启动成功但 MCP 协议握手失败
                 // —— 常见原因是子进程在握手前就崩溃了（如 npm 包内部 require 失败）
                 let elapsed = started.elapsed().as_secs();
@@ -188,19 +283,26 @@ impl McpClient for McpClientImpl {
                     config.name, elapsed, reason
                 );
             }
-            Err(_elapsed) => {
-                // 超时：spawn 后等到 timeout_secs 仍未完成 initialize
+            None => {
+                // 超时：区分"进程无输出提前失败"与"总上限兜底"
                 let actual = started.elapsed().as_secs();
+                // 实际生效的上限（供错误消息展示）
+                let effective_limit = if saw_stderr {
+                    timeout_secs
+                } else {
+                    handshake_timeout_secs.min(timeout_secs)
+                };
                 let err = ConnectionError::Timeout {
                     elapsed_secs: actual,
-                    timeout_secs,
+                    timeout_secs: effective_limit,
                     stderr_tail: stderr_tail.clone(),
                 };
                 warn!(
-                    "MCP server '{}' startup timed out after {}s (limit {}s){}",
+                    "MCP server '{}' startup timed out after {}s (limit {}s, saw_stderr={}){}",
                     config.name,
                     actual,
-                    timeout_secs,
+                    effective_limit,
+                    saw_stderr,
                     stderr_tail
                         .as_deref()
                         .map(|s| format!("\n  stderr: {}", s.replace('\n', "\n  ")))
@@ -209,9 +311,9 @@ impl McpClient for McpClientImpl {
                 *self.last_error.lock().await = Some(err);
                 anyhow::bail!(
                     "MCP server '{}' startup timed out after {}s (limit {}s). \
-                     npx package download or handshake may be slow; \
-                     consider raising `timeout_secs` in the server config.",
-                    config.name, actual, timeout_secs
+                     If this is the first run (npx downloading packages), raise `timeout_secs`; \
+                     if the process produced no output at all, raise `handshake_timeout_secs`.",
+                    config.name, actual, effective_limit
                 );
             }
         };

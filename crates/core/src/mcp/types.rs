@@ -25,6 +25,17 @@ pub struct McpServerConfig {
     pub server_args: Vec<String>,
     pub transport: String,
     pub timeout_secs: Option<u64>,
+    /// 握手阶段超时（秒）。`None` 时使用 client 默认值（如 30s）。
+    ///
+    /// 与 [`McpServerConfig::timeout_secs`] 的关系：
+    /// - `timeout_secs` 是**冷启动总上限**（spawn 子进程 → npx 首次拉包 → initialize 握手），
+    ///   首次拉包慢时调大它；
+    /// - `handshake_timeout_secs` 是**进程激活前的提前失败线**：在子进程**没有任何输出**
+    ///   （stderr 无数据）的情况下，连接必须在此时限内完成，否则快速判失败；
+    ///   一旦子进程产生输出（进程已激活，如 npx 开始拉包 / 输出日志），
+    ///   改为按 `timeout_secs` 耐心等待。
+    #[serde(default)]
+    pub handshake_timeout_secs: Option<u64>,
     pub max_retries: Option<u32>,
     pub is_default: bool,
     pub tools_filter: Option<Vec<String>>,
@@ -99,8 +110,11 @@ impl ConnectionError {
         let base = match self {
             Self::Timeout { elapsed_secs, timeout_secs, .. } => format!(
                 "MCP server startup timed out after {}s (limit {}s). \
-                 npx package download or handshake may be slow; \
-                 consider raising `timeout_secs` in the server config.",
+                 This covers the full cold-start chain: process spawn, npx package \
+                 download on first run, and the MCP initialize handshake. \
+                 If first-run package download is slow, raise `timeout_secs`; \
+                 if the process starts but the handshake stalls (no output from the \
+                 subprocess), raise `handshake_timeout_secs` in the server config.",
                 elapsed_secs, timeout_secs
             ),
             Self::Spawn { reason } => {
