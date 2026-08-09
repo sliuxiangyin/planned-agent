@@ -9,7 +9,8 @@ use planned_agent_core::planner::coarse::{
 };
 use planned_agent_core::ai::AiClient;
 use planned_agent_core::prompt::{PromptManager, PromptContext};
-use planned_agent_core::types::{PlanContext, ChatCompletionRequest, Message, MessageRole, MessageContent};
+use planned_agent_core::ai::types::{ChatCompletionRequest, Message, MessageRole, MessageContent};
+use planned_agent_core::planner::types::PlanContext;
 use planned_agent_core::tool_registry::types::ToolCategory;
 use tracing::debug;
 
@@ -440,7 +441,7 @@ mod tests {
         async fn chat_completion(
             &self,
             request: ChatCompletionRequest,
-        ) -> Result<planned_agent_core::types::ChatCompletionResponse> {
+        ) -> Result<planned_agent_core::ai::types::ChatCompletionResponse> {
             // 捕获请求内容，用于后续断言
             *self.last_request.lock().unwrap() = Some(request);
 
@@ -492,16 +493,16 @@ mod tests {
                 "risk_level": "low"
             }"##;
 
-            Ok(planned_agent_core::types::ChatCompletionResponse {
+            Ok(planned_agent_core::ai::types::ChatCompletionResponse {
                 id: "test".to_string(),
                 object: "chat.completion".to_string(),
                 created: 0,
                 model: "test".to_string(),
-                choices: vec![planned_agent_core::types::Choice {
+                choices: vec![planned_agent_core::ai::types::Choice {
                     index: 0,
-                    message: planned_agent_core::types::Message {
-                        role: planned_agent_core::types::MessageRole::Assistant,
-                        content: Some(planned_agent_core::types::MessageContent::Text {
+                    message: planned_agent_core::ai::types::Message {
+                        role: planned_agent_core::ai::types::MessageRole::Assistant,
+                        content: Some(planned_agent_core::ai::types::MessageContent::Text {
                             text: response_json.to_string(),
                         }),
                         tool_calls: None,
@@ -570,14 +571,14 @@ mod tests {
                 "risk_level": "low"
             }"##;
             use futures::stream;
-            let chunk = planned_agent_core::types::ChatCompletionChunk {
+            let chunk = planned_agent_core::ai::types::ChatCompletionChunk {
                 id: "capture-mock".to_string(),
                 object: "chat.completion.chunk".to_string(),
                 created: 0,
                 model: "mock-model".to_string(),
-                choices: vec![planned_agent_core::types::ChunkChoice {
+                choices: vec![planned_agent_core::ai::types::ChunkChoice {
                     index: 0,
-                    delta: planned_agent_core::types::DeltaMessage {
+                    delta: planned_agent_core::ai::types::DeltaMessage {
                         role: None,
                         content: Some(text.to_string()),
                         tool_calls: None,
@@ -611,7 +612,7 @@ mod tests {
 
     #[async_trait]
     impl AiClient for MockAiClient {
-        async fn chat_completion(&self, _request: ChatCompletionRequest) -> Result<planned_agent_core::types::ChatCompletionResponse> {
+        async fn chat_completion(&self, _request: ChatCompletionRequest) -> Result<planned_agent_core::ai::types::ChatCompletionResponse> {
             // 返回模拟响应
             let response_json = "{
                 \"title\": \"测试计划\",
@@ -630,16 +631,16 @@ mod tests {
                 \"risk_level\": \"low\"
             }";
 
-            Ok(planned_agent_core::types::ChatCompletionResponse {
+            Ok(planned_agent_core::ai::types::ChatCompletionResponse {
                 id: "test".to_string(),
                 object: "chat.completion".to_string(),
                 created: 0,
                 model: "test".to_string(),
-                choices: vec![planned_agent_core::types::Choice {
+                choices: vec![planned_agent_core::ai::types::Choice {
                     index: 0,
-                    message: planned_agent_core::types::Message {
-                        role: planned_agent_core::types::MessageRole::Assistant,
-                        content: Some(planned_agent_core::types::MessageContent::Text {
+                    message: planned_agent_core::ai::types::Message {
+                        role: planned_agent_core::ai::types::MessageRole::Assistant,
+                        content: Some(planned_agent_core::ai::types::MessageContent::Text {
                             text: response_json.to_string(),
                         }),
                         tool_calls: None,
@@ -674,14 +675,14 @@ mod tests {
                 "risk_level": "low"
             }"##;
             use futures::stream;
-            let chunk = planned_agent_core::types::ChatCompletionChunk {
+            let chunk = planned_agent_core::ai::types::ChatCompletionChunk {
                 id: "mock".to_string(),
                 object: "chat.completion.chunk".to_string(),
                 created: 0,
                 model: "mock-model".to_string(),
-                choices: vec![planned_agent_core::types::ChunkChoice {
+                choices: vec![planned_agent_core::ai::types::ChunkChoice {
                     index: 0,
-                    delta: planned_agent_core::types::DeltaMessage {
+                    delta: planned_agent_core::ai::types::DeltaMessage {
                         role: None,
                         content: Some(text.to_string()),
                         tool_calls: None,
@@ -977,7 +978,7 @@ mod tests {
         async fn chat_completion(
             &self,
             _request: ChatCompletionRequest,
-        ) -> Result<planned_agent_core::types::ChatCompletionResponse> {
+        ) -> Result<planned_agent_core::ai::types::ChatCompletionResponse> {
             unimplemented!("streaming mock 仅实现 chat_completion_stream")
         }
 
@@ -986,17 +987,17 @@ mod tests {
             _request: ChatCompletionRequest,
         ) -> Result<planned_agent_core::ai::ChatCompletionStream> {
             use futures::stream;
-            let items: Vec<planned_agent_core::types::ChatCompletionChunk> = self
+            let items: Vec<planned_agent_core::ai::types::ChatCompletionChunk> = self
                 .chunks
                 .iter()
-                .map(|text| planned_agent_core::types::ChatCompletionChunk {
+                .map(|text| planned_agent_core::ai::types::ChatCompletionChunk {
                     id: "stream-mock".to_string(),
                     object: "chat.completion.chunk".to_string(),
                     created: 0,
                     model: "mock-stream".to_string(),
-                    choices: vec![planned_agent_core::types::ChunkChoice {
+                    choices: vec![planned_agent_core::ai::types::ChunkChoice {
                         index: 0,
-                        delta: planned_agent_core::types::DeltaMessage {
+                        delta: planned_agent_core::ai::types::DeltaMessage {
                             role: None,
                             content: Some(text.clone()),
                             tool_calls: None,

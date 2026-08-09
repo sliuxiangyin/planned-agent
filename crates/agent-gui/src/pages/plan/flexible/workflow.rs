@@ -494,9 +494,19 @@ async fn run_trace_extract_stage(
 ) -> Option<String> {
     workflow.set_phase(WorkflowPhase::TraceExtracting);
 
+    let input_params_enabled = *workflow.input_params_enabled.read();
+    let output_params_enabled = *workflow.output_params_enabled.read();
     let param_hints = build_param_hints(workflow);
     let ctx = PromptContext::new()
-        .with_variable("param_hints", serde_json::Value::String(param_hints));
+        .with_variable("param_hints", serde_json::Value::String(param_hints))
+        .with_variable(
+            "input_params_enabled",
+            serde_json::Value::Bool(input_params_enabled),
+        )
+        .with_variable(
+            "output_params_enabled",
+            serde_json::Value::Bool(output_params_enabled),
+        );
 
     let Some(msg) =
         render_message(chat_svc, "flexible/flexible_trace_extract", &ctx).await

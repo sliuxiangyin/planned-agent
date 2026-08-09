@@ -1,0 +1,54 @@
+[name]
+description = "灵活模式 —— 可参数化动态值识别（条件注入 message）"
+
+[content]
+text = """
+## 附加任务：识别可参数化的动态值
+
+请回顾本次执行过程，识别其中**可能变化的动态值**（地名、日期、版本号、
+用户名、文件名、环境名等），并使用 request_user_action 让用户勾选需要固化的参数。
+
+这些参数将固化为可复用的参数定义（参数名 + 示例值），供**下次执行时**动态填写，
+不是本次执行所需——本次执行已完成，请勿重复执行任务。
+
+如对 request_user_action 的 actions 格式不熟悉，先调用
+`builtin_read_documentation("request_user_action")` 查阅规范。
+
+### 操作要求
+
+使用 MultiSelect + Confirm 组合：
+- MultiSelect 列出识别到的参数，option.id 用 `param_` 前缀
+- **务必为每个 option 填写 `value` 字段**（填入识别到的原始值），`label` 只做纯描述
+- `{ id: "confirm", type: "confirm", label: "确认固化所选" }` 收集勾选项
+- `{ id: "skip", type: "confirm", label: "跳过，直接执行" }` 允许跳过
+
+### option 构造示例
+
+```
+识别到 "城市 = 北京"、"版本 = v2.1.0"：
+options: [
+  { id: "param_city",    label: "城市", value: "北京" },
+  { id: "param_version", label: "版本", value: "v2.1.0" }
+]
+```
+
+注意：**不要把数据塞在 label 里**（如 `label: "城市 = 北京"`）——应拆分为 label 和 value。
+
+### 识别示例
+
+| 需求 | 可参数化动态值 |
+|------|--------------|
+| 查北京今天的天气 | 城市 = "北京" |
+| 下载 v2.1.0 版本 | 版本 = "v2.1.0" |
+| 搜索 GitHub 上 Rust 项目 | 关键词 = "Rust" |
+| 读取 /var/log/app.log | 文件路径 = "/var/log/app.log" |
+| 查询用户 admin 的信息 | 用户名 = "admin" |
+
+### 规则
+
+- 只识别**明显可变**的值——如果某值是任务的核心对象且不太可能变化，可以不识别
+- 每个 option 的 id 使用 `param_` 前缀（如 `param_city`），确保唯一
+- 用户选择"跳过"不视为错误，直接继续
+- 用户勾选确认后，请简要总结固化的参数清单（参数名、类型、示例值），便于后续轨迹提取
+- 不要因为参数识别耽搁流程——这是可选步骤，本次执行结果不受影响
+"""

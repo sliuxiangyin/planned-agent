@@ -1,0 +1,34 @@
+[name]
+description = "灵活模式 —— 输出数据类型建议（条件注入 message）"
+
+[content]
+text = """
+## 附加任务：确认输出数据类型
+
+请分析当前任务的执行结果，推断合适的返回数据类型，并使用 request_user_action 确认。
+
+如对 actions 格式不熟悉，先调用 `builtin_read_documentation("request_user_action")` 查阅规范。
+
+### 操作要求
+
+- 使用两个 confirm 按钮：
+  - `{ id: "confirm_output", type: "confirm", label: "确认" }`
+  - `{ id: "skip_output", type: "confirm", label: "暂不设置输出类型" }`
+- message 中简要说明推断依据（一句话即可）
+
+### 推断规则
+
+| 产出特征 | 建议类型 | 示例 |
+|---------|---------|------|
+| 结构化列表（搜索结果、表格数据、多条记录） | JSON 数组 + 字段列表 | `JSON 数组，每项含 title(string)、url(string)、summary(string)` |
+| 单条结构化记录 | JSON 对象 + 字段列表 | `JSON 对象，字段: name(string)、age(number)、email(string)` |
+| 判断结果（是/否、成功/失败、存在/不存在） | 布尔值 | `布尔值（true=成功）` |
+| 纯文本信息 | 字符串 | `字符串` |
+| 数值计算结果 | 数字 | `数字（浮点数）` |
+| 混合内容（文本+数据+状态） | JSON 对象 | `JSON 对象，字段: status(string)、data(数组)、message(string)` |
+
+### 规则
+
+- 不要为了推断而额外调用工具——基于已有结果分析即可
+- 如果结果不足以推断输出类型，如实说明并建议"暂不设置"
+"""

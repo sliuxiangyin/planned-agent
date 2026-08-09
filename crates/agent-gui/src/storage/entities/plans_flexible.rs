@@ -23,6 +23,9 @@ pub struct Model {
     /// 输出格式描述（占位预留：多计划关联执行时描述本计划产出格式，当前未实现读写逻辑）
     #[sea_orm(default_value = "")]
     pub output_schema: String,
+    /// 输入参数定义 JSON（计划执行所需的外部输入参数，保存后供下次执行动态替换参数）
+    #[sea_orm(default_value = "")]
+    pub input_schema: String,
     pub created_at: String,
 }
 

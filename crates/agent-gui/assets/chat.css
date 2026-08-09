@@ -1,0 +1,139 @@
+/* ── Chat 测试页 ──────────────────────────────────────────────── */
+
+.chat-test-page {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    background: var(--primary-color-3);
+    overflow: hidden;
+}
+
+/* ── 顶栏 ─────────────────────────────────────────────────────── */
+.chat-test-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    background: var(--primary-color-2);
+    border-bottom: 1px solid var(--primary-color-6);
+    flex-shrink: 0;
+}
+
+.chat-test-topbar__left {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
+}
+
+.chat-test-topbar__logo {
+    font-size: 1.1rem;
+}
+
+.chat-test-topbar__title {
+    margin: 0;
+    font-size: 1.05rem;
+    color: var(--secondary-color-3);
+}
+
+.chat-test-topbar__subtitle {
+    font-size: 0.78rem;
+    color: var(--secondary-color-4);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.chat-test-topbar__right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+}
+
+.chat-test-topbar__template {
+    font-size: 0.75rem;
+    color: var(--secondary-color-4);
+    background: var(--primary-color-4);
+    border: 1px solid var(--primary-color-6);
+    border-radius: 6px;
+    padding: 3px 8px;
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ── 内嵌 request_user_action 卡片 ─────────────────────────────── */
+.chat-message--interaction {
+    align-self: flex-start;
+    max-width: 92%;
+    background: var(--primary-color-4);
+    border: 1px dashed var(--secondary-color-4);
+}
+
+/* ── 输入区 ───────────────────────────────────────────────────── */
+.chat-input-row {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-end;
+    gap: 10px;
+}
+
+.chat-input-row textarea {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.chat-input-row__actions {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 6px;
+    padding-bottom: 2px;
+}
+
+/* ── 工具栏：左侧提示词选择器 + 右侧清空 ────────────────────────── */
+.chat-toolbar {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.chat-toolbar__left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
+.chat-toolbar__label {
+    font-size: 0.78rem;
+    color: var(--secondary-color-4);
+    white-space: nowrap;
+}
+
+.chat-toolbar__select {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 420px;
+    background: var(--primary-color-4);
+    color: var(--secondary-color-3);
+    border: 1px solid var(--primary-color-6);
+    border-radius: 6px;
+    padding: 5px 8px;
+    font-size: 0.8rem;
+    cursor: pointer;
+}
+
+.chat-toolbar__select option {
+    background: var(--primary-color-3);
+    color: var(--secondary-color-3);
+}
+
+.chat-toolbar__right {
+    flex: 0 0 auto;
+}

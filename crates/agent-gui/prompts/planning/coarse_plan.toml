@@ -196,6 +196,7 @@ available_categories = { description = "可用的工具分类列表", required =
 
 [output_schema]
 format = "json"
+constraints = "请确保返回有效的JSON格式，不要包含其他文本说明"
 
 [output_schema.json_schema]
 type = "object"
@@ -350,6 +351,3 @@ text = """
     }
   }
 }"""
-
-[output_schema.constraints]
-text = "请确保返回有效的JSON格式，不要包含其他文本说明"

@@ -8,10 +8,10 @@ text = """
 执行轨迹总结：
 {{ trace_summary }}
 
-请先输出「输出格式」段落，再输出粗粒度计划 JSON。
+请先输出「输出格式」段落（仅当执行轨迹包含「输出」节时），再输出粗粒度计划 JSON。
 
 ## 输出格式
-（用自然语言描述本次计划的最终输出格式。例如："JSON 对象数组，每项含 name(string)、url(string)、summary(string)"，或 "Markdown 格式的综合分析报告"。如果执行轨迹中未明确输出格式，请根据任务意图合理推断。）
+（用自然语言描述本次计划的最终输出格式。例如："JSON 对象数组，每项含 name(string)、url(string)、summary(string)"，或 "Markdown 格式的综合分析报告"。**仅当执行轨迹包含「输出」节时输出本段落**，优先从该节提取；若轨迹中无「输出」节，表示输出由执行时实时决定、不固化——省略本段落，不要凭任务意图推断。）
 
 ---
 
@@ -33,9 +33,8 @@ text = """
 - 如果步骤需要先用一个工具获取数据，再用另一个工具处理，就不是原子动作
 
 输入参数（input_schema）约束：
-- 如果本计划执行时需要外部输入参数（用户提供的动态值，如搜索关键词、文件路径、数值参数等），
-  必须在 JSON 顶层输出 `input_schema` 字段：一个 JSON 对象，键为参数名（snake_case），
-  值为参数定义对象 {"type": "string|integer|number|boolean|array|object", "description": "参数说明", "example": "示例值"}。
+- **仅当执行轨迹包含「输入」节时输出 `input_schema`**，优先从该节提取参数名与示例值（已固化参数以 `{% raw %}{{param_name}}{% endraw %}` 占位符表示）。
+- 轨迹中无「输入」节表示输入固定、无需参数化：省略 input_schema 字段，不要凭任务意图推断。
 - 无外部输入参数的计划可省略该字段；input_schema 描述"计划需要什么参数"，不是步骤结果。
 """
 
@@ -44,6 +43,7 @@ trace_summary = { description = "AI 执行轨迹的完整总结文本", required
 
 [output_schema]
 format = "json"
+constraints = "「输出格式」段落之后的其余内容必须为有效JSON，不要包含其他说明文本"
 
 [output_schema.json_schema]
 type = "object"
@@ -195,6 +195,3 @@ text = """
     }
   }
 }"""
-
-[output_schema.constraints]
-text = "请确保返回有效的JSON格式，不要包含其他文本说明"
