@@ -1,62 +1,106 @@
 [name]
-description = "灵活模式 —— 可参数化动态值识别（条件注入 message）"
+description = "灵活模式 —— 可参数化动态值识别（条件阶段 system 注入）"
 
 [content]
 text = """
-## 附加任务：识别可参数化的动态值
+## 当前阶段：识别可参数化的动态值
 
-请回顾本次执行过程，识别其中**可能变化的动态值**（地名、日期、版本号、
-用户名、文件名、环境名等），并使用 request_user_action 让用户勾选需要固化的参数。
+请**对照用户需求和执行关键步骤**，识别其中可能变化的动态值，并用 request_user_action 确认。
 
-这些参数将固化为可复用的参数定义（参数名 + 示例值），供**下次执行时**动态填写，
-不是本次执行所需——本次执行已完成，请勿重复执行任务。
+如对 actions 格式不熟悉，先调用 `builtin_read_documentation("request_user_action")` 查阅规范。
 
-如对 request_user_action 的 actions 格式不熟悉，先调用
-`builtin_read_documentation("request_user_action")` 查阅规范。
+---
 
-### 操作要求
+### 第一步：分析可参数化的动态值
 
-使用 MultiSelect + Confirm 组合：
-- MultiSelect 列出识别到的参数，option.id 用 `param_` 前缀
-- **务必为每个 option 填写 `value` 字段**（填入识别到的原始值），`label` 只做纯描述
-- `{ id: "confirm", type: "confirm", label: "确认固化所选" }` 收集勾选项
-- `{ id: "skip", type: "confirm", label: "跳过，直接执行" }` 允许跳过
+从需求描述和执行步骤中，找出**换一个值整个任务就变了的输入**：
 
-### option 构造示例
+| 应参数化 | 不应参数化 |
+|---------|-----------|
+| 来自用户输入的核心变量（搜索关键词、文件名、URL、查询条件） | 固定操作路径（"点击搜索按钮"、"打开首页"） |
+| 数值型约束（N 条结果、超时秒数） | 结构性选择器（CSS selector、API 端点路径） |
+| 地名、日期、版本号、用户名、环境名 | 固定工具参数（编码格式、排序方向等） |
+
+参数命名规范：
+- 用中文描述含义，如"搜索关键词"、"目标文件路径"、"结果条数"
+- 提取原始值作为默认值，如"搜索关键词 = 安仁乡"
+
+---
+
+### 第二步：构造 request_user_action（首次交互）
+
+#### 2.1 actions 结构（三部分缺一不可）
+
+**① multi_select — 列出识别到的参数：**
+- `id` 用 `param_` 前缀，如 `param_keyword`
+- `label` 写参数名（纯描述），如 `搜索关键词`
+- `value` 填入识别到的原始值，如 `安仁乡`
+- 不要把值塞在 label 里（如 `label: "搜索关键词 = 安仁乡"` 是错误的）
+
+**② input — 手动补充参数（必须提供）：**
 
 ```
-识别到 "城市 = 北京"、"版本 = v2.1.0"：
-options: [
-  { id: "param_city",    label: "城市", value: "北京" },
-  { id: "param_version", label: "版本", value: "v2.1.0" }
-]
+{ id: "param_custom", type: "input", label: "手动补充参数（可选）",
+  description: "如需补充未列出的参数，请在此输入（如：增加 超时时间=30，类型 number）" }
 ```
 
-注意：**不要把数据塞在 label 里**（如 `label: "城市 = 北京"`）——应拆分为 label 和 value。
+**③ confirm — 两个按钮：**
 
-### 识别示例
+- `{ id: "confirm", type: "confirm", label: "确认固化所选" }`
+- `{ id: "skip", type: "confirm", label: "跳过" }`
 
-| 需求 | 可参数化动态值 |
-|------|--------------|
-| 查北京今天的天气 | 城市 = "北京" |
-| 下载 v2.1.0 版本 | 版本 = "v2.1.0" |
-| 搜索 GitHub 上 Rust 项目 | 关键词 = "Rust" |
-| 读取 /var/log/app.log | 文件路径 = "/var/log/app.log" |
-| 查询用户 admin 的信息 | 用户名 = "admin" |
+#### 2.2 未识别到参数时
 
-### 规则
+message 说明"未识别到明显可参数化的动态值"，只提供 `input` + `confirm`（标签改为"确认（无参数）"）+ `skip`，不列 multi_select。
 
-- 只识别**明显可变**的值——如果某值是任务的核心对象且不太可能变化，可以不识别
-- 每个 option 的 id 使用 `param_` 前缀（如 `param_city`），确保唯一
-- 用户选择"跳过"不视为错误，直接继续
-- 用户勾选确认后，请简要总结固化的参数清单（参数名、类型、示例值），便于后续轨迹提取
-- 不要因为参数识别耽搁流程——这是可选步骤，本次执行结果不受影响
+---
+
+### 第三步：验证用户补充的参数
+
+收到用户响应后，如果 `param_custom` 非空，逐条验证：
+
+| 验证项 | 规则 |
+|-------|------|
+| 参数是否与需求相关 | 新增参数必须在需求或执行步骤中有对应语义（如需求涉及"搜索"，才接受"搜索关键词"类参数） |
+| 参数名是否合理 | 不能与已有参数重名，不能为空，建议中文描述 |
+| 类型推断 | 如果用户未指定类型，根据默认值推断（如"30"→number，"安仁乡"→string） |
+
+验证结果处理：
+
+- **全部合法**：合并到参数清单，进入第四步输出总结
+- **任一条不合法**：再调用一次 `request_user_action`，本轮 actions 仅包含：
+  - message 逐条标注 ✅/❌ 及原因（如"❌ '超时时间' 与当前需求无关，需求中不涉及超时操作"）
+  - `input`：让用户重新输入（id 仍用 `param_custom`）
+  - `{ id: "confirm", type: "confirm", label: "确认（放弃手动补充）" }`
+  - `{ id: "skip", type: "confirm", label: "跳过" }`
+  - **禁止再次提供 multi_select**
+- 重试后仍有不合法内容 → 放弃手动补充，按默认参数输出总结
+
+---
+
+### 第四步：输出总结（确认后必须输出，强制）
+
+用户确认通过后，在**最后一条回复**中严格输出以下 JSON，
+只输出 JSON 本身，不要 markdown 代码块围栏（```json），不要任何其他文字：
+
+{"parameters": [{"name": "<参数名>", "type": "<类型>", "value": "<默认值>"}]}
+
+**parameters**：参数数组，每项含 name（中文描述）、type（string/number/boolean）、value（原始值）。用户的手动补充/修改应直接合并到数组中（如修改参数名、增减参数）
+
+未固化参数时输出：
+{"parameters": [], "status": "no_params"}
+
+用户选择「跳过」时输出：
+{"parameters": [], "status": "skipped"}
+
+---
 
 ### 强制要求（必须遵守）
 
-- **必须**调用 `request_user_action` 结束本阶段对话，禁止用纯文本直接结束。
-- 即使未识别到任何可参数化的动态值，也必须调用一次 `request_user_action`：
-  message 说明"未识别到明显可参数化的动态值"，并仅提供
-  `{ id: "skip", type: "confirm", label: "跳过" }` 让用户确认。
-- 无论任务执行过程是否被截断/中断，本阶段都必须以上述方式给用户确认机会。
+- **必须**调用 `request_user_action` 发起首次交互，禁止用纯文本直接结束
+- **识别到参数时，必须用 `multi_select` 列出**，配 `input` + `confirm` / `skip` 三个部分；禁止只发 confirm 而不展示选项
+- 未识别到参数时：message 说明原因，照常提供 `input` + `confirm` / `skip`（不列 multi_select）
+- 用户确认后（含手动补充验证通过），必须输出 JSON 格式总结并结束，**禁止在总结后再调用 `request_user_action`**
+- 手动补充验证不合法时，最多重试一次；第二次仍不合法则放弃手动补充
+- option 的 `value` 内避免使用英文逗号 `,` 和等号 `=`
 """

@@ -1,7 +1,23 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use crate::tool_registry::types::ToolCategory;
+
+/// 容错解析推荐工具分类：LLM 可能输出枚举外的值（如 "Search"、"Web Scraping"），
+/// 未知值直接丢弃，避免整个计划因单个字段反序列化失败而无法保存。
+fn deserialize_tool_categories<'de, D>(deserializer: D) -> Result<Option<Vec<ToolCategory>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values: Option<Vec<String>> = Option::deserialize(deserializer)?;
+    Ok(values.map(|list| {
+        list.into_iter()
+            .filter_map(|s| {
+                serde_json::from_value::<ToolCategory>(serde_json::Value::String(s)).ok()
+            })
+            .collect()
+    }))
+}
 
 /// 计划复杂度
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -53,7 +69,8 @@ pub struct CoarseGrainedStep {
     /// 数据需求
     pub data_requirements: Vec<DataRequirement>,
     /// 推荐的工具分类（可选，用于分类过滤）
-    #[serde(default)]
+    /// LLM 可能输出枚举外的值，容错反序列化：未知值丢弃，不阻塞整个计划保存
+    #[serde(default, deserialize_with = "deserialize_tool_categories")]
     pub recommended_tool_categories: Option<Vec<ToolCategory>>,
 }
 
@@ -85,6 +102,10 @@ pub struct CoarseGrainedPlan {
     /// 下次执行时动态替换参数、以及多计划工作流的输入对接。
     #[serde(default)]
     pub input_schema: Option<Value>,
+    /// 执行指导：灵活执行阶段记录的步骤与工具路径，
+    /// 计划执行时用于参考，防止跑偏。
+    #[serde(default)]
+    pub execution_guide: Option<String>,
 }
 
 /// 计划验证结果
@@ -118,6 +139,7 @@ impl CoarseGrainedPlan {
             risk_level,
             output_schema: None,
             input_schema: None,
+            execution_guide: None,
         }
     }
 

@@ -44,7 +44,9 @@ use crate::chat::event::ChatEvent;
 pub struct ChatResponse {
     /// 最终 assistant 消息。
     ///
-    /// 若因 `max_tool_rounds` 截断,此消息可能仍含未执行的 `tool_calls`。
+    /// 若因 `max_tool_rounds` 截断，截断轮含未执行 `tool_calls` 的 assistant
+    /// 消息会被移除（避免向模型暴露未闭合的 tool_calls），故此处取到的是
+    /// 截断前最后一轮已完成的 assistant 消息。
     pub message: Message,
     /// 完整消息历史(含 system / user / assistant(含 tool_calls) / tool 等
     /// 所有中间消息)。
@@ -169,8 +171,9 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
 
     /// 派生一个带 `context` 注入的副本。
     ///
-    /// 灵活模式第二阶段传入上版本四字段（todos/summary/params/output_schema），
-    /// 渲染到 `flexible_system.toml` 的 `{{ context }}` 变量。
+    /// 灵活模式需求分析阶段曾把上版本四字段（todos/summary/params/output_schema）
+    /// 渲染到 system 模板的 `{{ context }}` 变量；阶段隔离后改为由 workflow
+    /// 手动附加到 user 消息（`build_context_string`）。本方法保留供其他调用方使用。
     /// `cancelled` 与源实例共享，参见 [`Self::with_allowed_tools`]。
     pub fn with_context(&self, context: Option<String>) -> Self {
         Self {
@@ -197,6 +200,18 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         context: &PromptContext,
     ) -> Result<String> {
         self.prompt_manager.render(template_name, context).await
+    }
+
+    /// 按模板声明的 `[output_schema]` 解析 LLM 响应（自动去 markdown 围栏 + 反序列化）。
+    ///
+    /// 与 `render_message_template` 同款透传：模板定义了 `output_schema` 才能可靠解析；
+    /// 未定义时返回 Err。调用方应保证模板名与响应来源一致。
+    pub async fn parse_response<T: serde::de::DeserializeOwned>(
+        &self,
+        template_name: &str,
+        response: &str,
+    ) -> Result<T> {
+        self.prompt_manager.parse_response(template_name, response).await
     }
 
     /// 请求取消当前正在进行的聊天流。
@@ -260,6 +275,14 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
 
             // ── 构造请求 ──
             let tools = self.build_tool_definitions();
+            // 调试：打印本轮暴露给 AI 的工具名（验证白名单过滤是否生效，
+            // 尤其排查受限阶段（如需求分析）是否泄漏了 MCP 工具）
+            info!(
+                "chat_with_callback round={}: 暴露给 AI 的工具({}): {:?}",
+                round,
+                tools.len(),
+                tools.iter().map(|t| t.function.name.as_str()).collect::<Vec<_>>()
+            );
             let req = ChatCompletionRequest {
                 model: ai_client.model_name().to_string(),
                 messages: history.clone(),
@@ -441,6 +464,15 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
                 if let Some(last) = history.last() {
                     if matches!(last.role, MessageRole::Assistant)
                         && last.tool_calls.is_some()
+                        // 仅当历史中还有其他 assistant 消息时才移除：
+                        // max_tool_rounds 极小（如 1）时首轮即截断，pop 会删掉
+                        // 唯一一条 assistant，导致下方 ChatResponse.message 构造
+                        // 找不到 assistant 而返回 Err（截断应返回卡片而非报错）。
+                        && history
+                            .iter()
+                            .filter(|m| matches!(m.role, MessageRole::Assistant))
+                            .count()
+                            > 1
                     {
                         history.pop();
                     }
@@ -741,16 +773,22 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
     /// `CoarseGrainedPlan::output_schema` 承载，input_schema 由
     /// `CoarseGrainedPlan::input_schema` 承载（JSON 序列化），首次执行时可能为空串。
     ///
+    /// `output_schema_hint`：用户确认的输出格式描述（输出确认阶段产物），
+    /// 非空时注入 `flexible_to_coarse` 模板作为「输出格式」段落的优先依据。
+    ///
     /// 调用方无需直接依赖 `planned_agent_core::planner::coarse` 类型。
     pub async fn generate_coarse_plan_from_trace(
         &self,
         trace_summary: &str,
+        output_schema_hint: Option<&str>,
     ) -> Result<(String, String, String)> {
         use crate::planner::coarse::LlmCoarsePlanner;
 
         let ai_client = self.resolve_ai_client()?;
         let planner = LlmCoarsePlanner::new(ai_client, self.prompt_manager.clone());
-        let plan = planner.generate_from_trace(trace_summary).await?;
+        let plan = planner
+            .generate_from_trace(trace_summary, output_schema_hint)
+            .await?;
         let output_schema = plan.output_schema.clone().unwrap_or_default();
         let input_schema = plan
             .input_schema
@@ -868,11 +906,11 @@ mod tests {
         let derived_tools =
             svc.with_allowed_tools(Some(vec!["request_user_action".to_string()]));
         let derived_system =
-            svc.with_system_prompt_template(Some("flexible/flexible_system".to_string()));
+            svc.with_system_prompt_template(Some("flexible/flexible_execute".to_string()));
         let derived_ctx = svc.with_context(Some("ctx".to_string()));
         // 链式派生：模拟 run_pipeline 中 base_svc = chat_svc.with_system_prompt_template().with_context()
         let chain = svc
-            .with_system_prompt_template(Some("flexible/flexible_system".to_string()))
+            .with_system_prompt_template(Some("flexible/flexible_execute".to_string()))
             .with_context(Some("ctx".to_string()))
             .with_allowed_tools(None);
 

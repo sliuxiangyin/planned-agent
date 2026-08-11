@@ -41,6 +41,8 @@ pub struct ExecutionViewProps {
     pub pending: Option<PendingUIState>,
     /// 当前阶段的 AI 输出文本（非 Execute 阶段使用）
     pub phase_output: String,
+    /// 各阶段已完成的 AI 输出（Done 卡片展开查看）
+    pub stage_outputs: Vec<(WorkflowPhase, String)>,
     /// 是否启用输入参数识别
     pub input_params_enabled: bool,
     /// 是否启用输出类型建议
@@ -79,6 +81,87 @@ fn pretty_data(v: &serde_json::Value) -> String {
     }
 }
 
+/// 渲染执行步骤列表（Execute 阶段 active body 与 Done 展开区共用）。
+fn render_steps_list(steps: &[ExecutionStep]) -> Element {
+    rsx! {
+        for step in steps {
+            {
+                let duration_str = step.duration_ms
+                    .map(|ms| format!("{:.1}s", ms as f64 / 1000.0))
+                    .unwrap_or_else(|| "—".to_string());
+                rsx! {
+                    div {
+                        class: "workflow-step {status_class(&step.status)}",
+                        div { class: "workflow-step__header",
+                            span {
+                                class: "workflow-step__icon",
+                                "{status_icon(&step.status)}"
+                            }
+                            span { class: "workflow-step__index",
+                                "#{step.index}"
+                            }
+                            span { class: "workflow-step__tool",
+                                "{step.tool_name}"
+                            }
+                            span { class: "workflow-step__duration",
+                                "{duration_str}"
+                            }
+                        }
+                        if !step.params_summary.is_empty() {
+                            div { class: "workflow-step__params",
+                                "→ {step.params_summary}"
+                            }
+                        }
+                        if !step.result_summary.is_empty() {
+                            div { class: "workflow-step__result",
+                                if matches!(step.status, StepStatus::Warning | StepStatus::Failed) {
+                                    "! "
+                                }
+                                "{step.result_summary}"
+                            }
+                        }
+                        if let Some(ref detail) = step.warning_detail {
+                            div { class: "workflow-step__warning-detail",
+                                "  调整: {detail}"
+                            }
+                        }
+                        // ── 完整数据展开区（仅步骤完成且有数据时显示） ──
+                        if step.params_data.is_some() || step.result_data.is_some() {
+                            details { class: "workflow-step__expand",
+                                summary { class: "workflow-step__expand-toggle",
+                                    "查看完整数据"
+                                }
+                                div { class: "workflow-step__expand-body",
+                                    if let Some(params) = &step.params_data {
+                                        div { class: "workflow-step__expand-section",
+                                            div { class: "workflow-step__expand-label",
+                                                "参数"
+                                            }
+                                            pre { class: "workflow-step__expand-pre",
+                                                "{pretty_data(params)}"
+                                            }
+                                        }
+                                    }
+                                    if let Some(result) = &step.result_data {
+                                        div { class: "workflow-step__expand-section",
+                                            div { class: "workflow-step__expand-label",
+                                                "输出"
+                                            }
+                                            pre { class: "workflow-step__expand-pre",
+                                                "{pretty_data(result)}"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ── 组件 ──────────────────────────────────────────────────────────────────────
 
 #[component]
@@ -108,7 +191,7 @@ pub fn ExecutionView(props: ExecutionViewProps) -> Element {
     if props.output_params_enabled {
         phases.push(PhaseEntry { phase: WorkflowPhase::OutputSuggesting, icon: "📤", title: "输出类型" });
     }
-    phases.push(PhaseEntry { phase: WorkflowPhase::TraceExtracting, icon: "📝", title: "轨迹提取" });
+    phases.push(PhaseEntry { phase: WorkflowPhase::RequirementFinalizing, icon: "📋", title: "汇总需求" });
     phases.push(PhaseEntry { phase: WorkflowPhase::Solidifying, icon: "💾", title: "固化计划" });
 
     // 解析"有效当前阶段"：AwaitingUserAction 回退到触发阶段
@@ -148,7 +231,7 @@ pub fn ExecutionView(props: ExecutionViewProps) -> Element {
             WorkflowPhase::ClarityCheck => "需求明确".to_string(),
             WorkflowPhase::ParamIdentify => "已识别参数".to_string(),
             WorkflowPhase::OutputSuggesting => "已确认输出".to_string(),
-            WorkflowPhase::TraceExtracting => "已提取轨迹".to_string(),
+            WorkflowPhase::RequirementFinalizing => "已汇总需求".to_string(),
             WorkflowPhase::Solidifying => "已固化计划".to_string(),
             _ => String::new(),
         }
@@ -197,6 +280,55 @@ pub fn ExecutionView(props: ExecutionViewProps) -> Element {
                                 }
                             }
 
+                            // ── Done 展开区（执行完后仍可展开查看详情） ──
+                            if status == PhaseStatus::Done {
+                                {
+                                    // Execute 阶段展开步骤列表；其余阶段展开该阶段 AI 结论
+                                    let stage_text = props
+                                        .stage_outputs
+                                        .iter()
+                                        .find(|(p, _)| *p == entry.phase)
+                                        .map(|(_, t)| t.clone());
+                                    let has_expand = if entry.phase == WorkflowPhase::Execute {
+                                        has_steps
+                                            || stage_text.as_ref().map(|t| !t.is_empty()).unwrap_or(false)
+                                    } else {
+                                        stage_text.as_ref().map(|t| !t.is_empty()).unwrap_or(false)
+                                    };
+                                    if has_expand {
+                                        rsx! {
+                                            details { class: "workflow-timeline__expand",
+                                                summary { class: "workflow-step__expand-toggle",
+                                                    "查看详情"
+                                                }
+                                                div { class: "workflow-step__expand-body",
+                                                    if entry.phase == WorkflowPhase::Execute {
+                                                        // 先展示最终结果（执行摘要），再展示工具调用步骤
+                                                        if let Some(text) = stage_text {
+                                                            div { class: "workflow-timeline__result",
+                                                                div { class: "workflow-timeline__result-label",
+                                                                    "最终结果"
+                                                                }
+                                                                div { class: "workflow-timeline__text",
+                                                                    "{text}"
+                                                                }
+                                                            }
+                                                        }
+                                                        {render_steps_list(steps)}
+                                                    } else if let Some(text) = stage_text {
+                                                        div { class: "workflow-timeline__text",
+                                                            "{text}"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        rsx! {}
+                                    }
+                                }
+                            }
+
                             // ── Body（仅 active 展开） ──
                             if is_active {
                                 div { class: "workflow-timeline__body",
@@ -208,87 +340,13 @@ pub fn ExecutionView(props: ExecutionViewProps) -> Element {
                                                 " 准备执行..."
                                             }
                                         }
-                                        for step in steps {
-                                            {
-                                                let duration_str = step.duration_ms
-                                                    .map(|ms| format!("{:.1}s", ms as f64 / 1000.0))
-                                                    .unwrap_or_else(|| "—".to_string());
-                                                rsx! {
-                                                    div {
-                                                        class: "workflow-step {status_class(&step.status)}",
-                                                        div { class: "workflow-step__header",
-                                                            span {
-                                                                class: "workflow-step__icon",
-                                                                "{status_icon(&step.status)}"
-                                                            }
-                                                            span { class: "workflow-step__index",
-                                                                "#{step.index}"
-                                                            }
-                                                            span { class: "workflow-step__tool",
-                                                                "{step.tool_name}"
-                                                            }
-                                                            span { class: "workflow-step__duration",
-                                                                "{duration_str}"
-                                                            }
-                                                        }
-                                                        if !step.params_summary.is_empty() {
-                                                            div { class: "workflow-step__params",
-                                                                "→ {step.params_summary}"
-                                                            }
-                                                        }
-                                                        if !step.result_summary.is_empty() {
-                                                            div { class: "workflow-step__result",
-                                                                if matches!(step.status, StepStatus::Warning | StepStatus::Failed) {
-                                                                    "! "
-                                                                }
-                                                                "{step.result_summary}"
-                                                            }
-                                                        }
-                                                        if let Some(ref detail) = step.warning_detail {
-                                                            div { class: "workflow-step__warning-detail",
-                                                                "  调整: {detail}"
-                                                            }
-                                                        }
-                                                        // ── 完整数据展开区（仅步骤完成且有数据时显示） ──
-                                                        if step.params_data.is_some() || step.result_data.is_some() {
-                                                            details { class: "workflow-step__expand",
-                                                                summary { class: "workflow-step__expand-toggle",
-                                                                    "查看完整数据"
-                                                                }
-                                                                div { class: "workflow-step__expand-body",
-                                                                    if let Some(params) = &step.params_data {
-                                                                        div { class: "workflow-step__expand-section",
-                                                                            div { class: "workflow-step__expand-label",
-                                                                                "参数"
-                                                                            }
-                                                                            pre { class: "workflow-step__expand-pre",
-                                                                                "{pretty_data(params)}"
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                    if let Some(result) = &step.result_data {
-                                                                        div { class: "workflow-step__expand-section",
-                                                                            div { class: "workflow-step__expand-label",
-                                                                                "输出"
-                                                                            }
-                                                                            pre { class: "workflow-step__expand-pre",
-                                                                                "{pretty_data(result)}"
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    } else if matches!(entry.phase, WorkflowPhase::TraceExtracting | WorkflowPhase::Solidifying) {
+                                        {render_steps_list(steps)}
+                                    } else if matches!(entry.phase, WorkflowPhase::RequirementFinalizing | WorkflowPhase::Solidifying) {
                                         // 纯 spinner 阶段
                                         div { class: "workflow-timeline__spinner-wrap",
                                             span { class: "workflow-timeline__spinner" }
-                                            if entry.phase == WorkflowPhase::TraceExtracting {
-                                                " 正在从对话中提取执行轨迹..."
+                                            if entry.phase == WorkflowPhase::RequirementFinalizing {
+                                                " 正在汇总完整需求..."
                                             } else {
                                                 " 正在提炼执行计划..."
                                             }

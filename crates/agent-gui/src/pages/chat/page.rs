@@ -49,7 +49,7 @@ pub fn ChatPage(on_back: EventHandler<()>) -> Element {
     let system_prompt_template = use_memo(move || template.read().clone());
     let chat_signal: ChatServiceSignal = use_chat_service(system_prompt_template.into());
 
-    // ── 可用模板列表（`chat/` 前缀，从 PromptManager 动态加载） ──
+    // ── 可用模板列表（`chat/` + `flexible/` 前缀，从 PromptManager 动态加载） ──
     let prompt_resource = use_context::<Resource<Option<Arc<PromptContext>>>>();
     let mut templates = use_signal_sync(|| Vec::<String>::new());
     use_effect(move || {
@@ -64,7 +64,7 @@ pub fn ChatPage(on_back: EventHandler<()>) -> Element {
                     let names: Vec<String> = list
                         .into_iter()
                         .map(|info| info.name)
-                        .filter(|n| n.starts_with("chat/"))
+                        .filter(|n| n.starts_with("chat/") || n.starts_with("flexible/"))
                         .collect();
                     templates.set(names);
                 }

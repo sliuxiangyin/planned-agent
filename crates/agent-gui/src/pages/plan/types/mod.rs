@@ -23,4 +23,7 @@ mod workflow;
 pub(super) use message::{display_text, display_text_mut, role_css_class};
 pub(super) use pending_ui::PendingUIState;
 pub(super) use plan::{ParamDef, PlanGeneratedEvent, PlanInfo, PlanSource};
-pub(super) use workflow::{ExecutionStep, PlanFlexibleSnapshot, StepStatus, WorkflowPhase};
+pub(super) use workflow::{
+    ExecutionStep, FlexibleStageContext, PlanFlexibleSnapshot, StepStatus, ToolUsageSummary,
+    WorkflowPhase,
+};

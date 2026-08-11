@@ -99,8 +99,8 @@ pub async fn load_plan_data(
 
 /// 从 PlanFlexibleSnapshot 构造注入到 prompt 的 context 字符串。
 ///
-/// 格式化为 Markdown 供 `flexible_system.toml` 和 `flexible_clarity.toml`
-/// 的 `{{ context }}` 变量使用。
+/// 格式化为 Markdown，供需求分析阶段作为 user 消息附加（阶段隔离后
+/// 不再依赖 system 模板的 `{{ context }}` 变量）。
 pub fn build_context_string(snapshot: &PlanFlexibleSnapshot) -> String {
     if !snapshot.has_data() {
         return String::new();

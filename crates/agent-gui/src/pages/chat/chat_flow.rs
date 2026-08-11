@@ -159,6 +159,8 @@ pub(crate) fn send_message(
         chat.finalize_at(chat.sidx().unwrap_or(0), "AI/Tools 服务未就绪，无法发起聊天。");
         return;
     };
+    // Chat 测试页用于验证完整 Agent 能力，显式覆盖模板默认白名单并暴露全部工具。
+    let chat_svc = Arc::new(chat_svc.with_allowed_tools(None));
 
     spawn(run_chat_stream(chat_svc, chat));
 }
@@ -169,7 +171,7 @@ async fn run_chat_stream(
     mut chat: ChatSignals,
 ) {
     let history: Vec<Message> = chat.messages.read().clone();
-
+    
     let result = chat_svc
         .chat_with_callback(history, |event| match event {
             ChatEvent::TextDelta(chunk) => {
@@ -233,6 +235,8 @@ pub(crate) fn handle_user_action(
         chat.stop_streaming();
         return;
     };
+    // 恢复 request_user_action 后继续沿用完整工具集。
+    let chat_svc = Arc::new(chat_svc.with_allowed_tools(None));
 
     spawn(async move {
         let result = chat_svc

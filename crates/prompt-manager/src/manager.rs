@@ -96,42 +96,91 @@ impl FilePromptManager {
         result
     }
 
-    /// 清理LLM响应，去掉markdown代码块标记和多余文本
+    /// 清理LLM响应，去掉markdown代码块标记和多余文本。
+    ///
+    /// 处理顺序：
+    /// 1. 整体围栏（```json ... ``` / ``` ... ```）直接剥离；
+    /// 2. 任意位置的 ```json ... ``` 代码块（前有自然语言段落也可）优先取围栏内内容；
+    /// 3. 逐候选扫描：从每个 `{`/`[` 起始做括号配对，取第一个可解析的 JSON 段
+    ///    （避免「输出格式」段落里的 `{keyword}` 等花括号干扰定位）；
+    /// 4. 候选段解析失败时尝试修复未转义引号；最终兜底返回原响应。
     fn clean_json_response(&self, response: &str) -> String {
         let trimmed = response.trim();
 
-        // 去掉 ```json 和 ``` 标记
+        // 1. 整体围栏（```json 或 ``` 开头且 ``` 结尾）直接剥离
         if trimmed.starts_with("```json") && trimmed.ends_with("```") {
-            return trimmed[7..trimmed.len()-3].trim().to_string();
+            return trimmed[7..trimmed.len() - 3].trim().to_string();
         }
         if trimmed.starts_with("```") && trimmed.ends_with("```") {
-            return trimmed[3..trimmed.len()-3].trim().to_string();
+            return trimmed[3..trimmed.len() - 3].trim().to_string();
         }
 
-        // 尝试提取JSON部分
-        // 查找第一个 { 或 [
-        if let Some(start) = trimmed.find('{').or_else(|| trimmed.find('[')) {
-            // 查找最后一个 } 或 ]
-            if let Some(end) = trimmed.rfind('}').or_else(|| trimmed.rfind(']')) {
-                if start < end {
-                    let json_part = &trimmed[start..=end];
-                    // 验证是否是有效的JSON
-                    if serde_json::from_str::<serde_json::Value>(json_part).is_ok() {
-                        return json_part.to_string();
-                    }
-                    // 原始 JSON 无效，尝试修复未转义引号后重试
-                    let repaired = Self::repair_json_string_quotes(json_part);
-                    if repaired != json_part {
-                        if serde_json::from_str::<serde_json::Value>(&repaired).is_ok() {
-                            tracing::warn!("JSON 已自动修复未转义引号");
-                            return repaired;
-                        }
-                    }
+        // 2. 任意位置的 ```json ... ``` 代码块（前有自然语言段落也可）优先取围栏内内容
+        if let Some(block_start) = trimmed.find("```json") {
+            let content_start = block_start + "```json".len();
+            if let Some(rel_end) = trimmed[content_start..].find("```") {
+                let inner = trimmed[content_start..content_start + rel_end].trim();
+                if serde_json::from_str::<serde_json::Value>(inner).is_ok() {
+                    return inner.to_string();
                 }
             }
         }
 
-        // 如果以上都不匹配，返回原始响应
+        // 3. 逐候选扫描：从每个 `{`/`[` 起始括号配对（正确跳过字符串内字符），
+        //    取第一个可解析的 JSON 段 —— 规避 `{keyword}` 这类段落花括号干扰定位
+        let chars: Vec<char> = trimmed.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let open = chars[i];
+            if open == '{' || open == '[' {
+                let mut depth: i64 = 0;
+                let mut in_string = false;
+                let mut escaped = false;
+                let mut j = i;
+                while j < chars.len() {
+                    let c = chars[j];
+                    if in_string {
+                        if escaped {
+                            escaped = false;
+                        } else if c == '\\' {
+                            escaped = true;
+                        } else if c == '"' {
+                            in_string = false;
+                        }
+                    } else {
+                        match c {
+                            '"' => in_string = true,
+                            '{' | '[' => depth += 1,
+                            '}' | ']' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    let candidate: String = chars[i..=j].iter().collect();
+                                    if serde_json::from_str::<serde_json::Value>(&candidate).is_ok()
+                                    {
+                                        return candidate;
+                                    }
+                                    // 配对闭合但非合法 JSON，尝试修复未转义引号后重试
+                                    let repaired = Self::repair_json_string_quotes(&candidate);
+                                    if repaired != candidate
+                                        && serde_json::from_str::<serde_json::Value>(&repaired)
+                                            .is_ok()
+                                    {
+                                        tracing::warn!("JSON 已自动修复未转义引号");
+                                        return repaired;
+                                    }
+                                    break; // 该候选不可用 → 继续找下一个起始位置
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    j += 1;
+                }
+            }
+            i += 1;
+        }
+
+        // 4. 如果以上都不匹配，返回原始响应
         trimmed.to_string()
     }
     

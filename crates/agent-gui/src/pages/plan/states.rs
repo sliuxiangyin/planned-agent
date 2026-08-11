@@ -58,6 +58,8 @@ pub(super) struct WorkflowState {
     pub output_params_enabled: Signal<bool, SyncStorage>,
     /// 当前阶段的 AI 输出文本（非 Execute 阶段使用，如 ClarityCheck / ParamIdentify）
     pub phase_output: Signal<String, SyncStorage>,
+    /// 各阶段完成的 AI 输出（阶段间不被覆盖，供 ExecutionView 的 Done 卡片展开查看）
+    pub stage_outputs: Signal<Vec<(WorkflowPhase, String)>, SyncStorage>,
 }
 
 impl WorkflowState {
@@ -102,6 +104,17 @@ impl WorkflowState {
         self.phase_output.set(text);
     }
 
+    /// 记录某阶段的 AI 输出（覆盖该阶段旧值，保留其他阶段）。
+    pub fn set_stage_output(&mut self, phase: WorkflowPhase, text: String) {
+        self.stage_outputs.with_mut(|map| {
+            if let Some(slot) = map.iter_mut().find(|(p, _)| *p == phase) {
+                slot.1 = text;
+            } else {
+                map.push((phase, text));
+            }
+        });
+    }
+
     /// 追加当前阶段 AI 输出文本（流式）。
     pub fn append_phase_output(&mut self, text: &str) {
         self.phase_output.with_mut(|s| s.push_str(text));
@@ -115,6 +128,7 @@ impl WorkflowState {
         self.pending_ui.set(None);
         self.param_values.set(vec![]);
         self.phase_output.set(String::new());
+        self.stage_outputs.set(vec![]);
     }
 }
 

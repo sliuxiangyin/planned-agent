@@ -78,6 +78,7 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
     let workflow_input_params_enabled = use_signal_sync(|| false);
     let workflow_output_params_enabled = use_signal_sync(|| false);
     let workflow_phase_output = use_signal_sync(String::new);
+    let workflow_stage_outputs = use_signal_sync(|| vec![]);
 
     let mut workflow = WorkflowState {
         phase: workflow_phase,
@@ -89,6 +90,7 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
         input_params_enabled: workflow_input_params_enabled,
         output_params_enabled: workflow_output_params_enabled,
         phase_output: workflow_phase_output,
+        stage_outputs: workflow_stage_outputs,
     };
 
     // ── 清除消息确认弹窗 ──
@@ -128,15 +130,11 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
     });
 
     // ── 根据 plan_mode 派生 system prompt 模板路径 ──
-    let system_prompt_template = use_memo(move || {
-        plan.plan_mode
-            .read()
-            .as_ref()
-            .map(|mode| match mode.as_str() {
-                "flexible" => "flexible/flexible_system".to_string(),
-                "thorough" => "thorough/thorough_system".to_string(),
-                _ => "thorough/thorough_system".to_string(),
-            })
+    // 灵活模式已阶段隔离（无全局 system prompt，各阶段指令独立注入）→ None；
+    // 周密模式仍使用 thorough_system。
+    let system_prompt_template = use_memo(move || match plan.plan_mode.read().as_deref() {
+        Some("flexible") => None,
+        _ => Some("thorough/thorough_system".to_string()),
     });
 
     // ── Chat Service ──

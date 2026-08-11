@@ -2,6 +2,8 @@
 
 use serde_json::Value;
 
+use super::ParamDef;
+
 /// 灵活模式工作流阶段。
 ///
 /// Agent 在多次独立对话中依次经历：
@@ -23,12 +25,44 @@ pub(crate) enum WorkflowPhase {
     ParamIdentify,
     /// ④ 输出类型建议与确认中（仅输出参数开启时触发）
     OutputSuggesting,
-    /// ⑤ 从对话上下文提取执行轨迹中
-    TraceExtracting,
+    /// ⑤ 汇总完整需求定义（需求描述 + 输入参数 + 执行步骤 + 工具路径 + 输出格式）
+    RequirementFinalizing,
     /// 等待用户回复追问/确认卡片
     AwaitingUserAction,
     /// ⑥ 执行完成，提炼计划 + 保存中
     Solidifying,
+}
+
+/// 灵活模式阶段间传递的提炼结果（替代全量 history 传递）。
+///
+/// 每个阶段只消费自己需要的字段，跨阶段不共享完整对话历史：
+/// 需求分析 → 整理后需求 → 执行 → 执行摘要 + 工具摘要 → 参数识别 → 确认参数
+/// → 输出确认 → 输出类型 → 轨迹提取 → 轨迹。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FlexibleStageContext {
+    /// 用户原始需求（需求分析输入）
+    pub raw_requirement: String,
+    /// 整理后的需求（需求分析输出，执行阶段输入）
+    pub requirement: String,
+    /// 执行结果数据（执行阶段输出；输出确认/轨迹提取输入）
+    pub execution_result: String,
+    /// 工具调用摘要：key_steps（人类可读关键步骤）+ tool_steps（工具名|参数|结果）（执行阶段输出，参数识别/轨迹提取输入）
+    pub tool_usage_summary: ToolUsageSummary,
+    /// 用户确认的固化参数（参数识别输出）
+    pub confirmed_params: Vec<ParamDef>,
+    /// 输出类型 schema（输出确认输出）
+    pub output_schema: String,
+    /// 完整需求定义文本（汇总阶段输出：需求描述 + 输入参数 + 执行步骤 + 工具路径 + 输出格式）
+    pub complete_requirement: String,
+}
+
+/// 工具调用摘要（执行阶段输出）。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ToolUsageSummary {
+    /// 人类可读的关键步骤（供 trace_extract 生成轨迹「关键步骤」节）
+    pub key_steps: Vec<String>,
+    /// 工具级步骤：工具名 | 关键参数 | 结果简述（供 param_identify 识别可固化参数）
+    pub tool_steps: Vec<String>,
 }
 
 /// 从 `plans_flexible` 加载的四字段快照，供下次执行注入 context。

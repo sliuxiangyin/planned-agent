@@ -225,14 +225,16 @@ impl<PM: PromptManager> LlmCoarsePlanner<PM> {
     pub async fn generate_from_trace_stream<F>(
         &self,
         trace_summary: &str,
+        output_schema_hint: Option<&str>,
         mut on_chunk: F,
     ) -> Result<CoarseGrainedPlan>
     where
         F: FnMut(&str) + Send,
     {
-        // 1. 构建提示上下文（仅 trace_summary 变量）
+        // 1. 构建提示上下文（仅 trace_summary + 可选 output_schema_hint 变量）
         let prompt_context = PromptContext::new()
-            .with_variable("trace_summary", json!(trace_summary));
+            .with_variable("trace_summary", json!(trace_summary))
+            .with_variable("output_schema_hint", json!(output_schema_hint.unwrap_or("")));
 
         // 2. 渲染 flexible_to_coarse 模板
         let prompt = self.prompt_manager
@@ -310,8 +312,10 @@ impl<PM: PromptManager> LlmCoarsePlanner<PM> {
     pub async fn generate_from_trace(
         &self,
         trace_summary: &str,
+        output_schema_hint: Option<&str>,
     ) -> Result<CoarseGrainedPlan> {
-        self.generate_from_trace_stream(trace_summary, |_chunk| {}).await
+        self.generate_from_trace_stream(trace_summary, output_schema_hint, |_chunk| {})
+            .await
     }
 }
 
@@ -382,24 +386,44 @@ impl<PM: PromptManager + Send + Sync> CoarsePlanner for LlmCoarsePlanner<PM> {
     }
 }
 
-/// 从 LLM 原始响应中提取 `## 输出格式` 段落。
+/// 从 LLM 原始响应中提取 `## 输出格式` 段落（兼容无 `##` 标题的 `输出格式：` 写法）。
 ///
 /// 格式示例：
 /// ```text
 /// ## 输出格式
 /// JSON 对象数组，每项含 name(string)、url(string)、summary(string)
 /// ```
+/// 或 LLM 未按标题输出时：
+/// ```text
+/// 输出格式：JSON 对象数组，每项含 name(string)、url(string)、summary(string)
+/// ```
 fn extract_output_schema(raw_text: &str) -> String {
-    // 查找 "## 输出格式" 标记
+    // 优先识别 "## 输出格式" 标题写法
     let marker = "## 输出格式";
     if let Some(pos) = raw_text.find(marker) {
         let after_marker = &raw_text[pos + marker.len()..];
         // 取到下一个 ## 标题或文档结尾
         let end = after_marker.find("\n## ").unwrap_or(after_marker.len());
-        after_marker[..end].trim().to_string()
-    } else {
-        String::new()
+        let schema = after_marker[..end].trim();
+        if !schema.is_empty() && !schema.starts_with('{') && !schema.starts_with('[') {
+            return schema.to_string();
+        }
     }
+
+    // 兼容 "输出格式：" 前缀（无 ## 标题）——仅当该行不是 JSON 本身时取用
+    let loose_marker = "输出格式";
+    if let Some(pos) = raw_text.find(loose_marker) {
+        let after = &raw_text[pos + loose_marker.len()..];
+        let after = after.strip_prefix('：').or_else(|| after.strip_prefix(':')).unwrap_or(after);
+        let line = after.trim_start();
+        let end = line.find('\n').unwrap_or(line.len());
+        let schema = line[..end].trim();
+        if !schema.is_empty() && !schema.starts_with('{') && !schema.starts_with('[') {
+            return schema.to_string();
+        }
+    }
+
+    String::new()
 }
 
 #[cfg(test)]

@@ -17,7 +17,7 @@ pub(crate) struct ParamDef {
 /// 计划来源模式。
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum PlanSource {
-    /// 灵活模式（`flexible_system.toml`）——执行轨迹总结
+    /// 灵活模式（阶段隔离：各阶段指令 system 注入，无全局 system 模板）——执行轨迹总结
     Flexible,
     /// 周密模式（`thorough_system.toml`）——需求确认后生成
     Thorough,

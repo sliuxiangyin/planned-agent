@@ -72,7 +72,7 @@ pub fn RequirementInput(props: RequirementInputProps) -> Element {
         WorkflowPhase::Execute => "⚡ 灵活执行中...",
         WorkflowPhase::ParamIdentify => "🏷️ 识别可参数化动态值...",
         WorkflowPhase::OutputSuggesting => "📋 确认输出类型...",
-        WorkflowPhase::TraceExtracting => "📝 提取执行轨迹...",
+        WorkflowPhase::RequirementFinalizing => "📋 汇总需求...",
         WorkflowPhase::Solidifying => "💾 固化计划中...",
         // 周密模式 Executing 按 Idle 处理（灵活模式不会走到这里）
         WorkflowPhase::Executing => "",

@@ -199,3 +199,12 @@ cargo run
 | [docs/planned-agent/coarse-planner.md](docs/planned-agent/coarse-planner.md) | Coarse Planner Prompt |
 | [docs/planned-agent/react-agent.md](docs/planned-agent/react-agent.md) | ReAct Agent Prompt |
 | [docs/planned-agent/trace-rag-design.md](docs/planned-agent/trace-rag-design.md) | Trace RAG 设计 |
+
+step-1
+
+需求：打开百度首页，搜索“达州安仁乡“，在搜索结果中切换到“资讯“分类，从中获取最新（最靠前）的三条新闻
+输出期望：三条新闻的标题及摘要内容（附来源、时间、链接）
+关键实体：百度（baidu.com）、搜索关键词“达州安仁乡“、“资讯“分类
+
+step-2
+{“execution_result”: “1. 标题=达州东部经开区燃气管网安全隐患整治工程预计12月底完工, 摘要=涵盖麻柳场镇、檀木社区至安仁乡、葫芦社区的燃气管道;二标段长25.9公里,涉及安仁场镇、麻柳至东兴社区、檀木社区至花红社区的燃气管道。施工人员正多点位、分段式作业,尽力减少对沿线…, 来源=四川经济网, 时间=2025年8月18日, 链接=https://www.scjjrb.com/2025/08/18/99442418.html；2. 标题=达州职业技术学院实践团队深入安仁乡调研板凳龙制作技艺, 摘要=近日，达州职业技术学院巴渠非遗工坊实践团队走进达川区安仁乡，围绕国家级非物质文化遗产代表性项目龙舞（安仁板凳龙）开展实地调研。青年学子叩访第九代龙舞（安仁板凳龙）非物质文化…, 来源=人民资讯, 时间=7月16日, 链接=https://baijiahao.baidu.com/s?id=1870853011692009423&wfr=spider&for=pc；3. 标题=【产城绿乡绘新篇】达州东部经开区安仁乡严马庙村:蚕桑产业…, 摘要=达州东部经开区安仁乡严马庙村党总支书记谭宏:“全年预计收入可达65万元,实现收益30万元。”…, 来源=中国网中国四川, 时间=2025年5月26日, 链接=http://sc.china.com.cn/2025-05/26/content_43125446.html”, “key_steps”: [“导航到 https://www.baidu.com → 在搜索框输入关键词「达州安仁乡」并回车搜索”, “在搜索结果页点击「资讯」分类链接（https://www.baidu.com/s?rtt=1&bsst=1&cl=2&tn=news&ie=utf-8&word=达州安仁乡）”, “读取百度资讯搜索页快照，确认共15条相关资讯，定位第1页最靠前的3条新闻”, “执行页面JS提取前3条新闻的标题、摘要、来源、时间、链接字段”], “tool_steps”: [“browser_navigate | url=https://www.baidu.com | 成功打开百度首页”, “browser_type | target=搜索框, text=达州安仁乡 | 输入搜索关键词成功”, “browser_press_key | key=Enter | 触发搜索，跳转至达州安仁乡_百度搜索页”, “browser_find | text=资讯 | 定位到「资讯」分类标签”, “browser_click | target=f1e152, element=资讯分类标签 | 成功切换到百度资讯搜索页”, “browser_snapshot | target=当前页 | 获取资讯列表快照，含15条资讯及标题/摘要/来源/时间/链接”, “browser_evaluate | function=提取#content_left下前3个结果块的title/link/abstract/source/time | 成功提取3条新闻完整字段”]}

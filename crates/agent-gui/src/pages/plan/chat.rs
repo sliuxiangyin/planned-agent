@@ -131,6 +131,7 @@ async fn run_chat_stream_with_history(
                     actions,
                     history_snapshot: snapshot,
                     trigger_phase: WorkflowPhase::Executing,
+                    stage_input: None,
                 });
             }
             _ => {}
@@ -302,6 +303,7 @@ async fn run_flexible_chat_stream(
                 actions: pending.actions.clone(),
                 history_snapshot: phase2_ready,
                 trigger_phase: WorkflowPhase::Executing,
+                stage_input: None,
             });
             chat.stop_streaming();
 
@@ -413,6 +415,7 @@ pub(super) fn handle_user_action(
                         actions,
                         history_snapshot: snapshot,
                         trigger_phase: WorkflowPhase::Executing,
+                        stage_input: None,
                     });
                 }
                 _ => {}

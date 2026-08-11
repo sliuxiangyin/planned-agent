@@ -265,6 +265,27 @@
     word-break: break-word;
 }
 
+/* Execute 卡片 Done 展开区：最终结果展示 */
+.workflow-timeline__result {
+    padding-top: 6px;
+}
+
+.workflow-timeline__result .workflow-timeline__text {
+    padding-top: 4px;
+}
+
+.workflow-timeline__result-label {
+    padding: 6px 12px 0;
+    color: var(--secondary-success-color);
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+}
+
+.workflow-timeline__result + .workflow-step {
+    border-top: 1px solid var(--primary-color-6);
+}
+
 /* ── Action 区 ── */
 .workflow-timeline__actions {
     border-top: 1px solid var(--primary-color-6);
@@ -337,6 +358,11 @@
     margin: 2px 0 0 22px;
     font-size: 0.75rem;
     color: var(--secondary-warning-color);
+}
+
+/* 阶段卡片 Done 展开区（复用 workflow-step__expand 系列样式，去除步骤内缩进） */
+.workflow-timeline__expand {
+    margin: 0;
 }
 
 /* 完整数据展开区 */
