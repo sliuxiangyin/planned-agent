@@ -9,6 +9,8 @@ pub enum ToolSource {
     Custom { handler_id: String },
     /// 内置工具
     Builtin,
+    /// 子 agent 工具（注册的子 agent，执行时输出流经旁路通道转发）
+    SubAgent { agent_id: String },
 }
 
 /// 工具分类（大分类）

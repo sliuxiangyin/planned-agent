@@ -1,4 +1,3 @@
-pub mod chat;
 pub mod home;
 pub mod mcp;
 pub mod plan;

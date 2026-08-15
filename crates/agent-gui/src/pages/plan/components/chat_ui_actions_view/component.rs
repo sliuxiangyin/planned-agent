@@ -1,6 +1,8 @@
 //! ChatUIActionsView 组件：根据 UIActionType 分发渲染按钮/输入框。
 //!
 //! - Confirm / Select → 复用 Button 组件（Select 加虚线边框区分）
+//!   Select 单选列表末尾自动附带「自定义输入」入口（D）：类比 reasonix 追问，
+//!   预设选项（A/B/C 按钮）之外允许用户手动输入补充，输入文本作为 choice 回传
 //! - Input → Input 组件 + 确认按钮，捕获用户自由文本后回调
 //! - MultiSelect → 复选框组 + 配套 Confirm 按钮，读取勾选状态
 //!
@@ -38,6 +40,8 @@ pub fn ChatUIActionsView(
     on_action: EventHandler<(UIAction, String)>,
 ) -> Element {
     let mut input_text = use_signal(String::new);
+    // Select 单选组「自定义输入」（D）的文本状态（独立于 Input 的 input_text）
+    let mut select_custom_text = use_signal(String::new);
 
     // ── MultiSelect 复选框状态 ──
     let multi_select_actions: Vec<&UIAction> = actions
@@ -64,6 +68,16 @@ pub fn ChatUIActionsView(
         .collect();
     let has_input = !input_actions.is_empty();
     let has_select = actions.iter().any(|a| matches!(a.action_type, UIActionType::Select));
+    // Select 单选组：预设选项按钮之外的「自定义输入」入口（D）
+    let select_actions: Vec<UIAction> = actions
+        .iter()
+        .filter(|a| matches!(a.action_type, UIActionType::Select))
+        .cloned()
+        .collect();
+    // 自定义输入（D）的回传目标：组内第一个 action。一次 request_user_action 只针对一个
+    // 决策点（prompt 约定），select 组即该单选问题本身；D 与点击按钮同属此决策点，归到
+    // 组内第一个 action 的 id 语义安全（handle_user_action 仅关心 choice 文本与 id=="generate"）。
+    let select_custom_target: Option<UIAction> = select_actions.first().cloned();
     let show_button_group = !(has_input && has_select);
 
     if has_input && has_select {
@@ -267,6 +281,50 @@ pub fn ChatUIActionsView(
                                     }
                                 }
                                 _ => rsx! {}
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Select 单选组「自定义输入」入口（D）──
+            // 类比 reasonix ask 追问形式：预设选项（A/B/C 按钮）之外，用户可手动输入
+            // 补充自己的选择，输入文本作为该单选问题的 choice 回传（与点击按钮回传
+            // label 同一语义）。受 show_button_group 约束：Input+Select 混搭丢弃 select
+            // 时同步隐藏，避免出现「自定义输入」却没有可选选项的孤立输入框。
+            if show_button_group && has_select {
+                for action in select_custom_target.iter() {
+                    {
+                        let enter_action = action.clone();
+                        let click_action = action.clone();
+                        rsx! {
+                            div { class: Styles::select_custom_row,
+                                Input {
+                                    placeholder: "或输入其他选项…",
+                                    value: "{select_custom_text}",
+                                    oninput: move |e: FormEvent| select_custom_text.set(e.value()),
+                                    onkeydown: move |e: KeyboardEvent| {
+                                        if e.data.key() == keyboard_types::Key::Enter {
+                                            let v = select_custom_text.read().trim().to_string();
+                                            if !v.is_empty() {
+                                                on_action.call((enter_action.clone(), v));
+                                                select_custom_text.set(String::new());
+                                            }
+                                        }
+                                    },
+                                }
+                                Button {
+                                    variant: ButtonVariant::Secondary,
+                                    size: ButtonSize::Sm,
+                                    onclick: move |_| {
+                                        let v = select_custom_text.read().trim().to_string();
+                                        if !v.is_empty() {
+                                            on_action.call((click_action.clone(), v));
+                                            select_custom_text.set(String::new());
+                                        }
+                                    },
+                                    "补充"
+                                }
                             }
                         }
                     }

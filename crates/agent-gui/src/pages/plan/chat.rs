@@ -13,9 +13,7 @@ use planned_agent_prompt_manager::FilePromptManager;
 use std::sync::Arc;
 
 use super::states::{ChatState, PlanState};
-use super::types::{
-    display_text, ParamDef, PendingUIState, PlanSource, WorkflowPhase,
-};
+use super::types::{display_text, ParamDef, PendingUIState};
 
 /// 持久化一条消息到 DB（fire-and-forget）
 fn persist_message(
@@ -46,7 +44,6 @@ pub(super) fn send_message(
     plan_id: String,
     message_repo: Arc<MessageRepo>,
     plan_mode: String,
-    auto_requirement: bool,
 ) {
     let text = chat.input_text.read().trim().to_string();
     if text.is_empty() {
@@ -70,52 +67,30 @@ pub(super) fn send_message(
         return;
     };
 
-    // 4. 按模式分发
-    tracing::info!(
-        "send_message: plan_mode='{}', auto_requirement={}, text='{}'",
-        plan_mode,
-        auto_requirement,
-        text
-    );
-    if plan_mode == "flexible" {
-        tracing::info!("→ 走灵活模式两阶段路径");
-        spawn(run_flexible_chat_stream(
-            chat_svc,
-            chat,
-            plan_id,
-            message_repo,
-            auto_requirement,
-        ));
-    } else {
-        tracing::info!("→ 走默认路径 (plan_mode 非 flexible)");
-        spawn(run_chat_stream(
-            chat_svc,
-            chat,
-            plan_id,
-            message_repo,
-        ));
-    }
+    // 4. plan_mode 透传给 ChatService 模板（周密模式）
+    tracing::info!("send_message: plan_mode='{}', text='{}'", plan_mode, text);
+    spawn(run_chat_stream(
+        chat_svc,
+        chat,
+        plan_id,
+        message_repo,
+    ));
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// 异步消费 ChatEvent（周密模式）
+// ─────────────────────────────────────────────────────────────────────
 
 /// 异步消费 ChatEvent：实时写 signal 到 Dioxus runtime，流结束后持久化 assistant 消息。
 async fn run_chat_stream(
+    // TODO(重构 service.rs): ChatService 类型签名/泛型可能变化，调用方需同步。
     chat_svc: Arc<ChatService<FilePromptManager>>,
     mut chat: ChatState,
     plan_id: String,
     message_repo: Arc<MessageRepo>,
 ) {
     let history: Vec<Message> = chat.messages.read().clone();
-    run_chat_stream_with_history(chat_svc, chat, plan_id, message_repo, history).await;
-}
-
-/// 从指定 history 开始聊天流（供灵活模式 Phase 2 复用）。
-async fn run_chat_stream_with_history(
-    chat_svc: Arc<ChatService<FilePromptManager>>,
-    mut chat: ChatState,
-    plan_id: String,
-    message_repo: Arc<MessageRepo>,
-    history: Vec<Message>,
-) {
+    // TODO(重构 service.rs): chat_with_callback 签名/返回可能变化（详见 batch_id + HistoryStore 重构方案），调用方需同步。
     let result = chat_svc
         .chat_with_callback(history, |event| match event {
             ChatEvent::TextDelta(chunk) => {
@@ -124,18 +99,20 @@ async fn run_chat_stream_with_history(
             ChatEvent::ReasoningDelta(chunk) => {
                 chat.append_streaming_reasoning(&chunk);
             }
-            ChatEvent::UIActionRequest { message, actions } => {
+            ChatEvent::UIActionRequest {
+                message,
+                actions,
+                ..
+            } => {
                 let snapshot = chat.messages.read().clone();
                 chat.set_pending(PendingUIState {
                     message,
                     actions,
                     history_snapshot: snapshot,
-                    trigger_phase: WorkflowPhase::Executing,
-                    stage_input: None,
                 });
             }
             _ => {}
-        })
+        }, None::<fn(planned_agent::chat::SubAgentChatEvent)>)
         .await;
 
     match result {
@@ -175,157 +152,6 @@ async fn run_chat_stream_with_history(
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// 灵活模式：两阶段聊天（清晰度检查 → 执行）
-// ─────────────────────────────────────────────────────────────────────
-
-/// 灵活模式专用：Phase 1 清晰度检查（独立 prompt + 工具受限）→ Phase 2 完整执行。
-///
-/// `auto_requirement` 为 true 时，Phase 1 若 AI 追问，代码层自动选择默认动作并衔接 Phase 2，
-/// 用户全程无感知；为 false 时，追问卡片展示给用户手动确认。
-async fn run_flexible_chat_stream(
-    chat_svc: Arc<ChatService<FilePromptManager>>,
-    mut chat: ChatState,
-    plan_id: String,
-    message_repo: Arc<MessageRepo>,
-    auto_requirement: bool,
-) {
-    let mut history: Vec<Message> = chat.messages.read().clone();
-
-    tracing::info!(
-        "run_flexible_chat_stream: Phase 1 开始, auto_requirement={}",
-        auto_requirement
-    );
-
-    // ── Phase 1：清晰度检查（独立 clarity prompt + 仅 request_user_action/builtin_read_documentation 工具） ──
-    let clarity_svc = chat_svc
-        .with_allowed_tools(Some(vec![
-            "request_user_action".to_string(),
-            "builtin_read_documentation".to_string(),
-        ]))
-        .with_system_prompt_template(Some("flexible/flexible_clarity_check".to_string()));
-
-    // 自动模式：注入指令引导 AI 自行推断，避免追问
-    if auto_requirement {
-        tracing::info!("run_flexible_chat_stream: 注入自动模式指令");
-        history.push(Message {
-            role: MessageRole::System,
-            content: Some(MessageContent::Text {
-                text: "当前为自动执行模式。用户需求若有轻微模糊之处，请自行合理推断并继续，尽量避免使用 request_user_action 追问。仅当需求完全无法推断、执行会导致严重错误时才追问。".to_string(),
-            }),
-            ..Default::default()
-        });
-    }
-
-    let phase1_result = match clarity_svc.chat_with_callback(history, |_| {}).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!("run_flexible_chat_stream: Phase 1 失败: {}", e);
-            chat.finalize_at(chat.sidx().unwrap_or(0), &format!("清晰度检查失败: {}", e));
-            return;
-        }
-    };
-
-    if phase1_result.cancelled {
-        return;
-    }
-
-    // ── 剥离 Phase 1 的 clarity system prompt，让 Phase 2 自动注入执行 prompt ──
-    let mut phase2_ready = phase1_result.history;
-    if !phase2_ready.is_empty() && matches!(phase2_ready[0].role, MessageRole::System) {
-        phase2_ready.remove(0);
-    }
-
-    // ── 处理 Phase 1 结果 ──
-    let pending_count = phase1_result.pending_ui_actions.len();
-    let phase1_text = phase2_ready
-        .iter()
-        .rev()
-        .find(|m| matches!(m.role, MessageRole::Assistant))
-        .and_then(|m| match &m.content {
-            Some(MessageContent::Text { text }) => Some(text.as_str()),
-            _ => None,
-        })
-        .unwrap_or("(无文本)");
-    tracing::info!(
-        "run_flexible_chat_stream: Phase 1 完成, pending_ui={}, ai_text='{}'",
-        pending_count,
-        phase1_text,
-    );
-
-    if !phase1_result.pending_ui_actions.is_empty() {
-        tracing::info!(
-            "run_flexible_chat_stream: AI 追问, auto_requirement={}",
-            auto_requirement
-        );
-        if auto_requirement {
-            // 自动模式：选默认动作，替换占位 tool result，衔接 Phase 2
-            let pending = &phase1_result.pending_ui_actions[0];
-            let default_choice = pending
-                .actions
-                .last()
-                .map(|a| a.label.clone())
-                .unwrap_or_else(|| "不需要，直接执行".to_string());
-
-            for msg in phase2_ready.iter_mut().rev() {
-                if matches!(msg.role, MessageRole::Tool) {
-                    if let Some(MessageContent::ToolResult { ref mut content, .. }) =
-                        &mut msg.content
-                    {
-                        if content.contains("awaiting_user_input") {
-                            *content = serde_json::to_string(&serde_json::json!({
-                                "choice": default_choice,
-                            }))
-                            .unwrap_or_else(|_| format!(r#"{{"choice":"{}"}}"#, default_choice));
-                            break;
-                        }
-                    }
-                }
-            }
-
-            run_chat_stream_with_history(chat_svc, chat, plan_id, message_repo, phase2_ready)
-                .await;
-        } else {
-            // 手动模式：展示追问卡片给用户（snapshot 已剥离 clarity prompt）
-            if let Some(last_asst) = phase2_ready
-                .iter()
-                .rev()
-                .find(|m| matches!(m.role, MessageRole::Assistant))
-            {
-                if let Some(MessageContent::Text { text }) = &last_asst.content {
-                    if !text.is_empty() {
-                        chat.append_streaming(text);
-                    }
-                }
-            }
-            let pending = &phase1_result.pending_ui_actions[0];
-            chat.set_pending(PendingUIState {
-                message: pending.message.clone(),
-                actions: pending.actions.clone(),
-                history_snapshot: phase2_ready,
-                trigger_phase: WorkflowPhase::Executing,
-                stage_input: None,
-            });
-            chat.stop_streaming();
-
-            // 持久化 Phase 1 追问文本
-            let msgs = chat.messages.read();
-            if let Some(last) = msgs.last() {
-                if matches!(last.role, MessageRole::Assistant) {
-                    let content = display_text(last);
-                    if !content.is_empty() {
-                        persist_message(&message_repo, &plan_id, "assistant", &content);
-                    }
-                }
-            }
-        }
-    } else {
-        // 需求明确：直接 Phase 2
-        tracing::info!("run_flexible_chat_stream: 需求明确 → Phase 2 执行");
-        run_chat_stream_with_history(chat_svc, chat, plan_id, message_repo, phase2_ready).await;
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────
 // 处理用户 UI 操作（点击按钮后的完整流程）
 // ─────────────────────────────────────────────────────────────────────
 
@@ -345,27 +171,10 @@ pub(super) fn handle_user_action(
         None => return,
     };
 
-    // ── 路径 A：确认生成 → 提取计划文本 → 发出事件 → 终止 ──
+    // ── 路径 A：确认生成 → 终止 ──
     if action.id == "generate" {
-        let plan_text = chat.text_at(asst_idx).unwrap_or_default();
-
-        let source = match plan.mode().as_str() {
-            "flexible" => PlanSource::Flexible,
-            _ => PlanSource::Thorough,
-        };
-
-        plan.emit_generated(plan_text, source);
         chat.stop_streaming();
         chat.clear_pending();
-
-        // 持久化当前 assistant 消息
-        if let Some(ref repo) = message_repo {
-            let content = chat.text_at(asst_idx).unwrap_or_default();
-            if !content.is_empty() {
-                persist_message(repo, &plan_id, "assistant", &content);
-            }
-        }
-
         return;
     }
 
@@ -400,6 +209,7 @@ pub(super) fn handle_user_action(
     };
 
     spawn(async move {
+        // TODO(重构 service.rs): chat_with_callback 签名/返回可能变化（详见 batch_id + HistoryStore 重构方案），调用方需同步。
         let result = chat_svc
             .chat_with_callback(history, |event| match event {
                 ChatEvent::TextDelta(chunk) => {
@@ -408,18 +218,20 @@ pub(super) fn handle_user_action(
                 ChatEvent::ReasoningDelta(chunk) => {
                     chat.append_streaming_reasoning(&chunk);
                 }
-                ChatEvent::UIActionRequest { message, actions } => {
+                ChatEvent::UIActionRequest {
+                    message,
+                    actions,
+                    ..
+                } => {
                     let snapshot = chat.messages.read().clone();
                     chat.set_pending(PendingUIState {
                         message,
                         actions,
                         history_snapshot: snapshot,
-                        trigger_phase: WorkflowPhase::Executing,
-                        stage_input: None,
                     });
                 }
                 _ => {}
-            })
+            }, None::<fn(planned_agent::chat::SubAgentChatEvent)>)
             .await;
 
         match result {

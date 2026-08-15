@@ -382,6 +382,7 @@ impl<PM: PromptManager + 'static> TraceRecorder<PM> {
                 tool_call_id: None,
                 name: None,
                 reasoning_content: None,
+                ..Default::default()
             }],
             tools: None,
             temperature: Some(0.0),

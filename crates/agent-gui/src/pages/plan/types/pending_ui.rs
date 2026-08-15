@@ -3,8 +3,6 @@
 use planned_agent::chat::UIAction;
 use planned_agent_core::ai::types::Message;
 
-use super::{FlexibleStageContext, WorkflowPhase};
-
 /// 待处理的 UI 交互状态——Agent 通过 `request_user_action` tool 请求用户操作。
 ///
 /// 字段以 `pub(crate)` 暴露给 plan 模块内构造与读取。
@@ -14,20 +12,13 @@ pub(crate) struct PendingUIState {
     pub(crate) message: String,
     /// 用户可选的动作列表
     pub(crate) actions: Vec<UIAction>,
-    /// 触发 pending 时该阶段的小历史快照（含已注入的阶段指令，不含 system；
-    /// 恢复后作为该阶段继续对话的上下文，替代旧的全局 history 快照）
+    /// 触发 pending 时的对话历史快照（用户操作后用于继续 chat）
     pub(crate) history_snapshot: Vec<Message>,
-    /// 触发该 pending 的工作流阶段（用于用户操作后确定下一步）
-    pub(crate) trigger_phase: WorkflowPhase,
-    /// 触发 pending 时的阶段输入上下文（恢复后传给对应阶段）
-    pub(crate) stage_input: Option<FlexibleStageContext>,
 }
 
 impl PartialEq for PendingUIState {
     fn eq(&self, other: &Self) -> bool {
         // history_snapshot 仅用于恢复对话，不参与渲染 diff
-        self.message == other.message
-            && self.actions == other.actions
-            && self.trigger_phase == other.trigger_phase
+        self.message == other.message && self.actions == other.actions
     }
 }

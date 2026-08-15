@@ -28,7 +28,7 @@ use planned_agent_core::planner::react::{Action, Observation, ReActStep, Thought
 use planned_agent_core::prompt::{PromptContext, PromptManager};
 use planned_agent_core::ai::types::{Message, MessageContent, MessageRole};
 
-use crate::chat::{ChatEvent, ChatService};
+use crate::chat::{ChatEvent, ChatService, SubAgentChatEvent};
 use crate::planner::trace::TraceRecorder;
 
 /// 灵活模式计划执行结果
@@ -124,6 +124,7 @@ impl<PM: PromptManager + Send + Sync + 'static> FlexiblePlanAgent<PM> {
                 tool_call_id: None,
                 name: None,
                 reasoning_content: None,
+                ..Default::default()
             },
             Message {
                 role: MessageRole::User,
@@ -134,15 +135,17 @@ impl<PM: PromptManager + Send + Sync + 'static> FlexiblePlanAgent<PM> {
                 tool_call_id: None,
                 name: None,
                 reasoning_content: None,
+                ..Default::default()
             },
         ];
 
         // ── 5. 执行 ──
+        // TODO(重构 service.rs): chat_with_callback 签名/返回可能变化（详见 batch_id + HistoryStore 重构方案），调用方需同步。
         let response = self
             .chat_service
             .chat_with_callback(messages, |event| {
                 on_event(event);
-            })
+            }, None::<fn(SubAgentChatEvent)>)
             .await?;
 
         let duration_ms = start.elapsed().as_millis() as u64;

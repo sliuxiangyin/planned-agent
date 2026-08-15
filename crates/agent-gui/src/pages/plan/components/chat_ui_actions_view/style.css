@@ -42,6 +42,19 @@
     min-width: 0;
 }
 
+/* Select 单选组的「自定义输入」入口（D）：独占一行，输入框撑满剩余宽度 */
+.select-custom-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    width: 100%;
+}
+
+.select-custom-row input {
+    flex: 1;
+    min-width: 0;
+}
+
 /* MultiSelect 复选框组 */
 .multi-select-group {
     display: flex;

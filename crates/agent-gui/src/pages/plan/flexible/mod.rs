@@ -1,11 +1,9 @@
-//! 灵活模式组件模块。
+//! 灵活模式组件模块：基于 v2_chat 的聊天面板（含子 agent 支持）。
 //!
-//! - `workflow` — FlexibleWorkflow 状态机编排 + 三段布局
-//! - `context_header` — 历史上下文折叠区
-//! - `requirement_input` — 固定底部需求输入区
-//! - `execution_view` — 中间执行步骤展示
+//! - `chat_flow` — 消息流转逻辑（发送 / 事件消费 / UI 交互回传）
+//! - `page` — `FlexiblePage` 组件（消息列表 + 输入区 + 提示词选择器）
 
-pub mod context_header;
-pub mod execution_view;
-pub mod requirement_input;
-pub mod workflow;
+pub(crate) mod chat_flow;
+pub(crate) mod page;
+
+pub(crate) use page::FlexiblePage;

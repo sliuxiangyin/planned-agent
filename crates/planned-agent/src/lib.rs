@@ -7,11 +7,16 @@
 //!
 //! 注：`config` / `cli` / `agent` 模块仅 binary 可见，未在此处暴露。
 
+pub mod agents;
 pub mod planner;
 
 // ─── chat 模块 ───────────────────────────────────────────────────────────────
 pub mod chat;
-pub use chat::{ChatConfig, ChatEvent, ChatResponse, ChatService, PendingUIAction};
+pub use chat::{ChatConfig, ChatEvent, ChatResponse, ChatService, PendingUIAction, SubAgentResumeOutcome};
+
+// ─── v2-chat 模块（重构版：内部维护 history + 后台 loop）───────────────
+pub mod v2_chat;
+pub use v2_chat::{SendTicket, SubscriptionGuard, SubscriptionId, V2ChatConfig, V2ChatEvent, V2ChatService};
 
 // ─── 从 core 透传：粗粒度相关类型 ──────────────────────────────
 pub use planned_agent_core::planner::coarse::{
@@ -37,6 +42,12 @@ pub use crate::planner::react::{
     DefaultReActAgent, FlexiblePlanAgent, FlexiblePlanResult,
     PlanAndExecuteAgent, PlanAndExecuteConfig,
     PlanAndExecuteResult, StepResult, StepStore,
+};
+
+// ─── 本 crate：灵活模式 Agent ──────────────────────────────
+pub use crate::agents::{
+    ChatSubAgent, CompletenessDoc, ExecutionOutput, FlexibleAgent, FlexibleExecuteAgent,
+    test_sub_agent_tool,
 };
 
 // ─── 本 crate：轨迹记录 ──────────────────────────────────────

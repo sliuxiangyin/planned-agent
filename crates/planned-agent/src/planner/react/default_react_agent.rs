@@ -702,6 +702,7 @@ impl<PM: PromptManager + 'static> ReActAgent for DefaultReActAgent<PM> {
             tool_call_id: None,
             name: None,
             reasoning_content: None,
+            ..Default::default()
         });
 
         Ok(ObserveResult {

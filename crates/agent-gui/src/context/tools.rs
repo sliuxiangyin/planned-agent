@@ -86,6 +86,36 @@ impl ToolsContext {
             stats.mcp_count
         );
     }
+
+    // ========== 自定义工具（运行时增删）==========
+
+    /// 运行时注册自定义工具（透传 `ToolRegistry::register_custom_tool`）
+    ///
+    /// - 适用场景：插件/动态加载/前端拦截工具接入
+    /// - 已存在同名自定义工具：静默覆盖（与底层一致）
+    /// - 同时覆盖 `tools`、`metadata`、`custom_executors`
+    pub fn register_custom_tool(
+        &self,
+        tool: Tool,
+        categories: Vec<ToolCategory>,
+        executor: Arc<dyn ToolExecutor>,
+    ) {
+        let name = tool.name.clone();
+        self.registry
+            .register_custom_tool(tool, categories, executor);
+        tracing::info!("已注册自定义工具: {}", name);
+    }
+
+    /// 运行时卸载自定义工具（透传 `ToolRegistry::unregister_tool`）
+    ///
+    /// - 仅卸载元数据中 `source == Custom` 的工具；若传入的是 Builtin / MCP 工具名，底层同样会移除
+    /// - 工具不存在时返回 `Err`，调用方需自行决定是否吞错
+    /// - 不区分「软禁用」与「真删除」，按需再设计
+    pub fn unregister_custom_tool(&self, name: &str) -> anyhow::Result<()> {
+        self.registry.unregister_tool(name)?;
+        tracing::info!("已卸载自定义工具: {}", name);
+        Ok(())
+    }
 }
 
 // ── UI 交互工具定义 ─────────────────────────────────────────────────────────
@@ -122,7 +152,24 @@ fn request_user_action_tool() -> Tool {
         name: "request_user_action".into(),
         description:
             "当需要用户确认、选择或补充信息时调用。用于引导用户完善需求、确认计划生成等交互场景。\
-             调用后等待用户操作，不要自行假设用户选择。"
+             调用后等待用户操作，不要自行假设用户选择。\
+             \n\
+             动作类型硬规则：\
+             \n\
+             - 提供选项让用户选择（追问场景）一律用 select：每个选项一个 select action，可并列多个；\
+               单选列表自动附带「自定义输入」入口，用户可输入选项之外的内容。\
+             \n\
+             - confirm 仅用于确认/批准/跳过类决定（如「确认」「暂不设置」）；禁止用单个 confirm 充当追问选项，\
+               那会让用户没有可选项。\
+             \n\
+             - 不要为追问额外构造 input：select 自带自定义输入入口；input 与 select 混搭时前端会丢弃 select、只保留 input，追问失效。\
+             \n\
+             正例（追问输出格式）：actions = [\
+               {id:\"opt_json\", type:\"select\", label:\"JSON\"},\
+               {id:\"opt_text\", type:\"select\", label:\"纯文本摘要\"},\
+               {id:\"opt_bool\", type:\"select\", label:\"布尔判断\"}]\
+             \n\
+             反例（违规）：actions = [{id:\"ok\", type:\"confirm\", label:\"确认\"}] —— 追问必须有 select 选项。"
                 .into(),
         input_schema: json!({
             "type": "object",
@@ -144,7 +191,7 @@ fn request_user_action_tool() -> Tool {
                             "type": {
                                 "type": "string",
                                 "enum": ["confirm", "select", "input", "multi_select"],
-                                "description": "动作类型：confirm=确认按钮, select=单选列表, input=文本输入提示, multi_select=多选复选框"
+                                "description": "动作类型：select=单选列表（追问/提供选项专用，自动带自定义输入入口，可多个并列）, confirm=确认/批准/跳过（仅确认场景，禁止用作追问选项）, input=文本输入提示, multi_select=多选复选框"
                             },
                             "label": {
                                 "type": "string",

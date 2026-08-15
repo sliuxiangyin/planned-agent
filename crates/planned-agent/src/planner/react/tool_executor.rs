@@ -142,6 +142,7 @@ pub(crate) async fn call_llm(ai_client: &Arc<dyn AiClient>, prompt: &str) -> Res
         tool_call_id: None,
         name: None,
         reasoning_content: None,
+        ..Default::default()
     }];
     let response = call_llm_with_messages(ai_client, &messages, None).await?;
     extract_text_content(&response)

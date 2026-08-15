@@ -119,6 +119,7 @@ impl AgentContext {
                 tool_call_id: None,
                 name: None,
                 reasoning_content: None,
+                ..Default::default()
             },
             Message {
                 role: MessageRole::User,
@@ -129,6 +130,7 @@ impl AgentContext {
                 tool_call_id: None,
                 name: None,
                 reasoning_content: None,
+                ..Default::default()
             },
         ];
     }
@@ -144,6 +146,7 @@ impl AgentContext {
             tool_call_id: None,
             name: None,
             reasoning_content: None,
+            ..Default::default()
         });
     }
 
@@ -171,6 +174,7 @@ impl AgentContext {
             tool_call_id: Some(tool_call_id),
             name: None,
             reasoning_content: None,
+            ..Default::default()
         });
     }
 }

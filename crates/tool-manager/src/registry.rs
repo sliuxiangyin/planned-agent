@@ -6,6 +6,9 @@ use tracing::info;
 
 use planned_agent_core::mcp::types::Tool;
 use planned_agent_core::tool_registry::{ToolSource, ToolCategory, ToolExecutor};
+use crate::sub_agent::{SubAgentSessionRunner, SubAgentToolExecutor};
+use crate::session::SubAgentSessionStore;
+use crate::stream::ToolStreamSender;
 use crate::types::{ToolMetadata, ToolRegistryStats, ToolOutcome};
 use crate::validator::ToolValidator;
 // McpManagerTrait 已下沉到 core；这里通过 mcp_adapter 模块重新导出
@@ -29,6 +32,12 @@ pub struct ToolRegistry {
     /// 内置工具执行器（handler_id -> Executor）
     builtin_executors: RwLock<HashMap<String, Arc<dyn ToolExecutor>>>,
     
+    /// 子 agent 执行器（tool_name -> 具体类型，保留流式入口）
+    sub_agent_executors: RwLock<HashMap<String, Arc<SubAgentToolExecutor>>>,
+    
+    /// 子 agent 挂起会话存储（TTL 10 分钟惰性清理）
+    sub_agent_sessions: Arc<SubAgentSessionStore>,
+    
     /// 分类索引（category -> tool_names）
     category_index: RwLock<HashMap<ToolCategory, Vec<String>>>,
 }
@@ -42,6 +51,8 @@ impl ToolRegistry {
             mcp_manager: RwLock::new(None),
             custom_executors: RwLock::new(HashMap::new()),
             builtin_executors: RwLock::new(HashMap::new()),
+            sub_agent_executors: RwLock::new(HashMap::new()),
+            sub_agent_sessions: Arc::new(SubAgentSessionStore::new()),
             category_index: RwLock::new(HashMap::new()),
         }
     }
@@ -208,6 +219,83 @@ impl ToolRegistry {
         }
     }
     
+    /// 注册子 agent 工具（会话式）
+    ///
+    /// - `tool.name` 即子 agent 的注册名（LLM 调用名），同时作为 `agent_id`；
+    /// - 执行器包装 [`SubAgentSessionRunner`]：支持挂起-恢复（用户交互后
+    ///   resume 继续，内部 history 保留）；一次性子 agent 用
+    ///   [`OneShotSubAgentRunner`] 包装即可；
+    /// - 自动在 `input_schema` 注入可选字段 `session_id` / `user_input`
+    ///   （resume 专用，LLM 在用户确认后回传）；
+    /// - 过程流经旁路通道（`call_tool_streamed`）实时送达调用方；
+    /// - 挂起时返回结构化 `ToolResult.content`：
+    ///   `{"status":"awaiting_user_action","session_id":...,"message":...,"actions":[...]}`，
+    ///   调用方（主 agent）据此渲染用户交互视图；
+    /// - 被 `call_tool`（非流式）调用时行为与普通工具一致。
+    pub fn register_sub_agent(
+        &self,
+        tool: Tool,
+        categories: Vec<ToolCategory>,
+        runner: Arc<dyn SubAgentSessionRunner>,
+    ) {
+        let agent_id = tool.name.clone();
+        let tool = Self::inject_session_fields(tool);
+        let executor = Arc::new(SubAgentToolExecutor::new(
+            agent_id.clone(),
+            runner,
+            self.sub_agent_sessions.clone(),
+        ));
+        
+        let metadata = ToolMetadata {
+            source: ToolSource::SubAgent { agent_id },
+            categories,
+            enabled: true,
+            priority: 50,
+            tags: vec!["sub_agent".to_string()],
+            created_at: chrono::Utc::now(),
+            version: None,
+        };
+        
+        // 更新执行器（具体类型，保留流式入口）
+        {
+            let mut executors = self.sub_agent_executors.write().unwrap();
+            executors.insert(tool.name.clone(), executor);
+        }
+        
+        self.register_tool(tool, metadata);
+    }
+
+    /// 自动在工具 schema 注入会话字段（可选，已存在则不动）：
+    /// - `session_id`：resume 时回传的子 agent 会话 ID；
+    /// - `user_input`：用户确认后的选择/输入。
+    fn inject_session_fields(mut tool: Tool) -> Tool {
+        if let Some(serde_json::Value::Object(props)) = tool.input_schema.get_mut("properties") {
+            props.entry("session_id".to_string()).or_insert_with(|| {
+                serde_json::json!({
+                    "type": "string",
+                    "description": "子 agent 会话 ID：用户交互挂起后，恢复执行时回传"
+                })
+            });
+            props.entry("user_input".to_string()).or_insert_with(|| {
+                serde_json::json!({
+                    "type": "string",
+                    "description": "用户确认后的选择/输入：恢复执行时传给子 agent"
+                })
+            });
+        }
+        tool
+    }
+
+    /// 清空所有挂起会话（主 agent 会话结束/取消时调用），返回清理数量
+    pub fn clear_sub_agent_sessions(&self) -> usize {
+        self.sub_agent_sessions.clear()
+    }
+
+    /// 当前挂起的子 agent 会话数
+    pub fn sub_agent_session_count(&self) -> usize {
+        self.sub_agent_sessions.len()
+    }
+    
     // ========== 卸载方法 ==========
     
     /// 卸载工具
@@ -245,6 +333,10 @@ impl ToolRegistry {
                 }
                 ToolSource::Builtin => {
                     let mut executors = self.builtin_executors.write().unwrap();
+                    executors.remove(name);
+                }
+                ToolSource::SubAgent { .. } => {
+                    let mut executors = self.sub_agent_executors.write().unwrap();
                     executors.remove(name);
                 }
                 _ => {} // MCP 工具不需要清理执行器
@@ -352,6 +444,7 @@ impl ToolRegistry {
                     (ToolSource::Mcp { .. }, "mcp") => true,
                     (ToolSource::Custom { .. }, "custom") => true,
                     (ToolSource::Builtin, "builtin") => true,
+                    (ToolSource::SubAgent { .. }, "sub_agent") => true,
                     _ => false,
                 }
             })
@@ -504,9 +597,98 @@ impl ToolRegistry {
                     Err(anyhow::anyhow!("Builtin executor not found: {}", name))
                 }
             }
+            ToolSource::SubAgent { .. } => {
+                let executor = self
+                    .sub_agent_executors
+                    .read()
+                    .unwrap()
+                    .get(name)
+                    .cloned();
+                if let Some(executor) = executor {
+                    info!("Routing to sub agent executor: {}", name);
+                    executor.execute(name, arguments).await
+                } else {
+                    Err(anyhow::anyhow!("Sub agent executor not found: {}", name))
+                }
+            }
         }?;
 
         Ok(ToolOutcome::new(result, metadata.categories))
+    }
+    
+    /// 流式调用工具（子 agent 过程流经旁路通道实时送达调用方）
+    ///
+    /// - 子 agent 工具：`invocation_id` 同时用于过程流事件与最终
+    ///   `ToolResult.call_id`，调用方可用它关联"过程与结果"；
+    /// - 非子 agent 工具：永不产生流事件，行为与 [`ToolRegistry::call_tool`] 完全一致；
+    /// - 返回的 `ToolOutcome.categories` 与 `call_tool` 一致。
+    pub async fn call_tool_streamed(
+        &self,
+        name: &str,
+        arguments: Value,
+        invocation_id: &str,
+        stream: ToolStreamSender,
+    ) -> Result<ToolOutcome> {
+        // 1. 检查工具是否存在
+        let (tool, metadata) = {
+            let tools = self.tools.read().unwrap();
+            let meta = self.metadata.read().unwrap();
+
+            let tool = tools.get(name)
+                .ok_or_else(|| anyhow::anyhow!("Tool not found: {}", name))?
+                .clone();
+            let metadata = meta.get(name)
+                .ok_or_else(|| anyhow::anyhow!("Tool metadata not found: {}", name))?
+                .clone();
+
+            (tool, metadata)
+        };
+
+        // 2. 检查工具是否启用
+        if !metadata.enabled {
+            return Err(anyhow::anyhow!("Tool is disabled: {}", name));
+        }
+
+        // 3. 验证参数
+        ToolValidator::validate_arguments(&tool, &arguments)?;
+
+        // 4. 路由：仅子 agent 工具走流式入口，其余走普通路由
+        let result = match &metadata.source {
+            ToolSource::SubAgent { .. } => {
+                let executor = self
+                    .sub_agent_executors
+                    .read()
+                    .unwrap()
+                    .get(name)
+                    .cloned();
+                if let Some(executor) = executor {
+                    info!("Routing sub agent (streamed): {}", name);
+                    executor
+                        .execute_streamed(arguments, invocation_id, stream)
+                        .await
+                } else {
+                    Err(anyhow::anyhow!("Sub agent executor not found: {}", name))
+                }
+            }
+            _ => {
+                // 非子 agent：行为与 call_tool 完全一致（无流事件）
+                Ok(self.call_tool(name, arguments).await?.result)
+            }
+        }?;
+
+        Ok(ToolOutcome::new(result, metadata.categories))
+    }
+
+    /// 恢复挂起的子 agent（前端驱动 resume 入口）。
+    ///
+    /// 向指定 `session_id`（即 run_id，等于子 agent 调用时的 `invocation_id`）的
+    /// 挂起会话发送用户选择，唤醒阻塞中的 `execute_streamed` 继续执行。
+    ///
+    /// 这是**纯存储操作**，不经过任何 driver 队列（父 agent 的 driver 此刻正阻塞
+    /// 在 `call_tool_streamed` 上，无法消费新命令）；子 agent 后续事件由
+    /// `execute_streamed` 持有的 stream 转发，本方法不接触前端。
+    pub fn signal_resume(&self, session_id: &str, user_input: Value) -> Result<()> {
+        self.sub_agent_sessions.signal_resume(session_id, user_input)
     }
     
     // ========== 管理方法 ==========

@@ -1,13 +1,12 @@
 //! Plan 模块的内部类型、纯数据模型与 `Message` 辅助函数。
 //!
-//! 仅 `plan` 子模块内部使用；状态容器（`ChatState` / `PlanState` / `WorkflowState`）
+//! 仅 `plan` 子模块内部使用；状态容器（`ChatState` / `PlanState`）
 //! 已拆到同级 `states` 模块，本模块只保留不持有 `Signal` 的类型与辅助函数。
 //!
-//! 内部按领域拆分为四个子文件：
+//! 内部按领域拆分为三个子文件：
 //! - `message` — `core::Message` 的显示辅助函数
 //! - `pending_ui` — 待处理的 UI 交互状态（`PendingUIState`）
-//! - `plan` — 计划元数据（`ParamDef` / `PlanSource` / `PlanGeneratedEvent` / `PlanInfo`）
-//! - `workflow` — 灵活模式工作流类型（`WorkflowPhase` / `PlanFlexibleSnapshot` / `ExecutionStep` / `StepStatus`）
+//! - `plan` — 计划元数据（`ParamDef` / `PlanInfo`）
 //!
 //! 各子文件内项声明为 `pub(crate)`（re-export 提级到 `plan` 可见的必要条件，
 //! 且 `plan` 模块本身是私有 `mod`，crate 外不可达，封装不受影响），
@@ -18,12 +17,7 @@
 mod message;
 mod pending_ui;
 mod plan;
-mod workflow;
 
 pub(super) use message::{display_text, display_text_mut, role_css_class};
 pub(super) use pending_ui::PendingUIState;
-pub(super) use plan::{ParamDef, PlanGeneratedEvent, PlanInfo, PlanSource};
-pub(super) use workflow::{
-    ExecutionStep, FlexibleStageContext, PlanFlexibleSnapshot, StepStatus, ToolUsageSummary,
-    WorkflowPhase,
-};
+pub(super) use plan::{ParamDef, PlanInfo};

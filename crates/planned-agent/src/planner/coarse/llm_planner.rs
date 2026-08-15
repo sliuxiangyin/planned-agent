@@ -170,6 +170,7 @@ impl<PM: PromptManager> LlmCoarsePlanner<PM> {
                 tool_call_id: None,
                 name: None,
                 reasoning_content: None,
+                ..Default::default()
             }],
             tools: None,
             temperature: Some(0.3),
@@ -255,6 +256,7 @@ impl<PM: PromptManager> LlmCoarsePlanner<PM> {
                 tool_call_id: None,
                 name: None,
                 reasoning_content: None,
+                ..Default::default()
             }],
             tools: None,
             temperature: Some(0.3),

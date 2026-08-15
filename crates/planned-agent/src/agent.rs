@@ -169,6 +169,7 @@ impl Agent {
                     tool_call_id: None,
                     name: None,
                     reasoning_content: None,
+                    ..Default::default()
                 }
             ],
             tools: Some(tools),
@@ -236,6 +237,7 @@ impl Agent {
                     tool_call_id: None,
                     name: None,
                     reasoning_content: None,
+                    ..Default::default()
                 }
             ],
             tools: Some(tools),
@@ -292,6 +294,7 @@ impl Agent {
                     tool_call_id: None,
                     name: None,
                     reasoning_content: None,
+                    ..Default::default()
                 }
             ],
             tools: None,

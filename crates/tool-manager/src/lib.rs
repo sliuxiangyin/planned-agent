@@ -5,6 +5,9 @@ pub mod custom_tool;
 pub mod mcp_adapter;
 pub mod validator;
 pub mod builtin;
+pub mod stream;
+pub mod sub_agent;
+pub mod session;
 
 // 重新导出主要类型（来自 core）
 pub use planned_agent_core::tool_registry::{
@@ -21,3 +24,9 @@ pub use types::{ToolMetadata, ToolRegistryStats, ToolOutcome};
 pub use registry::ToolRegistry;
 pub use custom_tool::CustomToolExecutor;
 pub use mcp_adapter::McpManagerAdapter;
+pub use stream::{StreamKind, ToolStreamEvent, ToolStreamSender};
+pub use sub_agent::{
+    OneShotSubAgentRunner, SubAgentRunOutcome, SubAgentSession, SubAgentSessionRunner,
+    SubAgentToolExecutor,
+};
+pub use session::SubAgentSessionStore;

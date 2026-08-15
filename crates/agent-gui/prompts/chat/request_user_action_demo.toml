@@ -16,7 +16,13 @@ text = """
 
 > **actions 格式规范**：如果你对 `request_user_action` 的 message / actions 字段格式不熟悉，
 > 先调用 `builtin_read_documentation("request_user_action")` 查阅规范文档，再构造调用。
-> 每次调用前都确认格式正确：action 必须有 `id`、`type`、`label` 字段。
+> 每个 action 必须是合法 JSON 对象，**必填字段**：`id`（唯一标识）、`type`（必须填写，
+> 取值为 `"confirm"` / `"select"` / `"input"` / `"multi_select"` 之一）、`label`（展示文本）。
+> 示例（`type` 字段不可省略）：
+> ```json
+> {"id": "confirm_next", "type": "confirm", "label": "确认，继续"}
+> ```
+> ⚠️ 漏掉 `type` 会导致该 action 被服务端丢弃、卡片失去按钮——每次调用前逐个检查三个必填字段。
 
 ## 行为规则
 

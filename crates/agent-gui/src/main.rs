@@ -12,7 +12,6 @@ use context::{
     StorageContext, ToolsContext,
 };
 use dioxus::{desktop::Config, prelude::*};
-use pages::chat::ChatPage;
 use pages::home::{HomePage, PageRoute};
 use pages::plan::PlanPage;
 use pages::settings::SettingsPage;
@@ -262,11 +261,7 @@ fn AppRouter() -> Element {
                     on_back: move |_| navigate(PageRoute::Home),
                 }
             },
-            PageRoute::Chat => rsx! {
-                ChatPage {
-                    on_back: move |_| navigate(PageRoute::Home),
-                }
-            },
+
         }
     }
 }

@@ -471,3 +471,105 @@
     background: rgba(239, 68, 68, 0.12);
 }
 
+/* =====================================================================
+ * 灵活模式（FlexiblePage）专属样式
+ * ---------------------------------------------------------------------
+ * FlexiblePage 复用 .chat-messages / .chat-message / .chat-input-area
+ * 基础类；以下规则通过 .flexible-page 作用域覆盖为 reasonix 风格，
+ * 不影响 plan 周密模式聊天面板（plan/page.rs render_chat_panel）。
+ * ===================================================================== */
+
+/* ── 页面根：flex 纵向布局，占满右侧面板 ─────────────────────────── */
+.flexible-page {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    background: var(--primary-color-3);
+    overflow: hidden;
+}
+
+/* PageHeader 40px 嵌入版：聊天页中紧贴消息区（去掉默认 margin-bottom） */
+.flexible-page .dx-page-header--nested {
+    margin-bottom: 0;
+}
+
+/* ── 消息框：reasonix 风格 ───────────────────────────────────────── */
+.flexible-page .chat-message {
+    padding: 10px 14px;
+    border-radius: 12px;
+    max-width: 85%;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    word-break: break-word;
+}
+
+/* AI 消息：左侧、浅色圆角容器、宽度自适应 */
+.flexible-page .chat-message--assistant {
+    align-self: flex-start;
+    background: var(--primary-color-4);
+    border: 1px solid var(--primary-color-6);
+    color: var(--secondary-color-2);
+}
+
+/* 用户消息：右侧主色气泡 */
+.flexible-page .chat-message--user {
+    align-self: flex-end;
+    background: var(--secondary-color-2);
+    color: var(--primary-color);
+    border: none;
+}
+
+/* request_user_action 交互卡片：虚线框（与 chat 测试页一致） */
+.flexible-page .chat-message--interaction {
+    align-self: flex-start;
+    max-width: 92%;
+    background: var(--primary-color-4);
+    border: 1px dashed var(--secondary-color-4);
+}
+
+/* ── 输入区：固定底部，reasonix 风格圆角容器 ─────────────────────── */
+.flexible-page .chat-input-area {
+    padding: 10px 16px 14px;
+    border-top: 1px solid var(--primary-color-6);
+    background: var(--primary-color-3);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.flexible-page .chat-input-row {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-end;
+    gap: 8px;
+    background: var(--primary-color-4);
+    border: 1px solid var(--primary-color-6);
+    border-radius: 12px;
+    padding: 8px 10px;
+    transition: border-color 100ms ease-out;
+}
+
+.flexible-page .chat-input-row:focus-within {
+    border-color: var(--focused-border-color);
+}
+
+.flexible-page .chat-input-row textarea {
+    flex: 1 1 auto;
+    min-width: 0;
+    background: transparent !important;
+    box-shadow: none !important;
+    border: none !important;
+    outline: none;
+    resize: none;
+    cursor: text;
+    color: var(--secondary-color-2);
+}
+
+.flexible-page .chat-input-row__actions {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 6px;
+    padding-bottom: 2px;
+}
+

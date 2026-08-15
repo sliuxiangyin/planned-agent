@@ -1,6 +1,6 @@
 //! Plan 页面主组件：组合左侧计划详情面板与右侧面板。
 //!
-//! 灵活模式右侧渲染 FlexibleWorkflow（三段式结构化工作流）；
+//! 灵活模式右侧渲染 `FlexiblePage`（与 `pages/chat/` 实现一致的纯内存聊天面板）；
 //! 周密模式右侧渲染原有聊天面板。
 //! 计划模式在创建时固定，不可在聊天中切换。
 
@@ -23,14 +23,11 @@ use super::chat::{handle_user_action, send_message};
 use super::components::chat_ui_actions_view::ChatUIActionsView;
 use super::components::plan_todo_view::PlanTodoView;
 use super::left_panel::PlanLeftPanel;
-use super::flexible::workflow::FlexibleWorkflow;
+use super::flexible::FlexiblePage;
 use super::message::MessageListView;
 use super::shared::load_plan_data::load_plan_data as load_plan_data_shared;
-use super::states::{ChatState, PlanState, WorkflowState};
-use super::types::{
-    ParamDef, PendingUIState, PlanGeneratedEvent, PlanInfo, PlanFlexibleSnapshot,
-    WorkflowPhase,
-};
+use super::states::{ChatState, PlanState};
+use super::types::{ParamDef, PendingUIState, PlanInfo};
 
 /// 本页面专属样式（按需加载）。
 const PLAN_CSS: Asset = asset!("/assets/plan.css");
@@ -56,42 +53,11 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
     // ── 计划模式（从 DB 加载后固定） ──
     let plan_mode = use_signal_sync(|| None::<String>);
 
-    // ── 计划生成事件 ──
-    let plan_generated = use_signal_sync(|| None::<PlanGeneratedEvent>);
-
     // ── 计划版本号（save_flexible_plan 成功后递增，通知 PlanTodoView 重新加载） ──
     let plan_version = use_signal_sync(|| 0u32);
 
     // ── 已固化的参数定义（清晰度检查勾选后暂存，确认生成时随事件落库） ──
     let plan_params = use_signal_sync(Vec::<ParamDef>::new);
-
-    // ── 自动需求开关（灵活模式：开启后 AI 自动确认模糊需求，无需用户手动点击） ──
-    let auto_requirement = use_signal_sync(|| false);
-
-    // ── 灵活模式工作流状态 ──
-    let workflow_phase = use_signal_sync(|| WorkflowPhase::Idle);
-    let workflow_requirement_text = use_signal_sync(String::new);
-    let workflow_execution_steps = use_signal_sync(|| vec![]);
-    let workflow_pending_ui = use_signal_sync(|| None::<PendingUIState>);
-    let workflow_context_snapshot = use_signal_sync(|| None::<PlanFlexibleSnapshot>);
-    let workflow_param_values = use_signal_sync(|| vec![]);
-    let workflow_input_params_enabled = use_signal_sync(|| false);
-    let workflow_output_params_enabled = use_signal_sync(|| false);
-    let workflow_phase_output = use_signal_sync(String::new);
-    let workflow_stage_outputs = use_signal_sync(|| vec![]);
-
-    let mut workflow = WorkflowState {
-        phase: workflow_phase,
-        requirement_text: workflow_requirement_text,
-        execution_steps: workflow_execution_steps,
-        pending_ui: workflow_pending_ui,
-        context_snapshot: workflow_context_snapshot,
-        param_values: workflow_param_values,
-        input_params_enabled: workflow_input_params_enabled,
-        output_params_enabled: workflow_output_params_enabled,
-        phase_output: workflow_phase_output,
-        stage_outputs: workflow_stage_outputs,
-    };
 
     // ── 清除消息确认弹窗 ──
     let mut show_clear_dialog = use_signal_sync(|| false);
@@ -107,12 +73,11 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
     let plan = PlanState {
         plan_info,
         plan_mode,
-        plan_generated,
         plan_version,
         plan_params,
     };
 
-    // ── 加载计划元数据 + 历史消息 / plans_flexible 快照 ──
+    // ── 加载计划元数据 + 历史消息 ──
     let pid = plan_id.clone();
     use_effect(move || {
         let storage_opt = storage.read().as_ref().and_then(|x| x.as_ref()).cloned();
@@ -121,23 +86,15 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
                 pid.clone(),
                 ctx.plan_repo.clone(),
                 ctx.message_repo.clone(),
-                Some(ctx.plan_flexible_repo.clone()),
                 chat,
                 plan,
-                Some(workflow),
             ));
         }
     });
 
-    // ── 根据 plan_mode 派生 system prompt 模板路径 ──
-    // 灵活模式已阶段隔离（无全局 system prompt，各阶段指令独立注入）→ None；
-    // 周密模式仍使用 thorough_system。
-    let system_prompt_template = use_memo(move || match plan.plan_mode.read().as_deref() {
-        Some("flexible") => None,
-        _ => Some("thorough/thorough_system".to_string()),
-    });
-
-    // ── Chat Service ──
+    // ── Chat Service（周密模式使用 thorough 模板；灵活模式由 FlexiblePage 自管） ──
+    let system_prompt_template =
+        use_memo(move || Some("thorough/thorough_system".to_string()));
     let chat_signal = use_chat_service(system_prompt_template.into());
 
     // ── 按钮可用性 ──
@@ -220,15 +177,7 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
                 right: {
                     let mode = plan.mode();
                     if mode == "flexible" {
-                        rsx! {
-                            FlexibleWorkflow {
-                                plan_id: plan_id.clone(),
-                                chat_signal: chat_signal,
-                                plan: plan,
-                                workflow: workflow,
-                                storage: storage.clone(),
-                            }
-                        }
+                        rsx! { FlexiblePage {} }
                     } else {
                         render_chat_panel(
                             plan_id.clone(),
@@ -239,7 +188,6 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
                             can_create,
                             message_repo.clone(),
                             show_clear_dialog,
-                            auto_requirement,
                         )
                     }
                 },
@@ -272,6 +220,7 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
 }
 
 /// 渲染右侧聊天面板（周密模式）：PlanTodo + MessageList + 待处理 UI + 输入发送区。
+#[allow(clippy::too_many_arguments)]
 fn render_chat_panel(
     plan_id: String,
     storage: Resource<Option<Arc<StorageContext>>>,
@@ -281,7 +230,6 @@ fn render_chat_panel(
     can_create: bool,
     message_repo: Option<Arc<MessageRepo>>,
     mut show_clear_dialog: Signal<bool, SyncStorage>,
-    mut auto_requirement: Signal<bool, SyncStorage>,
 ) -> Element {
     let sidx = chat.sidx();
     rsx! {
@@ -289,7 +237,6 @@ fn render_chat_panel(
             PlanTodoView {
                 plan_id: plan_id.clone(),
                 storage: storage.clone(),
-                plan_generated: plan.plan_generated,
                 plan_version: plan.plan_version,
             }
 
@@ -350,7 +297,6 @@ fn render_chat_panel(
                                             pid.clone(),
                                             repo.clone(),
                                             plan.mode(),
-                                            auto_requirement(),
                                         );
                                     }
                                 }
@@ -384,18 +330,6 @@ fn render_chat_panel(
                                     line { x1: "14", y1: "11", x2: "14", y2: "17" }
                                 }
                             }
-                    
-                      
-                    // 自动需求开关（仅灵活模式显示）
-                    if plan.mode() == "flexible" {
-                        div { class: "chat-input-area__auto-toggle",
-                            span { class: "chat-input-area__auto-toggle-label", "自动需求" }
-                            crate::components::switch::Switch {
-                                checked: auto_requirement(),
-                                on_checked_change: move |v: bool| auto_requirement.set(v),
-                            }
-                        }
-                    }
 
                     div { class: "chat-input-area__placeholder" }
                     if sidx.is_none() {
@@ -417,7 +351,6 @@ fn render_chat_panel(
                                                 pid.clone(),
                                                 repo.clone(),
                                                 plan.mode(),
-                                                auto_requirement(),
                                             );
                                         }
                                     }
@@ -444,6 +377,7 @@ fn render_chat_panel(
                             size: ButtonSize::Xs,
                             title: Some("停止生成"),
                             onclick: move |_: MouseEvent| {
+                                // TODO(重构 service.rs): stop() 语义可能变化（cancelled 共享机制调整），调用方需同步。
                                 if let Some(ref svc) = *chat_signal.read() {
                                     svc.stop();
                                 }

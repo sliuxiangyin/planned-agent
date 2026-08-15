@@ -8,3 +8,8 @@ pub mod types;
 
 // 导出公共 trait
 pub use traits::{AiClient, ChatCompletionStream};
+
+// 公共数据：Message 等（GUI / planned-agent 共用）
+pub use types::{
+    Message, MessageContent, MessageRole, ToolCall, ToolType,
+};

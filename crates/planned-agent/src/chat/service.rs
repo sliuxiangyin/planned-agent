@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -29,13 +30,18 @@ use planned_agent_ai_manager::AiManager;
 use planned_agent_core::ai::AiClient;
 use planned_agent_core::prompt::{PromptContext, PromptManager};
 use crate::chat::UIAction;
-use planned_agent_core::ai::types::{ChatCompletionRequest, FinishReason, FunctionCall, Message, MessageContent, MessageRole, ToolCall, ToolDefinition, ToolType};
-use planned_agent_tool_manager::ToolRegistry;
-use serde_json::Value;
+use planned_agent_core::ai::types::{
+    ChatCompletionRequest, FinishReason, FunctionCall, Message, MessageContent, MessageRole,
+    ToolCall, ToolDefinition, ToolType,
+};
+use planned_agent_tool_manager::{ToolRegistry, ToolStreamEvent, ToolStreamSender};
+use serde_json::{json, Value};
+use tokio::sync::mpsc;
+use tokio::time::{Duration, interval};
 use tracing::{info, warn};
 
 use crate::chat::config::ChatConfig;
-use crate::chat::event::ChatEvent;
+use crate::chat::event::{ChatEvent, SubAgentChatEvent};
 
 // ── 公开类型 ─────────────────────────────────────────────────────────────────
 
@@ -71,6 +77,28 @@ pub struct PendingUIAction {
     pub message: String,
     /// 用户可选的动作列表
     pub actions: Vec<UIAction>,
+    /// 子 agent 会话 ID：`Some` 表示本次交互源自子 agent 挂起，
+    /// 调用方收集用户选择后应调用 `ChatService::resume_sub_agent` 恢复；
+    /// `None` 表示主 agent 自身的 `request_user_action`（把选择作为
+    /// user 消息重新调用 `chat_with_callback` 即可）。
+    pub session_id: Option<String>,
+}
+
+/// 子 agent 会话恢复的执行结果（`ChatService::resume_sub_agent`）。
+#[derive(Debug, Clone)]
+pub enum SubAgentResumeOutcome {
+    /// 子 agent 完成，`text` 为最终结论（提取自返回的 assistant 文本）。
+    Done { text: String },
+    /// 子 agent 再次挂起等待用户输入（如四步演示流程的下一步），
+    /// 携带最新 `session_id`（沿用原会话 id），继续等待用户操作。
+    AwaitingUserAction {
+        /// 最新的子 agent 会话 ID（恢复后再次挂起时沿用原 id）
+        session_id: String,
+        /// 展示给用户的引导文本
+        message: String,
+        /// 用户可执行的动作列表
+        actions: Vec<UIAction>,
+    },
 }
 
 /// 聊天服务。
@@ -169,6 +197,27 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         }
     }
 
+    /// 派生一个使用外部 `cancelled` 标志的副本。
+    ///
+    /// 用于子 agent 场景：把外部（主 agent）的 `Arc<AtomicBool>` 注入到内部
+    /// `ChatService`，使子 agent 内部的循环能在主 agent 调用 [`Self::stop`] 时
+    /// 立即感知并中断（否则子 agent 内部 `is_cancelled()` 永远为 false，
+    /// 会一直跑到自然完成或挂起等待）。
+    pub fn with_cancelled(&self, cancelled: Arc<AtomicBool>) -> Self {
+        Self {
+            ai_manager: self.ai_manager.clone(),
+            tool_registry: self.tool_registry.clone(),
+            prompt_manager: self.prompt_manager.clone(),
+            config: self.config.clone(),
+            cancelled,
+        }
+    }
+
+    /// 暴露内部 `cancelled` 句柄（用于注入给子 agent）
+    pub fn cancelled_handle(&self) -> Arc<AtomicBool> {
+        self.cancelled.clone()
+    }
+
     /// 派生一个带 `context` 注入的副本。
     ///
     /// 灵活模式需求分析阶段曾把上版本四字段（todos/summary/params/output_schema）
@@ -214,6 +263,11 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         self.prompt_manager.parse_response(template_name, response).await
     }
 
+    /// 获取 PromptManager 引用（供外部构造 Agent 等依赖 PM 的组件使用）。
+    pub fn prompt_manager(&self) -> Arc<PM> {
+        self.prompt_manager.clone()
+    }
+
     /// 请求取消当前正在进行的聊天流。
     ///
     /// 调用后 `chat_with_callback` 会在下一个 stream chunk 或下一轮开始时
@@ -246,13 +300,15 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
     /// 多轮 tool-call 循环：当 AI 返回的 message 含 `tool_calls` 时，
     /// 本方法会执行这些工具、把 tool message 追加到历史、再发起下一轮，
     /// 直到 AI 不再要求 tool 调用，或达到 [`ChatConfig::max_tool_rounds`]。
-    pub async fn chat_with_callback<F>(
+    pub async fn chat_with_callback<F, G>(
         &self,
         messages: Vec<Message>,
         mut on_event: F,
+        mut on_agent_event: Option<G>,
     ) -> Result<ChatResponse>
     where
         F: FnMut(ChatEvent) + Send,
+        G: FnMut(SubAgentChatEvent) + Send,
     {
         self.cancelled.store(false, Ordering::SeqCst);
 
@@ -265,6 +321,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         let mut finish_reason: Option<FinishReason> = None;
         let mut round = 1usize;
         let mut pending_ui_actions: Vec<PendingUIAction> = Vec::new();
+        // 子 agent 过程流只通过 on_agent_event 旁路回调转发，不写入 Message。
 
         loop {
             if self.is_cancelled() {
@@ -436,6 +493,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
                 } else {
                     None
                 },
+                ..Default::default()
             };
 
             history.push(assistant_msg.clone());
@@ -502,10 +560,12 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
                 on_event(ChatEvent::UIActionRequest {
                     message: msg.clone(),
                     actions: actions.clone(),
+                    session_id: None,
                 });
                 pending_ui_actions.push(PendingUIAction {
                     message: msg,
                     actions,
+                    session_id: None,
                 });
                 break;
             }
@@ -517,12 +577,90 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
                 .iter()
                 .partition(|tc| UI_TOOL_NAMES.contains(&tc.function.name.as_str()));
 
-            // 先执行普通后端工具（现有逻辑不变）
+            // 先执行普通后端工具：统一走流式入口。
+            // 子 agent 工具的过程流经 mpsc 旁路实时转发 on_agent_event；
+            // 非子 agent 工具永不产生流事件，行为与 call_tool 完全一致。
             for call in &backend_calls {
                 let args: Value = serde_json::from_str(&call.function.arguments)
                     .unwrap_or_else(|_| Value::String(call.function.arguments.clone()));
 
-                let outcome = self.tool_registry.call_tool(&call.function.name, args).await;
+                let (tx, mut rx) = mpsc::channel::<ToolStreamEvent>(256);
+                let stream = ToolStreamSender::new(tx, call.function.name.clone(), call.id.clone());
+                let registry = self.tool_registry.clone();
+                let tool_name = call.function.name.clone();
+                let call_id = call.id.clone();
+                let mut exec_task = tokio::spawn(async move {
+                    registry
+                        .call_tool_streamed(&tool_name, args, &call_id, stream)
+                        .await
+                });
+
+                // 周期 tick（100ms）确保子 agent 执行期间也能立即感知 cancel：
+                // 否则 select! 会被 exec_task/rx.recv() 占满，cancel 检查永远轮不到。
+                let mut cancel_tick = interval(Duration::from_millis(100));
+                cancel_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+                let mut cancelled_during_exec = false;
+                let outcome = loop {
+                    tokio::select! {
+                        out = &mut exec_task => {
+                            // 任务已完成：先清空通道残留的过程事件（子 agent 最后输出的
+                            // 尾巴），再返回结果——否则 select! 优先命中完成分支会丢事件。
+                            while let Ok(ev) = rx.try_recv() {
+                                if let Some(cb) = on_agent_event.as_mut() {
+                                    if let Some(event) = ev.event {
+                                        cb(SubAgentChatEvent {
+                                            agent_name: ev.tool_name.clone(),
+                                            invocation_id: ev.invocation_id.clone(),
+                                            seq: ev.seq,
+                                            event,
+                                        });
+                                    }
+                                }
+                            }
+                            break out
+                        }
+                        Some(ev) = rx.recv() => {
+                            // 子 agent 过程流仅通过 on_agent_event 旁路转发，不写入 Message。
+                            // 全量协议：旁路事件一律携带结构化 ChatEvent，其余（无 event 的
+                            // 生命周期标记）不转发。
+                            if let Some(cb) = on_agent_event.as_mut() {
+                                if let Some(event) = ev.event {
+                                    cb(SubAgentChatEvent {
+                                        agent_name: ev.tool_name.clone(),
+                                        invocation_id: ev.invocation_id.clone(),
+                                        seq: ev.seq,
+                                        event,
+                                    });
+                                }
+                            }
+                        }
+                        _ = cancel_tick.tick() => {
+                            if self.is_cancelled() {
+                                // 取消：中断子 agent 任务（其 ChatService 内部
+                                // 也共享同一 cancelled flag → 下次轮询自然退出）。
+                                exec_task.abort();
+                                // 清理可能挂起的子 agent 会话（防止取消后残留）
+                                self.tool_registry.clear_sub_agent_sessions();
+                                cancelled_during_exec = true;
+                                break Ok(Err(anyhow!("cancelled by user")));
+                            }
+                        }
+                    }
+                };
+                // JoinHandle 解包：任务 panic/取消视为工具失败
+                let outcome = match outcome {
+                    Ok(inner) => inner,
+                    Err(join_err) => Err(anyhow!("tool task panicked: {}", join_err)),
+                };
+
+                // 🛑 取消：直接退出主循环，不写 tool result history（避免污染 LLM 上下文）
+                if cancelled_during_exec {
+                    tracing::info!("chat_with_callback cancelled by user during tool execution");
+                    // 取消语义：把后续逻辑全部跳过，外层 round 检查会看到 cancelled 并退出
+                    break; // 注意：这里 break 的是 backend_calls 的 for 循环，不是 chat_with_callback 的 loop
+                }
+
                 let (is_error, content) = match &outcome {
                     Ok(o) => (o.result.is_error, o.result.content.clone()),
                     Err(e) => {
@@ -542,10 +680,32 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
                     tool_calls: None,
                     name: None,
                     reasoning_content: None,
+                    ..Default::default()
                 });
 
                 if outcome.is_ok() {
                     tool_calls_executed += 1;
+                }
+
+                // 🆕 子 agent 挂起检测：返回结构化 awaiting_user_action →
+                // 复用 request_user_action 交互流程（UIActionRequest + pending + break）。
+                // 挂起 JSON（含 session_id）已作为 ToolResult 写入 history，
+                // 前端据 session_id 调 resume_sub_agent 恢复；这里跳过 ToolExecuted 避免重复展示。
+                if let Ok(o) = &outcome {
+                    let content = &o.result.content;
+                    if let Some((sid, message, actions)) = Self::parse_sub_agent_awaiting(content) {
+                        on_event(ChatEvent::UIActionRequest {
+                            message: message.clone(),
+                            actions: actions.clone(),
+                            session_id: Some(sid.clone()),
+                        });
+                        pending_ui_actions.push(PendingUIAction {
+                            message,
+                            actions,
+                            session_id: Some(sid),
+                        });
+                        break;
+                    }
                 }
 
                 on_event(ChatEvent::ToolExecuted {
@@ -580,10 +740,13 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
                         for item in items {
                             match serde_json::from_value::<UIAction>(item.clone()) {
                                 Ok(a) => actions.push(a),
-                                Err(e) => warn!(
-                                    "request_user_action: 跳过非法 action 条目（{}）：{}",
-                                    e, item
-                                ),
+                                Err(e) => match Self::parse_ui_action_lenient(item.clone()) {
+                                    Some(a) => actions.push(a),
+                                    None => warn!(
+                                        "request_user_action: 跳过非法 action 条目（{}）：{}",
+                                        e, item
+                                    ),
+                                },
                             }
                         }
                     }
@@ -628,6 +791,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
                 on_event(ChatEvent::UIActionRequest {
                     message: message.clone(),
                     actions: actions.clone(),
+                    session_id: None,
                 });
 
                 // 占位 tool result —— 前端在用户操作后替换为真实结果
@@ -641,13 +805,19 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
                     tool_calls: None,
                     name: None,
                     reasoning_content: None,
+                    ..Default::default()
                 });
 
-                pending_ui_actions.push(PendingUIAction { message, actions });
+                pending_ui_actions.push(PendingUIAction {
+                    message,
+                    actions,
+                    session_id: None,
+                });
             }
 
-            // 有 UI action 则中断循环（等用户操作后前端重新调用 chat_with_callback）
-            if !ui_calls.is_empty() {
+            // 有 UI action（含子 agent 挂起）则中断循环，
+            // 等用户操作后前端重新调用 chat_with_callback
+            if !pending_ui_actions.is_empty() {
                 break;
             }
 
@@ -672,6 +842,192 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
             pending_ui_actions,
             cancelled: self.is_cancelled(),
         })
+    }
+
+    /// 恢复挂起的子 agent 会话（用户操作卡片后的第二次执行入口）。
+    ///
+    /// 子 agent 挂起时 `chat_with_callback` 已通过 `ChatEvent::UIActionRequest`
+    /// （`session_id` 非空）通知调用方；调用方收集用户选择后调用本方法，
+    /// 把 `session_id` + `user_input` 直接交给子 agent 会话继续执行——
+    /// **不经过主 agent LLM**，保证恢复结果完全可控（不依赖 LLM 自觉 resume）。
+    ///
+    /// - `tool_name`：子 agent 的注册工具名（如 `"test_sub_agent"`），
+    ///   执行器据此从会话存储取出会话；
+    /// - 过程流事件（文本增量等）经 `on_event` 同步转发；
+    /// - 结果：`Done`（子 agent 完成，返回最终结论文本）或
+    ///   `AwaitingUserAction`（再次挂起，携带最新 `session_id` 继续交互）；
+    /// - 期间 `stop()` 同样生效（100ms tick 检查 + abort + 清理挂起会话）。
+    pub async fn resume_sub_agent<F>(
+        &self,
+        tool_name: &str,
+        session_id: String,
+        user_input: Value,
+        mut on_event: F,
+    ) -> Result<SubAgentResumeOutcome>
+    where
+        F: FnMut(ChatEvent) + Send,
+    {
+        let invocation_id = uuid::Uuid::new_v4().to_string();
+        let (tx, mut rx) = mpsc::channel::<ToolStreamEvent>(256);
+        let stream = ToolStreamSender::new(tx, tool_name.to_string(), invocation_id.clone());
+        let registry = self.tool_registry.clone();
+        let tool_name = tool_name.to_string();
+        let args = json!({
+            // 占位 task：resume 调用不经过 schema 的 required:["task"] 校验
+            // （ToolValidator 只查字段存在性、不查非空）；resume 会话本身
+            // 已含任务上下文，executor 的 resume 分支只取 session_id/user_input。
+            "task": "",
+            "session_id": session_id,
+            "user_input": user_input,
+        });
+        let mut exec_task = tokio::spawn(async move {
+            registry
+                .call_tool_streamed(&tool_name, args, &invocation_id, stream)
+                .await
+        });
+
+        // 周期 tick（100ms）：resume 期间也能立即感知 cancel（同 chat_with_callback）
+        let mut cancel_tick = interval(Duration::from_millis(100));
+        cancel_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        let outcome = loop {
+            tokio::select! {
+                out = &mut exec_task => {
+                    // 任务已完成：先清空通道残留的过程事件（子 agent 最后的输出尾巴），
+                    // 再返回结果——否则 select! 优先命中完成分支会丢事件。
+                    while let Ok(ev) = rx.try_recv() {
+                        if let Some(event) = ev.event {
+                            on_event(event);
+                        }
+                    }
+                    break out
+                }
+                Some(ev) = rx.recv() => {
+                    // 子 agent 过程流 → ChatEvent：结构化事件原样转发（全量协议）
+                    if let Some(event) = ev.event {
+                        on_event(event);
+                    }
+                }
+                _ = cancel_tick.tick() => {
+                    if self.is_cancelled() {
+                        exec_task.abort();
+                        // 清理可能挂起的子 agent 会话（防止取消后残留）
+                        self.tool_registry.clear_sub_agent_sessions();
+                        break Ok(Err(anyhow!("cancelled by user")));
+                    }
+                }
+            }
+        };
+        let outcome = match outcome {
+            Ok(inner) => inner,
+            Err(join_err) => Err(anyhow!("sub agent resume task panicked: {}", join_err)),
+        };
+        let tool_result = outcome?;
+
+        let content = &tool_result.result.content;
+        if let Some((sid, message, actions)) = Self::parse_sub_agent_awaiting(content) {
+            return Ok(SubAgentResumeOutcome::AwaitingUserAction {
+                session_id: sid,
+                message,
+                actions,
+            });
+        }
+        // 完成：提取 content["result"] 作为最终结论文本
+        let text = content
+            .get("result")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        Ok(SubAgentResumeOutcome::Done { text })
+    }
+
+    /// 宽松解析单个 action：标准反序列化失败时，若仅缺 `type` 字段则按 `Confirm`
+    /// 兜底重试（LLM 偶发漏掉 type——兜底比跳过整条更友好，避免卡片无按钮）。
+    /// 返回 `None` 表示确实无法解析（调用方记录跳过日志）。
+    fn parse_ui_action_lenient(value: Value) -> Option<UIAction> {
+        if let Ok(action) = serde_json::from_value::<UIAction>(value.clone()) {
+            return Some(action);
+        }
+        // 容错：缺 type → 补 "confirm" 后重试（仅对 JSON 对象生效）
+        let Value::Object(mut map) = value else {
+            return None;
+        };
+        if map.contains_key("type") {
+            return None; // 有 type 但仍失败 → 其他字段非法，不兜底
+        }
+        map.insert("type".to_string(), json!("confirm"));
+        match serde_json::from_value::<UIAction>(Value::Object(map)) {
+            Ok(action) => {
+                warn!("action 缺少 type 字段，已按 Confirm 兜底");
+                Some(action)
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// 解析子 agent 挂起的结构化 `ToolResult.content`
+    /// （`{"status":"awaiting_user_action","session_id":...,"message":...,"actions":[...]}`）。
+    ///
+    /// 返回 `(session_id, message, actions)`；非挂起或解析失败返回 `None`。
+    /// 解析规则与 `request_user_action` 一致（逐条跳过非法 action，
+    /// multi_select 无 confirm 时自动补「确定」按钮防交互卡死）。
+    fn parse_sub_agent_awaiting(content: &Value) -> Option<(String, String, Vec<UIAction>)> {
+        if content.get("status").and_then(|s| s.as_str()) != Some("awaiting_user_action") {
+            return None;
+        }
+        let session_id = content
+            .get("session_id")
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let message = content
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("子 agent 请求用户确认")
+            .to_string();
+        let raw_actions = content
+            .get("actions")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(vec![]));
+        let mut actions: Vec<UIAction> = Vec::new();
+        match raw_actions {
+            Value::Array(items) => {
+                for item in items {
+                    match serde_json::from_value::<UIAction>(item.clone()) {
+                        Ok(a) => actions.push(a),
+                        Err(e) => match Self::parse_ui_action_lenient(item.clone()) {
+                            Some(a) => actions.push(a),
+                            None => warn!(
+                                "sub_agent UIAction: 跳过非法 action 条目（{}）：{}",
+                                e, item
+                            ),
+                        },
+                    }
+                }
+            }
+            other => warn!("sub_agent UIAction: actions 不是数组（{:?}），忽略", other),
+        }
+        // multi_select 无 confirm → 自动补「确定」按钮（防交互卡死）
+        if actions
+            .iter()
+            .any(|a| matches!(a.action_type, crate::chat::UIActionType::MultiSelect))
+            && !actions
+                .iter()
+                .any(|a| matches!(a.action_type, crate::chat::UIActionType::Confirm))
+        {
+            warn!("sub_agent UIAction: 含 multi_select 但无 confirm 按钮，自动补「确定」按钮（防交互卡死）");
+            actions.insert(
+                0,
+                UIAction {
+                    id: crate::chat::FALLBACK_CONFIRM_ID.to_string(),
+                    action_type: crate::chat::UIActionType::Confirm,
+                    label: crate::chat::FALLBACK_CONFIRM_LABEL.to_string(),
+                    description: None,
+                    options: vec![],
+                },
+            );
+        }
+        Some((session_id, message, actions))
     }
 
     /// 解析 AI 客户端。
@@ -733,6 +1089,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
                 tool_call_id: None,
                 name: None,
                 reasoning_content: None,
+                ..Default::default()
             },
         );
         info!("Injected system prompt from template '{}'", template);
@@ -941,5 +1298,391 @@ mod tests {
 
         assert!(svc.is_cancelled());
         assert!(derived.is_cancelled());
+    }
+
+    // ── 子 agent 挂起-恢复（resume_sub_agent）测试 ──────────────────
+
+    use planned_agent_core::mcp::types::{Tool, ToolResult};
+    use planned_agent_tool_manager::{
+        SubAgentRunOutcome, SubAgentSession, SubAgentSessionRunner, ToolCategory,
+    };
+
+    /// 模拟子 agent runner：`start` 挂起一次（会话为 [`DoneSession`]），
+    /// resume 直接返回最终结论。
+    struct FakeSubAgentRunner;
+
+    #[async_trait::async_trait]
+    impl SubAgentSessionRunner for FakeSubAgentRunner {
+        async fn start(
+            &self,
+            _arguments: Value,
+            _stream: ToolStreamSender,
+        ) -> Result<SubAgentRunOutcome> {
+            Ok(SubAgentRunOutcome::AwaitingUserAction {
+                session: Box::new(DoneSession),
+                message: "演示 1/4：请确认".to_string(),
+                actions: json!([
+                    { "id": "ok", "type": "confirm", "label": "确认" }
+                ]),
+            })
+        }
+    }
+
+    /// 挂起会话：`resume` 返回最终结论。
+    struct DoneSession;
+
+    #[async_trait::async_trait]
+    impl SubAgentSession for DoneSession {
+        async fn resume(
+            &mut self,
+            _user_input: Value,
+            _stream: ToolStreamSender,
+        ) -> Result<SubAgentRunOutcome> {
+            Ok(SubAgentRunOutcome::Done(ToolResult {
+                call_id: String::new(),
+                content: json!({ "result": "子任务完成" }),
+                is_error: false,
+            }))
+        }
+    }
+
+    fn register_fake_sub_agent(registry: &ToolRegistry) {
+        registry.register_sub_agent(
+            Tool {
+                name: "fake_sub".to_string(),
+                description: "test".to_string(),
+                // 与真实 test_sub_agent 一致：required:["task"]，
+                // 确保 resume 调用（不带 task）也能通过入口校验
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": ["task"]
+                }),
+            },
+            vec![ToolCategory::Utility],
+            Arc::new(FakeSubAgentRunner),
+        );
+    }
+
+    /// 完整闭环：start 挂起（会话入存储）→ resume_sub_agent 直接恢复完成，
+    /// 不经过任何 LLM 调用。
+    #[tokio::test]
+    async fn resume_sub_agent_done_closes_loop() {
+        let svc = make_service();
+        let registry = svc.tool_registry.clone();
+        register_fake_sub_agent(&registry);
+
+        // 第一次调用：子 agent 挂起 → 结构化 content 携带 session_id
+        let outcome = registry
+            .call_tool_streamed(
+                "fake_sub",
+                json!({ "task": "x" }),
+                "inv-1",
+                ToolStreamSender::disabled(),
+            )
+            .await
+            .expect("start 挂起");
+        let content = &outcome.result.content;
+        assert_eq!(content["status"], "awaiting_user_action");
+        let session_id = content["session_id"].as_str().expect("session_id").to_string();
+
+        // resume_sub_agent：把用户选择注入会话
+        let result = svc
+            .resume_sub_agent("fake_sub", session_id, json!("确认"), |_| {})
+            .await
+            .expect("resume 成功");
+
+        match result {
+            SubAgentResumeOutcome::Done { text } => assert_eq!(text, "子任务完成"),
+            other => panic!("期望 Done，实际 {:?}", other),
+        }
+        // 完成后会话已被 take，无残留
+        assert_eq!(registry.sub_agent_session_count(), 0);
+    }
+
+    /// 再次挂起：resume 返回 `AwaitingUserAction`（四步演示的下一步），
+    /// 携带最新 session_id 供调用方继续交互。
+    #[tokio::test]
+    async fn resume_sub_agent_can_hang_again() {
+        let svc = make_service();
+        let registry = svc.tool_registry.clone();
+
+        // 自定义 runner：resume 时再次挂起（会话内换新状态）
+        struct AgainRunner;
+        #[async_trait::async_trait]
+        impl SubAgentSessionRunner for AgainRunner {
+            async fn start(
+                &self,
+                _arguments: Value,
+                _stream: ToolStreamSender,
+            ) -> Result<SubAgentRunOutcome> {
+                Ok(SubAgentRunOutcome::AwaitingUserAction {
+                    session: Box::new(AgainSession { resumed: false }),
+                    message: "演示 1/4".to_string(),
+                    actions: json!([]),
+                })
+            }
+        }
+        struct AgainSession {
+            resumed: bool,
+        }
+        #[async_trait::async_trait]
+        impl SubAgentSession for AgainSession {
+            async fn resume(
+                &mut self,
+                _user_input: Value,
+                _stream: ToolStreamSender,
+            ) -> Result<SubAgentRunOutcome> {
+                if !self.resumed {
+                    Ok(SubAgentRunOutcome::AwaitingUserAction {
+                        session: Box::new(AgainSession { resumed: true }),
+                        message: "演示 2/4：请选择".to_string(),
+                        actions: json!([
+                            { "id": "rust", "type": "select", "label": "Rust" }
+                        ]),
+                    })
+                } else {
+                    Ok(SubAgentRunOutcome::Done(ToolResult {
+                        call_id: String::new(),
+                        content: json!({ "result": "全部演示完成" }),
+                        is_error: false,
+                    }))
+                }
+            }
+        }
+
+        registry.register_sub_agent(
+            Tool {
+                name: "again_sub".to_string(),
+                description: "test".to_string(),
+                input_schema: json!({ "type": "object", "properties": {} }),
+            },
+            vec![ToolCategory::Utility],
+            Arc::new(AgainRunner),
+        );
+
+        // start → 挂起
+        let outcome = registry
+            .call_tool_streamed("again_sub", json!({ "task": "x" }), "inv-2", ToolStreamSender::disabled())
+            .await
+            .expect("start");
+        let session_id = outcome.result.content["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+
+        // resume → 再次挂起（沿用原 session id）
+        let result = svc
+            .resume_sub_agent("again_sub", session_id.clone(), json!("开始"), |_| {})
+            .await
+            .expect("resume 挂起");
+        let SubAgentResumeOutcome::AwaitingUserAction {
+            session_id: sid2,
+            message,
+            actions,
+        } = result
+        else {
+            panic!("期望再次挂起");
+        };
+        assert_eq!(sid2, session_id, "再次挂起沿用原 session_id");
+        assert_eq!(message, "演示 2/4：请选择");
+        assert_eq!(actions[0].id, "rust");
+
+        // 再次 resume → 完成
+        let result = svc
+            .resume_sub_agent("again_sub", sid2, json!("Rust"), |_| {})
+            .await
+            .expect("resume 完成");
+        match result {
+            SubAgentResumeOutcome::Done { text } => assert_eq!(text, "全部演示完成"),
+            other => panic!("期望 Done，实际 {:?}", other),
+        }
+        assert_eq!(registry.sub_agent_session_count(), 0);
+    }
+
+    /// resume 期间子 agent 经 `emit_event_sync` 发射结构化 `ChatEvent` →
+    /// `resume_sub_agent` 的 `on_event` **原样还原**（不再降级为字符串，
+    /// `ReasoningDelta` 不再混入 `TextDelta`，`ToolCallArgsDelta` 不再丢弃）。
+    #[tokio::test]
+    async fn resume_sub_agent_forwards_structured_chat_events() {
+        struct StreamingRunner;
+        struct StreamingSession;
+
+        #[async_trait::async_trait]
+        impl SubAgentSessionRunner for StreamingRunner {
+            async fn start(
+                &self,
+                _arguments: Value,
+                _stream: ToolStreamSender,
+            ) -> Result<SubAgentRunOutcome> {
+                Ok(SubAgentRunOutcome::AwaitingUserAction {
+                    session: Box::new(StreamingSession),
+                    message: "演示 1/4：请确认".to_string(),
+                    actions: json!([]),
+                })
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl SubAgentSession for StreamingSession {
+            async fn resume(
+                &mut self,
+                _user_input: Value,
+                stream: ToolStreamSender,
+            ) -> Result<SubAgentRunOutcome> {
+                // 与真实 test_sub_agent 的 forward_sub_agent_event 一致：全量结构化转发
+                stream.emit_event_sync(ChatEvent::TextDelta("增量文本".to_string()));
+                stream.emit_event_sync(ChatEvent::ReasoningDelta("思考过程".to_string()));
+                stream.emit_event_sync(ChatEvent::ToolCallArgsDelta {
+                    id: "call_1".to_string(),
+                    delta: r#"{"a":1}"#.to_string(),
+                });
+                Ok(SubAgentRunOutcome::Done(ToolResult {
+                    call_id: String::new(),
+                    content: json!({ "result": "完成" }),
+                    is_error: false,
+                }))
+            }
+        }
+
+        let svc = make_service();
+        let registry = svc.tool_registry.clone();
+        registry.register_sub_agent(
+            Tool {
+                name: "stream_sub".to_string(),
+                description: "test".to_string(),
+                input_schema: json!({ "type": "object", "properties": {} }),
+            },
+            vec![ToolCategory::Utility],
+            Arc::new(StreamingRunner),
+        );
+
+        // start → 挂起（会话入存储）
+        let outcome = registry
+            .call_tool_streamed(
+                "stream_sub",
+                json!({ "task": "x" }),
+                "inv-3",
+                ToolStreamSender::disabled(),
+            )
+            .await
+            .expect("start 挂起");
+        let session_id = outcome.result.content["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+
+        // resume：收集 on_event 收到的结构化 ChatEvent
+        let mut events: Vec<ChatEvent> = Vec::new();
+        let result = svc
+            .resume_sub_agent("stream_sub", session_id, json!("继续"), |ev| {
+                events.push(ev);
+            })
+            .await
+            .expect("resume 完成");
+
+        assert!(matches!(result, SubAgentResumeOutcome::Done { .. }));
+        assert_eq!(events.len(), 3, "应收到 3 条结构化事件");
+        assert!(
+            matches!(&events[0], ChatEvent::TextDelta(t) if t == "增量文本"),
+            "TextDelta 应原样还原，实际 {:?}",
+            events[0]
+        );
+        assert!(
+            matches!(&events[1], ChatEvent::ReasoningDelta(r) if r == "思考过程"),
+            "ReasoningDelta 应独立还原（不再混入 TextDelta），实际 {:?}",
+            events[1]
+        );
+        assert!(
+            matches!(&events[2], ChatEvent::ToolCallArgsDelta { id, delta } if id == "call_1" && delta == r#"{"a":1}"#),
+            "ToolCallArgsDelta 应原样还原（不再丢弃），实际 {:?}",
+            events[2]
+        );
+        assert_eq!(registry.sub_agent_session_count(), 0);
+    }
+
+    /// 挂起解析：非挂起 content 返回 None；multi_select 无 confirm 自动补「确定」。
+    #[test]
+    fn parse_sub_agent_awaiting_handles_shapes() {
+        // 非挂起 → None
+        assert!(ChatService::<MockPromptManager>::parse_sub_agent_awaiting(
+            &json!({ "result": "ok" })
+        )
+        .is_none());
+
+        // 标准挂起 → 字段齐全
+        let (sid, msg, actions) = ChatService::<MockPromptManager>::parse_sub_agent_awaiting(
+            &json!({
+                "status": "awaiting_user_action",
+                "session_id": "abc",
+                "message": "请确认",
+                "actions": [
+                    { "id": "ok", "type": "confirm", "label": "确认" },
+                    { "id": "no", "type": "confirm", "label": "取消" }
+                ]
+            }),
+        )
+        .expect("解析成功");
+        assert_eq!(sid, "abc");
+        assert_eq!(msg, "请确认");
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0].id, "ok");
+
+        // multi_select 无 confirm → 自动补「确定」（防交互卡死）
+        let (_sid, _msg, actions) = ChatService::<MockPromptManager>::parse_sub_agent_awaiting(
+            &json!({
+                "status": "awaiting_user_action",
+                "session_id": "abc",
+                "message": "请勾选",
+                "actions": [
+                    { "id": "a", "type": "multi_select", "label": "模块A" }
+                ]
+            }),
+        )
+        .expect("解析成功");
+        assert_eq!(actions.len(), 2, "应自动补 confirm 按钮");
+        assert_eq!(actions[0].id, crate::chat::FALLBACK_CONFIRM_ID);
+        assert!(matches!(
+            actions[0].action_type,
+            crate::chat::UIActionType::Confirm
+        ));
+    }
+
+    /// 宽松解析：缺 `type` 时按 Confirm 兜底；其余非法条目仍返回 None。
+    #[test]
+    fn parse_ui_action_lenient_falls_back_to_confirm() {
+        // 标准解析成功（type 齐全）
+        let ok = ChatService::<MockPromptManager>::parse_ui_action_lenient(json!({
+            "id": "ok", "type": "confirm", "label": "确认"
+        }))
+        .expect("标准 action 应解析成功");
+        assert_eq!(ok.id, "ok");
+        assert!(matches!(ok.action_type, crate::chat::UIActionType::Confirm));
+
+        // 缺 type → 按 Confirm 兜底（id/label 保留）
+        let fallback = ChatService::<MockPromptManager>::parse_ui_action_lenient(json!({
+            "id": "no_type", "label": "缺 type 的按钮"
+        }))
+        .expect("缺 type 应兜底为 Confirm");
+        assert_eq!(fallback.id, "no_type");
+        assert_eq!(fallback.label, "缺 type 的按钮");
+        assert!(matches!(
+            fallback.action_type,
+            crate::chat::UIActionType::Confirm
+        ));
+
+        // 其余非法：缺 label / 非对象 → None（不兜底）
+        assert!(
+            ChatService::<MockPromptManager>::parse_ui_action_lenient(json!({
+                "id": "no_label",
+                "type": "confirm"
+            }))
+            .is_none(),
+            "缺 label 不应兜底"
+        );
+        assert!(
+            ChatService::<MockPromptManager>::parse_ui_action_lenient(json!("不是对象")).is_none(),
+            "非对象不应兜底"
+        );
     }
 }
