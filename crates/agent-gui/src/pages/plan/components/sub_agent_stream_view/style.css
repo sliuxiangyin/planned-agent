@@ -1,0 +1,95 @@
+/* 子 agent 过程流展示 */
+.sub-agent-stream {
+  margin-top: 0.75rem;
+  border: 1px dashed var(--dx-color-border, #d1d5db);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.02);
+  overflow: hidden;
+}
+
+.sub-agent-stream__group + .sub-agent-stream__group {
+  border-top: 1px dashed var(--dx-color-border, #d1d5db);
+}
+
+.sub-agent-stream__header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  cursor: pointer;
+  user-select: none;
+  font-size: 0.85rem;
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.sub-agent-stream__header:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.sub-agent-stream__icon {
+  font-size: 1rem;
+}
+
+.sub-agent-stream__name {
+  font-weight: 600;
+  color: var(--dx-color-accent, #2563eb);
+}
+
+.sub-agent-stream__count {
+  color: var(--dx-color-text-secondary, #6b7280);
+  font-size: 0.8rem;
+}
+
+.sub-agent-stream__chevron {
+  margin-left: auto;
+  color: var(--dx-color-text-secondary, #6b7280);
+}
+
+.sub-agent-stream__body {
+  padding: 0.25rem 0.75rem 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.sub-agent-stream__entry {
+  display: grid;
+  grid-template-columns: 6rem 1fr;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  padding: 0.15rem 0;
+}
+
+.sub-agent-stream__entry-kind {
+  color: var(--dx-color-text-secondary, #6b7280);
+  font-size: 0.75rem;
+  font-family: var(--dx-font-mono, monospace);
+}
+
+.sub-agent-stream__entry-data {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.sub-agent-stream__entry--text .sub-agent-stream__entry-data {
+  color: var(--dx-color-text, #111827);
+}
+
+.sub-agent-stream__entry--status .sub-agent-stream__entry-data {
+  color: var(--dx-color-text-secondary, #6b7280);
+  font-style: italic;
+}
+
+.sub-agent-stream__entry--tool .sub-agent-stream__entry-data {
+  font-family: var(--dx-font-mono, monospace);
+  background: rgba(0, 0, 0, 0.04);
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  color: var(--dx-color-accent, #2563eb);
+}
+
+.sub-agent-stream__entry--summary .sub-agent-stream__entry-data {
+  font-weight: 600;
+  color: #059669;
+}
