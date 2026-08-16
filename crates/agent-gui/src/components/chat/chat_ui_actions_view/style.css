@@ -1,0 +1,79 @@
+/* ── ChatUIActionsView 组件样式 ─────────────────────────────────────── */
+
+.chat-ui-actions {
+    padding: 10px 16px;
+    border-top: 1px solid var(--primary-color-4);
+    background: var(--primary-color-2);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.chat-ui-actions-message {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--secondary-color-4);
+    line-height: 1.4;
+    white-space: pre-wrap;
+}
+
+/* Confirm / Select 按钮组：同行 flex-wrap 排列 */
+.action-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+/* Select 类型：虚线边框区分（wrapper span → 内层 Button 组件的 button 元素） */
+.select-btn button {
+    border-style: dashed;
+}
+
+/* Input 类型：独占整行，输入框自动填充剩余宽度 */
+.input-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    width: 100%;
+}
+
+.input-row input {
+    flex: 1;
+    min-width: 0;
+}
+
+/* Select 单选组的「自定义输入」入口（D）：独占一行，输入框撑满剩余宽度 */
+.select-custom-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    width: 100%;
+}
+
+.select-custom-row input {
+    flex: 1;
+    min-width: 0;
+}
+
+/* MultiSelect 复选框组 */
+.multi-select-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 4px 0;
+}
+
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.82rem;
+    color: var(--secondary-color-5);
+    cursor: pointer;
+    user-select: none;
+}
+
+.checkbox-label input[type="checkbox"] {
+    accent-color: var(--primary-color);
+    cursor: pointer;
+}
