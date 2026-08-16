@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use dioxus::prelude::*;
-use planned_agent::chat::{FALLBACK_CONFIRM_ID, FALLBACK_CONFIRM_LABEL, UIAction, UIActionType};
+use planned_agent::{FALLBACK_CONFIRM_ID, FALLBACK_CONFIRM_LABEL, UIAction, UIActionType};
 
 use crate::components::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::input::Input;

@@ -1,6 +1,6 @@
 //! 待处理的 UI 交互状态——Agent 通过 `request_user_action` tool 请求用户操作。
 
-use planned_agent::chat::UIAction;
+use planned_agent::UIAction;
 use planned_agent_core::ai::types::Message;
 
 /// 待处理的 UI 交互状态——Agent 通过 `request_user_action` tool 请求用户操作。

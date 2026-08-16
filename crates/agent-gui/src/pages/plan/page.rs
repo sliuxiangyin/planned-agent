@@ -1,7 +1,7 @@
 //! Plan 页面主组件：组合左侧计划详情面板与右侧面板。
 //!
 //! 灵活模式右侧渲染 `FlexiblePage`（与 `pages/chat/` 实现一致的纯内存聊天面板）；
-//! 周密模式右侧渲染原有聊天面板。
+//! 周密模式右侧渲染占位内容（聊天功能开发中）。
 //! 计划模式在创建时固定，不可在聊天中切换。
 
 use std::sync::Arc;
@@ -10,23 +10,13 @@ use crate::components::alert_dialog::{
     AlertDialog, AlertDialogAction, AlertDialogActions, AlertDialogCancel, AlertDialogDescription,
     AlertDialogTitle,
 };
-use crate::components::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::resizable_panel::ResizablePanel;
-use crate::components::textarea::Textarea;
 use dioxus::prelude::*;
 
-use crate::context::{InitStatus, ModuleState, StorageContext};
-use planned_agent::ChatConfig;
-use crate::components::chat::ChatUIActionsView;
-use crate::services::chat_service::{use_chat_service, ChatServiceSignal};
-use crate::storage::repository::MessageRepo;
+use crate::context::StorageContext;
 
-use super::chat::{handle_user_action, send_message};
-
-use super::components::plan_todo_view::PlanTodoView;
 use super::left_panel::PlanLeftPanel;
 use super::flexible::FlexiblePage;
-use super::message::MessageListView;
 use super::shared::load_plan_data::load_plan_data as load_plan_data_shared;
 use super::states::{ChatState, PlanState};
 use super::types::{ParamDef, PendingUIState, PlanInfo};
@@ -39,7 +29,6 @@ const RESIZABLE_CSS: Asset = asset!("/assets/resizable_panel.css");
 #[component]
 pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
     // ── 全局 Context ──
-    let init_status = use_context::<Memo<InitStatus>>();
     let storage = use_context::<Resource<Option<Arc<StorageContext>>>>();
 
     // ── 计划信息（从 DB 异步加载） ──
@@ -55,7 +44,7 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
     // ── 计划模式（从 DB 加载后固定） ──
     let plan_mode = use_signal_sync(|| None::<String>);
 
-    // ── 计划版本号（save_flexible_plan 成功后递增，通知 PlanTodoView 重新加载） ──
+    // ── 计划版本号（成功保存后递增，通知 PlanTodoView 重新加载） ──
     let plan_version = use_signal_sync(|| 0u32);
 
     // ── 已固化的参数定义（清晰度检查勾选后暂存，确认生成时随事件落库） ──
@@ -93,18 +82,6 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
             ));
         }
     });
-
-    // ── Chat Service（周密模式使用 thorough 模板；灵活模式由 FlexiblePage 自管） ──
-    let chat_config = ChatConfig {
-        system_prompt_template: Some("thorough/thorough_system".to_string()),
-        allowed_tools: Some(vec!["request_user_action".to_string()]),
-        ..Default::default()
-    };
-    let chat_signal = use_chat_service(chat_config);
-
-    // ── 按钮可用性 ──
-    let can_create = init_status.read().ai.state == ModuleState::Ready
-        && init_status.read().prompt.state == ModuleState::Ready;
 
     // ── 获取 message_repo / plan_repo 用于持久化与删除 ──
     let message_repo = storage
@@ -184,16 +161,7 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
                     if mode == "flexible" {
                         rsx! { FlexiblePage {} }
                     } else {
-                        render_chat_panel(
-                            plan_id.clone(),
-                            storage.clone(),
-                            chat,
-                            plan,
-                            chat_signal,
-                            can_create,
-                            message_repo.clone(),
-                            show_clear_dialog,
-                        )
+                        render_chat_panel_placeholder()
                     }
                 },
             }
@@ -224,180 +192,13 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
     }
 }
 
-/// 渲染右侧聊天面板（周密模式）：PlanTodo + MessageList + 待处理 UI + 输入发送区。
-#[allow(clippy::too_many_arguments)]
-fn render_chat_panel(
-    plan_id: String,
-    storage: Resource<Option<Arc<StorageContext>>>,
-    mut chat: ChatState,
-    plan: PlanState,
-    chat_signal: ChatServiceSignal,
-    can_create: bool,
-    message_repo: Option<Arc<MessageRepo>>,
-    mut show_clear_dialog: Signal<bool, SyncStorage>,
-) -> Element {
-    let sidx = chat.sidx();
+/// 渲染右侧聊天面板占位（周密模式）：聊天功能开发中。
+fn render_chat_panel_placeholder() -> Element {
     rsx! {
         div { class: "chat-panel",
-            PlanTodoView {
-                plan_id: plan_id.clone(),
-                storage: storage.clone(),
-                plan_version: plan.plan_version,
-            }
-
-            MessageListView {
-                messages: chat.messages,
-                reasoning_texts: chat.reasoning_texts,
-                streaming_idx: chat.streaming_idx,
-            }
-
-            // 待处理的 UI 交互
-            {
-                let ui = chat.pending_ui.read();
-                if let Some(ref pending) = *ui {
-                    let p = pending.clone();
-                    let pid = plan_id.clone();
-                    let msg_repo = message_repo.clone();
-                    rsx! {
-                        ChatUIActionsView {
-                            message: p.message.clone(),
-                            actions: p.actions.clone(),
-                            on_action: move |(action, choice)| {
-                                handle_user_action(
-                                    action,
-                                    choice,
-                                    p.clone(),
-                                    chat,
-                                    chat_signal,
-                                    plan,
-                                    pid.clone(),
-                                    msg_repo.clone(),
-                                );
-                            },
-                        }
-                    }
-                } else {
-                    rsx! {}
-                }
-            }
-
-            // 输入发送区
-            div { class: "chat-input-area",
-                Textarea {
-                    placeholder: if can_create { "输入消息..." } else { "等待 AI 与 Prompt 初始化..." },
-                    value: "{chat.input_text}",
-                    disabled: !can_create,
-                    oninput: move |e: FormEvent| chat.input_text.set(e.value()),
-                    onkeydown: {
-                        let pid = plan_id.clone();
-                        let repo = message_repo.clone();
-                        move |e: KeyboardEvent| {
-                            if e.data.key() == keyboard_types::Key::Enter && !e.data.modifiers().shift() {
-                                e.prevent_default();
-                                if can_create {
-                                    if let Some(ref repo) = repo {
-                                        send_message(
-                                            chat_signal,
-                                            chat,
-                                            pid.clone(),
-                                            repo.clone(),
-                                            plan.mode(),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    },
-                }
-                // ── 操作行：清除消息 / 发送 / 停止 ──
-                div { class: "chat-input-area__actions",
-                      Button {
-                                class: "chat-input-area__icon-btn chat-input-area__icon-btn--clear",
-                                variant: ButtonVariant::Ghost,
-                                size: ButtonSize::Xs,
-                                disabled: sidx.is_some(),
-                                title: Some("清除消息记录"),
-                                onclick: move |_: MouseEvent| show_clear_dialog.set(true),
-                                svg {
-                                    xmlns: "http://www.w3.org/2000/svg",
-                                    width: "16",
-                                    height: "16",
-                                    view_box: "0 0 24 24",
-                                    fill: "none",
-                                    stroke: "currentColor",
-                                    stroke_width: "2",
-                                    stroke_linecap: "round",
-                                    stroke_linejoin: "round",
-                                    path { d: "M3 6h18" }
-                                    path { d: "M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" }
-                                    path { d: "M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" }
-                                    line { x1: "10", y1: "11", x2: "10", y2: "17" }
-                                    line { x1: "14", y1: "11", x2: "14", y2: "17" }
-                                }
-                            }
-
-                    div { class: "chat-input-area__placeholder" }
-                    if sidx.is_none() {
-                        Button {
-                            class: "chat-input-area__icon-btn chat-input-area__icon-btn--send",
-                            variant: ButtonVariant::Primary,
-                            size: ButtonSize::Xs,
-                            disabled: !can_create,
-                            title: if !can_create { Some("AI 与 Prompt 初始化完成后才能发送") } else { Some("发送") },
-                            onclick: {
-                                let pid = plan_id.clone();
-                                let repo = message_repo.clone();
-                                move |_: MouseEvent| {
-                                    if can_create {
-                                        if let Some(ref repo) = repo {
-                                            send_message(
-                                                chat_signal,
-                                                chat,
-                                                pid.clone(),
-                                                repo.clone(),
-                                                plan.mode(),
-                                            );
-                                        }
-                                    }
-                                }
-                            },
-                            svg {
-                                xmlns: "http://www.w3.org/2000/svg",
-                                width: "16",
-                                height: "16",
-                                view_box: "0 0 24 24",
-                                fill: "none",
-                                stroke: "currentColor",
-                                stroke_width: "2",
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
-                                path { d: "M22 2 11 13" }
-                                path { d: "m22 2-7 20-4-9-9-4 20-7z" }
-                            }
-                        }
-                    } else {
-                        Button {
-                            class: "chat-input-area__icon-btn chat-input-area__icon-btn--stop",
-                            variant: ButtonVariant::Destructive,
-                            size: ButtonSize::Xs,
-                            title: Some("停止生成"),
-                            onclick: move |_: MouseEvent| {
-                                // TODO(重构 service.rs): stop() 语义可能变化（cancelled 共享机制调整），调用方需同步。
-                                if let Some(ref svc) = *chat_signal.read() {
-                                    svc.stop();
-                                }
-                            },
-                            svg {
-                                xmlns: "http://www.w3.org/2000/svg",
-                                width: "16",
-                                height: "16",
-                                view_box: "0 0 24 24",
-                                fill: "currentColor",
-                                rect { x: "6", y: "6", width: "12", height: "12", rx: "1.5" }
-                            }
-                        }
-                    }
-                }
+            div {
+                style: "display: flex; align-items: center; justify-content: center; flex: 1; color: var(--text-secondary, #999); font-size: 14px;",
+                "聊天功能开发中…"
             }
         }
     }

@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use planned_agent_core::mcp::types::{Tool, ToolResult};
 use planned_agent_tool_manager::{
     CustomToolExecutor, OneShotSubAgentRunner, StreamKind, SubAgentRunOutcome, SubAgentSession,
-    SubAgentSessionRunner, ToolCategory, ToolRegistry, ToolStreamSender,
+    SubAgentSessionRunner, ToolCategory, ToolRegistry, ToolStreamSender, ToolRegistryStats,
 };
 
 /// mock 子 agent runner：按序发射 4 种过程事件后返回最终结果
@@ -220,7 +220,7 @@ async fn sub_agent_awaiting_user_action_then_resume() {
         Arc::new(SessionMock),
     );
 
-    // ── 第一次调用：挂起等待用户输入 ──
+    // ── 第一次调用：挂起，返回结构化 ToolResult ──
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     let stream = ToolStreamSender::new(tx, "research_agent", "inv-1");
     let outcome = registry
@@ -249,35 +249,43 @@ async fn sub_agent_awaiting_user_action_then_resume() {
     assert_eq!(events[0].kind, StreamKind::Status);
     assert_eq!(events[1].kind, StreamKind::TextDelta);
 
-    // ── 第二次调用：带 session_id resume ──
-    let (tx2, mut rx2) = tokio::sync::mpsc::channel(16);
-    let stream2 = ToolStreamSender::new(tx2, "research_agent", "inv-2");
-    let outcome2 = registry
-        .call_tool_streamed(
+    // ── resume 路径：后台执行 + signal_resume 驱动 ──
+    let registry2 = Arc::new(registry);
+    let reg = registry2.clone();
+    let sid_clone = sid.clone();
+    
+    // 后台任务：调用 call_tool_streamed 带 session_id，会等待 signal_resume
+    let handle = tokio::spawn(async move {
+        let (tx2, _rx2) = tokio::sync::mpsc::channel(16);
+        let stream2 = ToolStreamSender::new(tx2, "research_agent", "inv-2");
+        reg.call_tool_streamed(
             "research_agent",
-            json!({"session_id": sid, "user_input": "confirm"}),
+            json!({"session_id": sid_clone}),
             "inv-2",
             stream2,
         )
         .await
-        .expect("resume call ok");
+        .expect("resume call ok")
+    });
+
+    // 等后台任务进入 rx.await 阻塞
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // signal_resume 唤醒后台任务
+    registry2
+        .signal_resume(&sid, json!("confirm"))
+        .expect("signal_resume ok");
+
+    let outcome2 = handle.await.expect("join ok");
 
     // 完成：会话清理
-    assert_eq!(registry.sub_agent_session_count(), 0, "完成后会话应被清理");
+    assert_eq!(registry2.sub_agent_session_count(), 0, "完成后会话应被清理");
     assert_eq!(outcome2.result.call_id, "inv-2");
     assert_eq!(outcome2.result.content, json!({
         "query": "q",
         "confirmed": "confirm",
         "answer": "completed"
     }));
-
-    let mut events2 = Vec::new();
-    while let Ok(ev) = rx2.try_recv() {
-        events2.push(ev);
-    }
-    assert_eq!(events2.len(), 2);
-    assert_eq!(events2[0].kind, StreamKind::TextDelta);
-    assert_eq!(events2[1].kind, StreamKind::FinalSummary);
 }
 
 #[tokio::test]

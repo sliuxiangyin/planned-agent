@@ -1,15 +1,15 @@
-//! 灵活模式主组件：基于 v2_chat 的聊天面板（含子 agent 支持）。
+//! 灵活模式主组件：基于 chat 的聊天面板（含子 agent 支持）。
 //!
 //! 使用通用 `ChatPanel` 组件渲染 UI，自身只负责：
-//! - V2ChatService 初始化与事件订阅
+//! - ChatService 初始化与事件订阅
 //! - 子 agent 注册（demo_agent）
 //! - 模板切换与可用模板列表
 
 use std::sync::{Arc, OnceLock};
 
 use dioxus::prelude::*;
-use planned_agent::v2_chat::{V2ChatConfig, V2ChatSubAgentRunner};
-use planned_agent::V2ChatService;
+use planned_agent::chat::{ChatConfig, SubAgentRunner};
+use planned_agent::ChatService;
 use planned_agent_core::prompt::PromptManager;
 use planned_agent_tool_manager::ToolCategory;
 
@@ -17,7 +17,7 @@ use crate::components::chat::{ChatPanel, chat_flow::{ChatSignals, ensure_subscri
 use crate::components::page_header::PageHeader;
 use crate::components::button::{Button, ButtonSize, ButtonVariant};
 use crate::context::{AiContext, PromptContext, ToolsContext};
-use crate::services::chat_service::{use_v2_chat_service, V2ChatServiceSignal};
+use crate::services::chat_service::{use_chat_service, ChatServiceSignal};
 
 use dioxus_icons::lucide::Trash2;
 
@@ -42,7 +42,7 @@ pub fn FlexiblePage() -> Element {
     let pending_ui = use_signal_sync(|| None::<PendingUI>);
     let input_text = use_signal_sync(String::new);
     let pending_tool_call_id = use_signal_sync(|| None::<String>);
-    let subscription = use_signal_sync(|| None::<planned_agent::v2_chat::SubscriptionGuard>);
+    let subscription = use_signal_sync(|| None::<planned_agent::chat::SubscriptionGuard>);
     let mut chat = ChatSignals {
         messages,
         reasoning_texts,
@@ -57,14 +57,14 @@ pub fn FlexiblePage() -> Element {
     let mut thinking = use_signal_sync(|| true);
     let mut temperature = use_signal_sync(|| "0.7".to_string());
 
-    // ── 父 agent V2ChatService ──
+    // ── 父 agent ChatService ──
     let mut template = use_signal_sync(|| Some(DEFAULT_TEMPLATE.to_string()));
-    let initial_config = V2ChatConfig {
+    let initial_config = ChatConfig {
         system_prompt_template: template.read().clone(),
         allowed_tools: Some(vec![SUB_AGENT_TOOL_NAME.to_string()]),
         ..Default::default()
     };
-    let chat_signal: V2ChatServiceSignal = use_v2_chat_service(initial_config);
+    let chat_signal: ChatServiceSignal = use_chat_service(initial_config);
 
     // ── 事件订阅：service ready 后注册一次 ──
     {
@@ -87,23 +87,23 @@ pub fn FlexiblePage() -> Element {
     let prompt = prompt_resource.read().as_ref().and_then(|x| x.clone());
     if let (Some(ai), Some(ctx), Some(prompt)) = (ai, tools_ctx, prompt) {
         SUB_AGENT_REGISTERED.get_or_init(|| {
-            let child_service = match V2ChatService::new(
+            let child_service = match ChatService::new(
                 (*ai.manager).clone(),
                 ctx.registry.clone(),
                 prompt.manager.clone(),
-                V2ChatConfig {
+                ChatConfig {
                     system_prompt_template: Some(SUB_AGENT_PROMPT.to_string()),
                     ..Default::default()
                 },
             ) {
                 Ok(svc) => svc,
                 Err(e) => {
-                    tracing::error!("子 agent V2ChatService 创建失败: {}", e);
+                    tracing::error!("子 agent ChatService 创建失败: {}", e);
                     return;
                 }
             };
 
-            let runner = V2ChatSubAgentRunner::new(child_service, 0, 3);
+            let runner = SubAgentRunner::new(child_service, 0, 3);
 
             let tool = planned_agent_core::mcp::types::Tool {
                 name: SUB_AGENT_TOOL_NAME.to_string(),

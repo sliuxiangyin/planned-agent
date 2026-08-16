@@ -8,7 +8,7 @@ use anyhow::Result;
 use chrono::Local;
 use planned_agent_ai_manager::AiManager;
 use planned_agent_core::ai::AiClient;
-use planned_agent_core::planner::react::ReActStep;
+use planned_agent_core::planner::react::{Action, Observation, ReActStep, Thought};
 use planned_agent_core::planner::trace::{ExecutionTrace, GeneralizedAction};
 use planned_agent_core::prompt::{PromptContext, PromptManager};
 use planned_agent_core::ai::types::{ChatCompletionRequest, Message, MessageContent, MessageRole};
@@ -176,7 +176,7 @@ impl<PM: PromptManager + 'static> TraceRecorder<PM> {
         }
 
         // 从 messages 提取 ReActStep 序列
-        let steps = crate::planner::react::flexible_plan_agent::extract_react_steps_from_messages(messages);
+        let steps = extract_react_steps_from_messages(messages);
 
         if steps.is_empty() {
             info!("[TraceRecorder] 跳过记录：消息中无工具调用");
@@ -526,4 +526,77 @@ impl<PM: PromptManager + 'static> TraceRecorder<PM> {
             _ => params.clone(),
         }
     }
+}
+
+/// 从 chat_with_callback 产生的消息历史中提取 ReActStep 序列。
+///
+/// 匹配模式：`Assistant(tool_calls)` → `Tool(result)` 对。
+pub(crate) fn extract_react_steps_from_messages(messages: &[Message]) -> Vec<ReActStep> {
+    let mut steps: Vec<ReActStep> = Vec::new();
+    let mut pending: HashMap<String, Action> = HashMap::new();
+
+    for msg in messages {
+        if let Some(tool_calls) = &msg.tool_calls {
+            for tc in tool_calls {
+                let params: Value =
+                    serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null);
+                pending.insert(
+                    tc.id.clone(),
+                    Action {
+                        tool_name: tc.function.name.clone(),
+                        parameters: params,
+                        reasoning: None,
+                        tool_call_id: Some(tc.id.clone()),
+                    },
+                );
+            }
+        }
+
+        if matches!(msg.role, MessageRole::Tool) {
+            if let Some(call_id) = &msg.tool_call_id {
+                if let Some(action) = pending.remove(call_id) {
+                    let raw_output = match &msg.content {
+                        Some(MessageContent::ToolResult { content, .. }) => {
+                            Value::String(content.clone())
+                        }
+                        _ => Value::Null,
+                    };
+                    let output = serde_json::from_str(
+                        raw_output.as_str().unwrap_or("null"),
+                    )
+                    .unwrap_or_else(|_| raw_output.clone());
+
+                    let is_error = output
+                        .get("is_error")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+
+                    steps.push(ReActStep {
+                        thought: Thought {
+                            reasoning: String::new(),
+                            plan: String::new(),
+                            confidence: 0.5,
+                        },
+                        action,
+                        observation: Observation {
+                            output: output.clone(),
+                            raw_output,
+                            is_complete: !is_error,
+                            error: if is_error {
+                                output
+                                    .get("content")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                            } else {
+                                None
+                            },
+                            duration_ms: 0,
+                        },
+                    });
+                }
+            }
+        }
+    }
+
+    steps
 }

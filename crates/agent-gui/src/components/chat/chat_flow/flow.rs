@@ -1,6 +1,6 @@
 //! 灵活模式聊天消息流转逻辑（纯内存，不持久化）。
 //!
-//! 基于 v2 [`planned_agent::V2ChatService`] 实现，支持：
+//! 基于 v2 [`planned_agent::ChatService`] 实现，支持：
 //! - 父 agent 的 `request_user_action` 交互（`UIActionRequest.run_id=None`）
 //! - 子 agent 的 UI 交互（`UIActionRequest.run_id=Some(run_id)`，走
 //!   `resume_sub_agent` 恢复）
@@ -14,13 +14,13 @@
 use std::sync::Arc;
 
 use dioxus::prelude::*;
-use planned_agent::v2_chat::{SubscriptionGuard, V2ChatEvent};
-use planned_agent::V2ChatService;
+use planned_agent::chat::{SubscriptionGuard, ChatEvent as ServiceChatEvent};
+use planned_agent::ChatService;
 use planned_agent_core::ai::types::{Message, MessageContent, MessageRole};
 use planned_agent_core::events::{ChatEvent, UIAction};
 use planned_agent_prompt_manager::FilePromptManager;
 
-use crate::services::chat_service::V2ChatServiceSignal;
+use crate::services::chat_service::ChatServiceSignal;
 
 // ── 数据结构 ──────────────────────────────────────────────────────────────
 
@@ -163,7 +163,7 @@ impl ChatSignals {
 // ── 发送与事件消费 ────────────────────────────────────────────────────────
 
 /// 发送消息：push user turn → send_text 入队。
-pub fn send_message(chat_signal: V2ChatServiceSignal, mut chat: ChatSignals, text: String) {
+pub fn send_message(chat_signal: ChatServiceSignal, mut chat: ChatSignals, text: String) {
     chat.clear_pending();
     chat.push_user_turn(text.clone());
 
@@ -183,7 +183,7 @@ pub fn send_message(chat_signal: V2ChatServiceSignal, mut chat: ChatSignals, tex
 /// 注册一次事件订阅（guard 存入 subscription signal，drop 时自动退订）。
 /// 首次 service ready 后调用一次即可，重复调用无效（已订阅则跳过）。
 pub fn ensure_subscription(
-    chat_svc: &Arc<V2ChatService<FilePromptManager>>,
+    chat_svc: &Arc<ChatService<FilePromptManager>>,
     mut chat: ChatSignals,
 ) {
     if chat.subscription.read().is_none() {
@@ -192,26 +192,26 @@ pub fn ensure_subscription(
     }
 }
 
-/// 消费 `V2ChatEvent`：流式写入、交互卡片、子 agent UI、Done/Error 收尾。
-fn handle_event(mut chat: ChatSignals, ev: V2ChatEvent) {
+/// 消费 `ChatEvent`：流式写入、交互卡片、子 agent UI、Done/Error 收尾。
+fn handle_event(mut chat: ChatSignals, ev: ServiceChatEvent) {
     match ev {
         // ── 流式文本/推理 ──
-        V2ChatEvent::Chat(ChatEvent::TextDelta(chunk)) => {
+        ServiceChatEvent::Chat(ChatEvent::TextDelta(chunk)) => {
             chat.append_streaming(&chunk);
         }
-        V2ChatEvent::Chat(ChatEvent::ReasoningDelta(chunk)) => {
+        ServiceChatEvent::Chat(ChatEvent::ReasoningDelta(chunk)) => {
             chat.append_streaming_reasoning(&chunk);
         }
 
         // ── 记录 request_user_action 的 tool_call_id ──
-        V2ChatEvent::Chat(ChatEvent::ToolCallStart { id, name })
+        ServiceChatEvent::Chat(ChatEvent::ToolCallStart { id, name })
             if name == "request_user_action" =>
         {
             chat.pending_tool_call_id.set(Some(id));
         }
 
         // ── UI 交互请求（主 agent：run_id=None；子 agent：run_id=Some(run_id)）──
-        V2ChatEvent::Chat(ChatEvent::UIActionRequest {
+        ServiceChatEvent::Chat(ChatEvent::UIActionRequest {
             message,
             actions,
             session_id,
@@ -226,14 +226,14 @@ fn handle_event(mut chat: ChatSignals, ev: V2ChatEvent) {
         }
 
         // ── 对话结束 ──
-        V2ChatEvent::Done { cancelled: _ } => {
+        ServiceChatEvent::Done { cancelled: _ } => {
             chat.stop_streaming();
             chat.clear_pending();
             chat.pending_tool_call_id.set(None);
         }
 
         // ── 错误 ──
-        V2ChatEvent::Error(e) => {
+        ServiceChatEvent::Error(e) => {
             tracing::error!("聊天事件错误: {}", e);
             if chat.pending_ui.read().is_none() {
                 chat.stop_streaming();
@@ -256,7 +256,7 @@ pub fn handle_user_action(
     choice: String,
     pending: PendingUI,
     mut chat: ChatSignals,
-    chat_signal: V2ChatServiceSignal,
+    chat_signal: ChatServiceSignal,
 ) {
     let Some(asst_idx) = chat.last_assistant_idx() else {
         return;

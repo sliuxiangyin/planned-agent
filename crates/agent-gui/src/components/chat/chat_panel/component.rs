@@ -7,7 +7,7 @@
 //! - Composer 工具栏（模板选择、思考模式、温度选择）
 //! - 清空会话二次确认弹窗
 //!
-//! 业务逻辑（ChatFlow、V2ChatService 初始化）由调用方在页面层处理。
+//! 业务逻辑（ChatFlow、ChatService 初始化）由调用方在页面层处理。
 
 use dioxus::prelude::*;
 use planned_agent_core::ai::types::{Message, MessageContent, MessageRole};
@@ -28,7 +28,7 @@ use crate::components::dropdown_menu::{
 use dioxus_primitives::tooltip::{Tooltip as TooltipPrim, TooltipContent as TooltipContentPrim, TooltipTrigger as TooltipTriggerPrim};
 use crate::components::scroll_area::ScrollArea;
 use crate::components::textarea::Textarea;
-use crate::services::chat_service::V2ChatServiceSignal;
+use crate::services::chat_service::ChatServiceSignal;
 
 use crate::components::chat::chat_flow::send_message;
 
@@ -40,10 +40,10 @@ const PLAN_CSS: Asset = asset!("/assets/plan.css");
 pub struct ChatPanelProps {
     /// 聊天状态信号（消息列表、输入框等）
     pub chat: ChatSignals,
-    /// V2ChatService 信号（用于发送消息、停止等操作）
-    pub chat_signal: V2ChatServiceSignal,
+    /// ChatService 信号（用于发送消息、停止等操作）
+    pub chat_signal: ChatServiceSignal,
     /// 用户操作回调（处理 UIAction 卡片交互）
-    pub on_user_action: EventHandler<(planned_agent::chat::UIAction, String, PendingUI)>,
+    pub on_user_action: EventHandler<(planned_agent::UIAction, String, PendingUI)>,
     /// 模板标签（显示在 composer 工具栏）
     #[props(default = String::new())]
     pub template_label: String,
