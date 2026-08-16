@@ -74,6 +74,7 @@ pub fn FlexiblePage() -> Element {
         let chat_for_sub = chat;
         use_effect(move || {
             if let Some(ref svc) = *svc_sig.read() {
+                let _ = svc.start_driver();
                 ensure_subscription(svc, chat_for_sub);
             }
         });

@@ -121,8 +121,9 @@ impl<PM: PromptManager + Send + Sync + 'static> V2ChatService<PM> {
     // ── 发送 ──
 
     /// 发送单条消息并触发一次异步对话。
+    ///
+    /// 调用前须确保 [`start_driver`](Self::start_driver) 已调用。
     pub fn send(&self, message: Message) -> Result<SendTicket> {
-        self.ensure_driver()?;
         let (tx, rx) = oneshot::channel();
         self.state
             .cmd_tx
@@ -147,13 +148,14 @@ impl<PM: PromptManager + Send + Sync + 'static> V2ChatService<PM> {
     }
 
     /// 提交用户对 UI 交互卡片的确认。
+    ///
+    /// 调用前须确保 [`start_driver`](Self::start_driver) 已调用。
     pub fn confirm_user_action(
         &self,
         tool_call_id: &str,
         choice: &str,
         action_id: &str,
     ) -> Result<()> {
-        self.ensure_driver()?;
         self.state
             .cmd_tx
             .send(Command::Confirm {
@@ -181,8 +183,9 @@ impl<PM: PromptManager + Send + Sync + 'static> V2ChatService<PM> {
     /// 然后从 history 继续 `run_conversation`（**不是**新 `send`）。
     ///
     /// 由 [`crate::v2_chat::V2ChatSubAgentSession::resume`] 调用。
+    ///
+    /// 调用前须确保 [`start_driver`](Self::start_driver) 已调用。
     pub(crate) fn resume(&self, choice: &str, action_id: &str) -> Result<SendTicket> {
-        self.ensure_driver()?;
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.state
             .cmd_tx
@@ -198,8 +201,20 @@ impl<PM: PromptManager + Send + Sync + 'static> V2ChatService<PM> {
     // ── 控制与查询 ──
 
     /// 请求取消当前对话（下一个检查点生效）。
+    ///
+    /// 除设置 `cancelled` 标志外，同时清理所有挂起的子 agent 会话（drop
+    /// `resume_tx`），使阻塞在 `execute_streamed` → `rx.await` 的子 agent
+    /// 立即收到通道关闭错误并返回，从而解除主 agent driver 的阻塞。
     pub fn stop(&self) {
         self.state.cancelled.store(true, Ordering::SeqCst);
+        // 清理所有挂起的子 agent 会话：drop resume_tx 唤醒阻塞的 execute_streamed
+        let count = self.state.tool_registry.clear_sub_agent_sessions();
+        if count > 0 {
+            tracing::info!(
+                "v2_chat: stop() 清理了 {} 个挂起的子 agent 会话",
+                count
+            );
+        }
     }
 
     /// 取消状态查询。
@@ -222,10 +237,16 @@ impl<PM: PromptManager + Send + Sync + 'static> V2ChatService<PM> {
 
     /// 清空内部消息历史（会话重置）。
     ///
-    /// **立即**清空，调用方须确保当前无活跃对话（await 所有未完成的
-    /// `SendTicket`）；若对话可能仍在运行，请用 [`Self::reset_session`]
-    /// （入队串行清空，安全）。
+    /// **立即**清空；若对话正在运行（`Running` / `AwaitingUserAction`），本方法
+    /// 会发出警告并跳过清空，避免与 driver 竞争。安全的替代方案是
+    /// [`Self::reset_session`]（入队串行清空）。
     pub fn clear(&self) {
+        let state = self.state.run_state.lock().unwrap();
+        if matches!(*state, crate::v2_chat::state::RunState::Running | crate::v2_chat::state::RunState::AwaitingUserAction) {
+            tracing::warn!("v2_chat: clear() 被调用但对话正在运行（{:?}），跳过清空以避免竞争；请用 reset_session()", *state);
+            return;
+        }
+        drop(state);
         self.state.history.clear();
     }
 
@@ -261,8 +282,9 @@ impl<PM: PromptManager + Send + Sync + 'static> V2ChatService<PM> {
     /// 在**当前对话（含 UI 确认等待）结束后**执行，因此即使有对话正在运行
     /// 也安全——配合 `stop()` + [`Self::set_system_prompt_template`] 即可
     /// 实现"不重建 service 的模板热切换"。
+    ///
+    /// 调用前须确保 [`start_driver`](Self::start_driver) 已调用。
     pub fn reset_session(&self) -> Result<()> {
-        self.ensure_driver()?;
         self.state
             .cmd_tx
             .send(Command::Reset)
@@ -277,8 +299,12 @@ impl<PM: PromptManager + Send + Sync + 'static> V2ChatService<PM> {
 
     // ── 内部：driver 生命周期 ──
 
-    fn ensure_driver(&self) -> Result<()> {
-        // 使用 compare_exchange 而非 swap，确保只有第一个调用者负责启动 driver
+    /// 启动后台 driver task（幂等；多次调用安全）。
+    ///
+    /// 首次 `send` / `confirm_user_action` / `reset_session` 前必须调用。
+    /// 主 agent 在 service ready 后调用一次；子 agent 在 `start()` 时调用。
+    pub fn start_driver(&self) -> Result<()> {
+        // 使用 compare_exchange 确保只有第一个调用者负责启动 driver
         if self
             .state
             .driver_started
@@ -302,7 +328,7 @@ impl<PM: PromptManager + Send + Sync + 'static> V2ChatService<PM> {
                 self.state.driver_started.store(false, Ordering::SeqCst);
                 *self.state.driver_rx.lock().unwrap() = Some(rx);
                 return Err(anyhow!(
-                    "无法获取 tokio runtime（{}）：send/confirm 需要运行中的 tokio runtime 驱动后台 loop",
+                    "无法获取 tokio runtime（{}）：需要运行中的 tokio runtime 驱动后台 loop",
                     e
                 ));
             }

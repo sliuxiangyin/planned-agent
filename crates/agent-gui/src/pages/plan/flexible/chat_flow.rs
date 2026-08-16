@@ -1,15 +1,15 @@
 //! 灵活模式聊天消息流转逻辑（纯内存，不持久化）。
 //!
 //! 基于 v2 [`planned_agent::V2ChatService`] 实现，支持：
-//! - 父 agent 的 `request_user_action` 交互（`session_id=None`）
-//! - 子 agent 的 UI 交互（`UIActionRequest.session_id=Some(run_id)`，走
+//! - 父 agent 的 `request_user_action` 交互（`UIActionRequest.run_id=None`）
+//! - 子 agent 的 UI 交互（`UIActionRequest.run_id=Some(run_id)`，走
 //!   `resume_sub_agent` 恢复）
 //!
 //! 事件驱动：`send_text` 入队后，事件经 `on_chat` 订阅实时写入 UI。
 //!
 //! 主/子 agent 的 UI 交互统一用 `ChatEvent::UIActionRequest` 表达，前端只按
-//! `session_id`（即 run_id）是否为空区分：空走 `confirm_user_action`，非空走
-//! `resume_sub_agent`。
+//! `run_id`（即 `session_id`，子 agent 的 run_id）是否为空区分：空走
+//! `confirm_user_action`，非空走 `resume_sub_agent`。
 
 use std::sync::Arc;
 
@@ -33,9 +33,9 @@ pub(crate) struct PendingUI {
     pub(crate) actions: Vec<UIAction>,
     /// 对应的 LLM tool_call_id（`confirm_user_action` 按此回填 tool 消息）
     pub(crate) tool_call_id: String,
-    /// 子 agent 的 run_id（`UIActionRequest.session_id`）：
+    /// 子 agent 的 run_id（`UIActionRequest` 中的 `session_id` 字段）：
     /// 非空 = 子 agent 挂起，走 `resume_sub_agent` 路径；空 = 主 agent 交互。
-    pub(crate) session_id: Option<String>,
+    pub(crate) run_id: Option<String>,
 }
 
 /// 消息状态（纯内存，Signal 均为 `Copy` 可直接进闭包/异步块）。
@@ -75,7 +75,9 @@ impl ChatSignals {
         };
         let asst_msg = Message {
             role: MessageRole::Assistant,
-            content: Some(MessageContent::Text { text: String::new() }),
+            content: Some(MessageContent::Text {
+                text: String::new(),
+            }),
             ..Default::default()
         };
         let asst_idx;
@@ -161,11 +163,7 @@ impl ChatSignals {
 // ── 发送与事件消费 ────────────────────────────────────────────────────────
 
 /// 发送消息：push user turn → send_text 入队。
-pub(crate) fn send_message(
-    chat_signal: V2ChatServiceSignal,
-    mut chat: ChatSignals,
-    text: String,
-) {
+pub(crate) fn send_message(chat_signal: V2ChatServiceSignal, mut chat: ChatSignals, text: String) {
     chat.clear_pending();
     chat.push_user_turn(text.clone());
 
@@ -184,7 +182,10 @@ pub(crate) fn send_message(
 
 /// 注册一次事件订阅（guard 存入 subscription signal，drop 时自动退订）。
 /// 首次 service ready 后调用一次即可，重复调用无效（已订阅则跳过）。
-pub(crate) fn ensure_subscription(chat_svc: &Arc<V2ChatService<FilePromptManager>>, mut chat: ChatSignals) {
+pub(crate) fn ensure_subscription(
+    chat_svc: &Arc<V2ChatService<FilePromptManager>>,
+    mut chat: ChatSignals,
+) {
     if chat.subscription.read().is_none() {
         let guard = chat_svc.on_chat_with_guard(move |ev| handle_event(chat, ev));
         chat.subscription.set(Some(guard));
@@ -209,31 +210,30 @@ fn handle_event(mut chat: ChatSignals, ev: V2ChatEvent) {
             chat.pending_tool_call_id.set(Some(id));
         }
 
-        // ── UI 交互请求（主 agent：session_id=None；子 agent：session_id=Some(run_id)）──
+        // ── UI 交互请求（主 agent：run_id=None；子 agent：run_id=Some(run_id)）──
         V2ChatEvent::Chat(ChatEvent::UIActionRequest {
             message,
             actions,
             session_id,
         }) => {
-            let tool_call_id = chat
-                .pending_tool_call_id
-                .read()
-                .clone()
-                .unwrap_or_default();
+            let tool_call_id = chat.pending_tool_call_id.read().clone().unwrap_or_default();
             chat.set_pending(PendingUI {
                 message,
                 actions,
                 tool_call_id,
-                session_id,
+                run_id: session_id,
             });
         }
 
         // ── 对话结束 ──
         V2ChatEvent::Done { cancelled } => {
             chat.stop_streaming();
-            if cancelled {
-                chat.append_to_last_assistant("\n\n*已停止*");
-            }
+            chat.clear_pending();
+            chat.pending_tool_call_id.set(None);
+            // if cancelled {
+
+            // chat.append_to_last_assistant("\n\n*已停止*");
+            // }
         }
 
         // ── 错误 ──
@@ -253,7 +253,7 @@ fn handle_event(mut chat: ChatSignals, ev: V2ChatEvent) {
 
 /// 用户操作 `request_user_action` / 子 agent 挂起卡片后的回调。
 ///
-/// - 子 agent 交互（`session_id` 非空）→ `resume_sub_agent`
+/// - 子 agent 交互（`run_id` 非空）→ `resume_sub_agent`
 /// - 父 agent 交互 → `confirm_user_action`
 pub(crate) fn handle_user_action(
     action: UIAction,
@@ -280,7 +280,7 @@ pub(crate) fn handle_user_action(
     };
 
     // ── 路径 A：子 agent 挂起 → 恢复会话（resume_sub_agent 同步发信号）──
-    if let Some(run_id) = pending.session_id.clone() {
+    if let Some(run_id) = pending.run_id.clone() {
         let input = serde_json::json!({ "choice": choice, "action_id": action.id });
         chat.streaming_idx.set(Some(asst_idx));
         if let Err(e) = chat_svc.resume_sub_agent(&run_id, input) {

@@ -20,12 +20,13 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use crate::v2_chat::state::ToolCallAccumulator;
-use crate::v2_chat::state::Command;
+use super::bridge::ToolExecutionBridge;
 use super::confirm::await_confirm;
-use crate::v2_chat::service::V2ChatEvent;
 use super::prompt::inject_system_prompt;
+use crate::v2_chat::service::V2ChatEvent;
+use crate::v2_chat::state::Command;
 use crate::v2_chat::state::State;
+use crate::v2_chat::state::ToolCallAccumulator;
 use crate::v2_chat::tools::{build_tool_definitions, parse_ui_actions, UI_TOOL_NAMES};
 
 /// UI 工具（`request_user_action`）的行为策略。
@@ -50,11 +51,14 @@ pub(super) enum ConversationOutcome {
 }
 
 /// 执行一次 `send` 引发的完整对话（可含多轮 tool-call / 多次 UI 确认）。
-pub(super) async fn run_conversation<PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'static>(
+pub(super) async fn run_conversation<
+    PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'static,
+>(
     state: &Arc<State<PM>>,
     rx: &mut mpsc::UnboundedReceiver<Command>,
     queue: &mut VecDeque<Command>,
     ui_strategy: UIActionStrategy,
+    bridge: &dyn ToolExecutionBridge,
 ) -> Result<ConversationOutcome> {
     inject_system_prompt(state).await?;
 
@@ -65,7 +69,9 @@ pub(super) async fn run_conversation<PM: planned_agent_core::prompt::PromptManag
             break;
         }
 
-        state.subscribers.emit(V2ChatEvent::Chat(ChatEvent::RoundStart { round }));
+        state
+            .subscribers
+            .emit(V2ChatEvent::Chat(ChatEvent::RoundStart { round }));
 
         // ── 构造请求 ──
         let tools = build_tool_definitions(state);
@@ -97,74 +103,89 @@ pub(super) async fn run_conversation<PM: planned_agent_core::prompt::PromptManag
         let mut has_reasoning = false;
         let mut accumulators: BTreeMap<u32, ToolCallAccumulator> = BTreeMap::new();
 
+        let mut consecutive_stream_errors = 0u32;
+        const MAX_STREAM_ERRORS: u32 = 5;
         while let Some(chunk_result) = inner.next().await {
             if state.cancelled.load(Ordering::SeqCst) {
                 break;
             }
-            let chunk = match chunk_result {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!("Stream chunk error: {}", e);
-                    continue;
-                }
-            };
-            for choice in chunk.choices {
-                let delta = &choice.delta;
+            match chunk_result {
+                Ok(c) => {
+                    consecutive_stream_errors = 0;
+                    for choice in c.choices {
+                        let delta = &choice.delta;
 
-                if let Some(t) = &delta.content {
-                    if !t.is_empty() {
-                        has_content = true;
-                        text.push_str(t);
-                        state.subscribers.emit(V2ChatEvent::Chat(ChatEvent::TextDelta(t.clone())));
-                    }
-                }
-                if let Some(r) = &delta.reasoning_content {
-                    if !r.is_empty() {
-                        has_reasoning = true;
-                        reasoning.push_str(r);
-                        state
-                            .subscribers
-                            .emit(V2ChatEvent::Chat(ChatEvent::ReasoningDelta(r.clone())));
-                    }
-                }
-                if let Some(deltas) = &delta.tool_calls {
-                    for d in deltas {
-                        let index = d.index;
-                        let acc = accumulators
-                            .entry(index)
-                            .or_insert_with(ToolCallAccumulator::new);
-                        if let Some(id) = &d.id {
-                            if acc.id.is_empty() {
-                                acc.id.clone_from(id);
+                        if let Some(t) = &delta.content {
+                            if !t.is_empty() {
+                                has_content = true;
+                                text.push_str(t);
+                                state
+                                    .subscribers
+                                    .emit(V2ChatEvent::Chat(ChatEvent::TextDelta(t.clone())));
                             }
                         }
-                        if let Some(func) = &d.function {
-                            if let Some(name) = &func.name {
-                                if acc.name.is_empty() {
-                                    acc.name.clone_from(name);
-                                }
+                        if let Some(r) = &delta.reasoning_content {
+                            if !r.is_empty() {
+                                has_reasoning = true;
+                                reasoning.push_str(r);
+                                state
+                                    .subscribers
+                                    .emit(V2ChatEvent::Chat(ChatEvent::ReasoningDelta(r.clone())));
                             }
-                            if let Some(args) = &func.arguments {
-                                if !args.is_empty() {
-                                    acc.arguments.push_str(args);
-                                    if !acc.id.is_empty() {
-                                        state.subscribers.emit(V2ChatEvent::Chat(
-                                            ChatEvent::ToolCallArgsDelta {
-                                                id: acc.id.clone(),
-                                                delta: args.clone(),
-                                            },
-                                        ));
+                        }
+                        if let Some(deltas) = &delta.tool_calls {
+                            for d in deltas {
+                                let index = d.index;
+                                let acc = accumulators
+                                    .entry(index)
+                                    .or_insert_with(ToolCallAccumulator::new);
+                                if let Some(id) = &d.id {
+                                    if acc.id.is_empty() {
+                                        acc.id.clone_from(id);
                                     }
                                 }
+                                if let Some(func) = &d.function {
+                                    if let Some(name) = &func.name {
+                                        if acc.name.is_empty() {
+                                            acc.name.clone_from(name);
+                                        }
+                                    }
+                                    if let Some(args) = &func.arguments {
+                                        if !args.is_empty() {
+                                            acc.arguments.push_str(args);
+                                            if !acc.id.is_empty() {
+                                                state.subscribers.emit(V2ChatEvent::Chat(
+                                                    ChatEvent::ToolCallArgsDelta {
+                                                        id: acc.id.clone(),
+                                                        delta: args.clone(),
+                                                    },
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                                if !acc.id.is_empty() && !acc.name.is_empty() && !acc.start_emitted {
+                                    state
+                                        .subscribers
+                                        .emit(V2ChatEvent::Chat(ChatEvent::ToolCallStart {
+                                            id: acc.id.clone(),
+                                            name: acc.name.clone(),
+                                        }));
+                                    acc.start_emitted = true;
+                                }
                             }
                         }
-                        if !acc.id.is_empty() && !acc.name.is_empty() && !acc.start_emitted {
-                            state.subscribers.emit(V2ChatEvent::Chat(ChatEvent::ToolCallStart {
-                                id: acc.id.clone(),
-                                name: acc.name.clone(),
-                            }));
-                            acc.start_emitted = true;
-                        }
+                    }
+                }
+                Err(e) => {
+                    consecutive_stream_errors += 1;
+                    warn!(
+                        "Stream chunk error ({}/{}): {}",
+                        consecutive_stream_errors, MAX_STREAM_ERRORS, e
+                    );
+                    if consecutive_stream_errors >= MAX_STREAM_ERRORS {
+                        warn!("v2_chat: 连续 {} 次流式 chunk 错误，终止消费", MAX_STREAM_ERRORS);
+                        break;
                     }
                 }
             }
@@ -234,9 +255,7 @@ pub(super) async fn run_conversation<PM: planned_agent_core::prompt::PromptManag
                 state.config.lock().unwrap().max_tool_rounds
             );
             // 移除未闭合的 assistant tool_calls 消息（保持上下文干净，v1 同语义）
-            state
-                .history
-                .pop_last_assistant_tool_calls_if_not_first();
+            state.history.pop_last_assistant_tool_calls_if_not_first();
             break;
         }
 
@@ -253,53 +272,45 @@ pub(super) async fn run_conversation<PM: planned_agent_core::prompt::PromptManag
             let args: Value = serde_json::from_str(&call.function.arguments)
                 .unwrap_or_else(|_| Value::String(call.function.arguments.clone()));
 
-            // 判断是否是子 agent 工具
-            let is_sub_agent = state.tool_registry.get_metadata(&call.function.name)
-                .map(|m| matches!(m.source, planned_agent_tool_manager::ToolSource::SubAgent { .. }))
-                .unwrap_or(false);
-
-            let outcome = if is_sub_agent {
+            let outcome = if bridge.needs_stream(&call.function.name) {
                 // 子 agent 工具：使用流式调用，创建 stream 接收事件并转发
-                let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(64);
-                let stream = planned_agent_tool_manager::ToolStreamSender::new(
-                    stream_tx,
-                    call.function.name.clone(),
-                    call.id.clone(),
-                );
-                // 后台任务：监听 stream 事件并转发给 subscribers
-                let state_clone = state.clone();
-                let call_id = call.id.clone();
-                tokio::spawn(async move {
-                    while let Some(ev) = stream_rx.recv().await {
-                        if let Some(chat_ev) = ev.event {
-                            state_clone.subscribers.emit(V2ChatEvent::Chat(chat_ev));
-                        }
-                    }
-                    tracing::info!("[driver] 子 agent stream 结束, call_id={}", call_id);
-                });
-                state.tool_registry
+                let (stream, handle) = bridge.create_stream(&call.function.name, &call.id);
+                let result = state
+                    .tool_registry
                     .call_tool_streamed(&call.function.name, args, &call.id, stream)
-                    .await
+                    .await;
+                let _ = handle.await;
+                result
             } else {
                 // 普通工具：非流式调用
-                state.tool_registry
+                state
+                    .tool_registry
                     .call_tool(&call.function.name, args)
                     .await
             };
             let (is_error, content) = match &outcome {
                 Ok(o) => (o.result.is_error, o.result.content.clone()),
                 Err(e) => {
+                    // 取消导致的子 agent 通道关闭（clear_sub_agent_sessions drop
+                    // resume_tx）：不作为工具错误上报，直接跳出并清理历史，
+                    // 让 finish_send 发出 Done { cancelled: true }。
+                    if state.cancelled.load(Ordering::SeqCst) {
+                        state.history.clean_unclosed_assistant_tool_calls();
+                        return Ok(ConversationOutcome::Completed);
+                    }
                     warn!("Tool '{}' failed: {}", call.function.name, e);
                     (true, Value::String(format!("Error: {}", e)))
                 }
             };
             state.history.push_tool(&call.id, &content);
-            state.subscribers.emit(V2ChatEvent::Chat(ChatEvent::ToolExecuted {
-                id: call.id.clone(),
-                name: call.function.name.clone(),
-                is_error,
-                content,
-            }));
+            state
+                .subscribers
+                .emit(V2ChatEvent::Chat(ChatEvent::ToolExecuted {
+                    id: call.id.clone(),
+                    name: call.function.name.clone(),
+                    is_error,
+                    content,
+                }));
         }
 
         // UI 工具（request_user_action）：不执行，发事件 + 按策略处理
@@ -313,12 +324,14 @@ pub(super) async fn run_conversation<PM: planned_agent_core::prompt::PromptManag
             let actions = parse_ui_actions(&args["actions"]);
             let run_id = state.config.lock().unwrap().run_id.clone();
 
-            state.subscribers.emit(V2ChatEvent::Chat(ChatEvent::UIActionRequest {
-                message,
-                actions,
-                // 主 agent = None；子 agent = Some(run_id)，前端据此路由 resume
-                session_id: run_id.clone(),
-            }));
+            state
+                .subscribers
+                .emit(V2ChatEvent::Chat(ChatEvent::UIActionRequest {
+                    message,
+                    actions,
+                    // 主 agent = None；子 agent = Some(run_id)，前端据此路由 resume
+                    session_id: run_id.clone(),
+                }));
 
             match &ui_strategy {
                 UIActionStrategy::BlockAndConfirm => {

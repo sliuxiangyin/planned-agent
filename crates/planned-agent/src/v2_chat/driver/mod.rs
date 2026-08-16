@@ -7,6 +7,7 @@
 //! - `confirm.rs`：[`await_confirm`] —— 等待用户对 UI 卡片的确认；
 //! - `prompt.rs`：[`inject_system_prompt`] —— system prompt 注入（幂等）。
 
+mod bridge;
 mod confirm;
 mod prompt;
 mod round;
@@ -51,7 +52,8 @@ pub(super) async fn driver_loop<PM: planned_agent_core::prompt::PromptManager + 
                 *state.run_state.lock().unwrap() = RunState::Running;
 
                 let ui_strategy = pick_ui_strategy(&state);
-                let result = run_conversation(&state, &mut rx, &mut queue, ui_strategy).await;
+                let bridge = bridge::SubAgentBridge::new(state.clone());
+                let result = run_conversation(&state, &mut rx, &mut queue, ui_strategy, &bridge).await;
                 finish_send(&state, result, mark, done);
             }
             Command::Confirm {
@@ -93,11 +95,13 @@ pub(super) async fn driver_loop<PM: planned_agent_core::prompt::PromptManager + 
                 *state.run_state.lock().unwrap() = RunState::Running;
 
                 // resume 只在子 agent 发生，继续用挂起返回策略（可能再次挂起）
+                let bridge = bridge::SubAgentBridge::new(state.clone());
                 let result = run_conversation(
                     &state,
                     &mut rx,
                     &mut queue,
                     UIActionStrategy::EmitAndSuspend,
+                    &bridge,
                 )
                 .await;
                 finish_send(&state, result, mark, done);
