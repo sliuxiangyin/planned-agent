@@ -30,6 +30,7 @@
     height: 100%;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
     background: var(--primary-color-3);
 }
 
@@ -484,8 +485,8 @@
     display: flex;
     flex-direction: column;
     height: 100%;
-    background: var(--primary-color-3);
     overflow: hidden;
+    background: var(--primary-color-3);
 }
 
 /* PageHeader 40px 嵌入版：聊天页中紧贴消息区（去掉默认 margin-bottom） */
@@ -527,36 +528,28 @@
     border: 1px dashed var(--secondary-color-4);
 }
 
-/* ── 输入区：固定底部，reasonix 风格圆角容器 ─────────────────────── */
-.flexible-page .chat-input-area {
-    padding: 10px 16px 14px;
-    border-top: 1px solid var(--primary-color-6);
-    background: var(--primary-color-3);
+/* ── 输入 composer（DeepSeek Web 风格：textarea + 底部工具行） ─────── */
+.flexible-page .chat-composer {
+    margin: 0 16px 14px;
+    padding: 10px 12px;
+    background: var(--primary-color-4);
+    border: 1px solid var(--primary-color-6);
+    border-radius: 12px;
     display: flex;
     flex-direction: column;
     gap: 8px;
     flex-shrink: 0;
-}
-
-.flexible-page .chat-input-row {
-    display: flex;
-    flex-direction: row;
-    align-items: flex-end;
-    gap: 8px;
-    background: var(--primary-color-4);
-    border: 1px solid var(--primary-color-6);
-    border-radius: 12px;
-    padding: 8px 10px;
     transition: border-color 100ms ease-out;
 }
 
-.flexible-page .chat-input-row:focus-within {
+.flexible-page .chat-composer:focus-within {
     border-color: var(--focused-border-color);
 }
 
-.flexible-page .chat-input-row textarea {
-    flex: 1 1 auto;
-    min-width: 0;
+.flexible-page .chat-composer textarea {
+    width: 100%;
+    min-height: 40px;
+    max-height: 200px;
     background: transparent !important;
     box-shadow: none !important;
     border: none !important;
@@ -566,10 +559,164 @@
     color: var(--secondary-color-2);
 }
 
-.flexible-page .chat-input-row__actions {
-    flex: 0 0 auto;
+/* footer：左工具组 + 右发送按钮 */
+.flexible-page .chat-composer__footer {
     display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.flexible-page .chat-composer__tools {
+    display: flex;
+    align-items: center;
     gap: 6px;
-    padding-bottom: 2px;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+/* 工具 chip 按钮（模板 / 思考 / 温度 统一形态） */
+.flexible-page .chat-composer__tool-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 26px;
+    padding: 0 10px;
+    border: none;
+    border-radius: 999px;
+    background: var(--primary-color-5);
+    color: var(--secondary-color-3);
+    font-size: 0.78rem;
+    line-height: 1;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.flexible-page .chat-composer__tool-btn:hover {
+    background: var(--primary-color-6);
+    color: var(--secondary-color-1);
+}
+
+/* chip 内文字标签：最多显示约 10 个字符，超出省略 */
+.flexible-page .chat-composer__tool-label {
+    max-width: 6.5em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* chip 内图标不缩放 */
+.flexible-page .chat-composer__tool-btn svg {
+    flex-shrink: 0;
+}
+
+/* 选中态（思考模式开启） */
+.flexible-page .chat-composer__tool-btn--active,
+.flexible-page .chat-composer__tool-btn--active:hover {
+    background: var(--secondary-color-2);
+    color: var(--primary-color);
+}
+
+/* 工具下拉容器：定位基准由 .dx-dropdown-menu（position:relative）提供 */
+.flexible-page .chat-composer__tool {
+    position: relative;
+    display: inline-flex;
+}
+
+/* 工具下拉菜单向上展开：子元素匹配 css_module hash 后的类名 */
+.flexible-page .dx-dropdown-position-anchor > [class*="dx-dropdown-menu"] {
+    position: absolute !important;
+    top: auto !important;
+    bottom: calc(100% + 6px) !important;
+    left: 0 !important;
+    margin-top: 0 !important;
+    margin-bottom: 0 !important;
+    min-width: 160px;
+}
+
+/* 发送按钮：圆形 */
+.flexible-page .chat-composer__send {
+    border-radius: 999px;
+    flex-shrink: 0;
+}
+
+/* ═══ Tooltip（primitives 直接使用，补 CSS）═══ */
+/* 根 div（primitives 裸 div + data-state）：建立定位上下文 */
+.flexible-page [data-state][data-disabled] {
+    position: relative;
+    display: inline-block;
+}
+
+/* content div（role="tooltip"）：定位 + 样式 */
+.flexible-page [role="tooltip"] {
+    position: absolute;
+    z-index: 1000;
+    max-width: 250px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    background-color: var(--secondary-color-4);
+    color: var(--primary-color);
+    font-size: 12px;
+    line-height: 1.4;
+    pointer-events: none;
+    white-space: nowrap;
+}
+
+/* 三角箭头（标准 border 三角形，不用 rotate） */
+.flexible-page [role="tooltip"]::after {
+    position: absolute;
+    border-width: 5px;
+    border-style: solid;
+    content: "";
+}
+
+/* top 定位（tooltip 在上方）→ 箭头在底部向下 ▼ */
+.flexible-page [role="tooltip"][data-side="top"] {
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+}
+
+.flexible-page [role="tooltip"][data-side="top"]::after {
+    top: 100%;
+    left: 50%;
+    margin-left: -5px;
+    border-top: 5px solid var(--secondary-color-4);
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-bottom: none;
+}
+
+/* bottom 定位（tooltip 在下方）→ 箭头在顶部向上 ▲ */
+.flexible-page [role="tooltip"][data-side="bottom"] {
+    top: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+}
+
+.flexible-page [role="tooltip"][data-side="bottom"]::after {
+    bottom: 100%;
+    left: 50%;
+    margin-left: -5px;
+    border-bottom: 5px solid var(--secondary-color-4);
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: none;
+}
+
+/* 显示/隐藏态 */
+.flexible-page [role="tooltip"][data-state="closed"] {
+    display: none;
+}
+
+.flexible-page [role="tooltip"][data-state="open"] {
+    display: block;
+    animation: dx-tooltip-fade-in 0.15s ease-out;
+}
+
+@keyframes dx-tooltip-fade-in {
+    from { opacity: 0; transform: translateX(-50%) translateY(2px); }
+    to   { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 

@@ -8,7 +8,7 @@ use planned_agent_core::ai::types::Message;
 use crate::components::markdown::Markdown;
 use crate::components::scroll_area::ScrollArea;
 
-use super::components::reasoning_view::ReasoningView;
+use crate::components::chat::ReasoningView;
 use super::types::{display_text, role_css_class};
 
 #[component]

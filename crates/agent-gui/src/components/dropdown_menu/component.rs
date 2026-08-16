@@ -41,6 +41,7 @@ pub fn DropdownMenuTrigger(props: DropdownMenuTriggerProps) -> Element {
     }
 }
 
+/// Content 包装：添加 position-anchor 标记（供 plan.css 选择器定位用）。
 #[component]
 pub fn DropdownMenuContent(props: DropdownMenuContentProps) -> Element {
     let base = attributes!(div {
@@ -49,7 +50,9 @@ pub fn DropdownMenuContent(props: DropdownMenuContentProps) -> Element {
     let merged = merge_attributes(vec![base, props.attributes.clone()]);
 
     rsx! {
-        dropdown_menu::DropdownMenuContent { id: props.id, attributes: merged, {props.children} }
+        div { class: "dx-dropdown-position-anchor",
+            dropdown_menu::DropdownMenuContent { id: props.id, attributes: merged, {props.children} }
+        }
     }
 }
 

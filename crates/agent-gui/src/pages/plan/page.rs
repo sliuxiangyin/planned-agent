@@ -16,11 +16,13 @@ use crate::components::textarea::Textarea;
 use dioxus::prelude::*;
 
 use crate::context::{InitStatus, ModuleState, StorageContext};
+use planned_agent::ChatConfig;
+use crate::components::chat::ChatUIActionsView;
 use crate::services::chat_service::{use_chat_service, ChatServiceSignal};
 use crate::storage::repository::MessageRepo;
 
 use super::chat::{handle_user_action, send_message};
-use super::components::chat_ui_actions_view::ChatUIActionsView;
+
 use super::components::plan_todo_view::PlanTodoView;
 use super::left_panel::PlanLeftPanel;
 use super::flexible::FlexiblePage;
@@ -93,9 +95,12 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
     });
 
     // ── Chat Service（周密模式使用 thorough 模板；灵活模式由 FlexiblePage 自管） ──
-    let system_prompt_template =
-        use_memo(move || Some("thorough/thorough_system".to_string()));
-    let chat_signal = use_chat_service(system_prompt_template.into());
+    let chat_config = ChatConfig {
+        system_prompt_template: Some("thorough/thorough_system".to_string()),
+        allowed_tools: Some(vec!["request_user_action".to_string()]),
+        ..Default::default()
+    };
+    let chat_signal = use_chat_service(chat_config);
 
     // ── 按钮可用性 ──
     let can_create = init_status.read().ai.state == ModuleState::Ready
