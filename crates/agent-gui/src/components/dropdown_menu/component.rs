@@ -41,7 +41,7 @@ pub fn DropdownMenuTrigger(props: DropdownMenuTriggerProps) -> Element {
     }
 }
 
-/// Content 包装：添加 position-anchor 标记（供 plan.css 选择器定位用）。
+/// Content 包装：添加 position-anchor 标记（供样式选择器定位用）。
 #[component]
 pub fn DropdownMenuContent(props: DropdownMenuContentProps) -> Element {
     let base = attributes!(div {

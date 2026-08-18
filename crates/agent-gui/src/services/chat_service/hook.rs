@@ -1,9 +1,12 @@
 //! ChatService 派生 hook
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use dioxus::prelude::*;
 use planned_agent::{ChatConfig, ChatService};
+use planned_agent::chat::SubAgentRunner;
 use planned_agent_prompt_manager::FilePromptManager;
+use planned_agent_tool_manager::ToolCategory;
 
 use crate::context::{AiContext, PromptContext, ToolsContext};
 
@@ -54,4 +57,75 @@ pub(crate) fn use_chat_service(config: ChatConfig) -> ChatServiceSignal {
         });
     }
     chat_signal
+}
+
+// ── 子 agent 注册 hook ────────────────────────────────────────────────────
+
+/// 子 agent 注册幂等表：按 tool_name 去重。
+fn registered_agents() -> &'static Mutex<HashMap<String, ()>> {
+    static INSTANCE: OnceLock<Mutex<HashMap<String, ()>>> = OnceLock::new();
+    INSTANCE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 注册子 agent tool（幂等，同一 `tool_name` 只注册一次）。
+///
+/// 内部等待 `ai` + `tools` + `prompt` 三个 Resource 就绪后，
+/// 用工厂参数构造 [`SubAgentRunner`] 并调用 `register_sub_agent`。
+/// 后续每次 `runner.start()` 会新建独立的 `ChatService`，完成即 drop。
+///
+/// # 参数
+///
+/// - `tool_name`：暴露给 LLM 的工具名（如 `"demo_agent"`）
+/// - `description`：工具描述（LLM 看到的）
+/// - `schema`：工具 input_schema（JSON Schema）
+/// - `config`：子 agent 的 `ChatConfig`（不含 `run_id`，每次调用时注入）
+pub(crate) fn use_sub_agent(
+    tool_name: &'static str,
+    description: &'static str,
+    schema: serde_json::Value,
+    config: ChatConfig,
+) {
+    let ai_resource = use_context::<Resource<Option<Arc<AiContext>>>>();
+    let tools_resource = use_context::<Resource<Option<Arc<ToolsContext>>>>();
+    let prompt_resource = use_context::<Resource<Option<Arc<PromptContext>>>>();
+
+    use_effect(move || {
+        let ai = ai_resource.read().as_ref().and_then(|x| x.as_ref()).cloned();
+        let tools = tools_resource.read().as_ref().and_then(|x| x.as_ref()).cloned();
+        let prompt = prompt_resource.read().as_ref().and_then(|x| x.as_ref()).cloned();
+
+        let (Some(ai), Some(ctx), Some(prompt)) = (ai, tools, prompt) else {
+            return;
+        };
+
+        // 幂等检查：同一 tool_name 只注册一次
+        {
+            let mut registered = registered_agents().lock().unwrap();
+            if registered.contains_key(tool_name) {
+                return;
+            }
+            registered.insert(tool_name.to_string(), ());
+        }
+
+        let runner = SubAgentRunner::new(
+            (*ai.manager).clone(),
+            ctx.registry.clone(),
+            prompt.manager.clone(),
+            config.clone(),
+            0,
+            3,
+        );
+
+        let tool = planned_agent_core::mcp::types::Tool {
+            name: tool_name.to_string(),
+            description: description.to_string(),
+            input_schema: schema.clone(),
+        };
+        ctx.registry.register_sub_agent(
+            tool,
+            vec![ToolCategory::Utility],
+            Arc::new(runner),
+        );
+        tracing::info!("子 agent 已注册: {}", tool_name);
+    });
 }

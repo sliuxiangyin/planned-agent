@@ -13,7 +13,9 @@ use planned_agent_core::ai::types::{FunctionDefinition, ToolDefinition, ToolType
 use crate::chat::state::State;
 
 /// 从 ToolRegistry 构建 ToolDefinition 列表，按 `allowed_tools` 白名单过滤。
-pub(super) fn build_tool_definitions<PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'static>(
+pub(super) fn build_tool_definitions<
+    PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'static,
+>(
     state: &State<PM>,
 ) -> Vec<ToolDefinition> {
     let all = state.tool_registry.get_all_tools();
@@ -25,6 +27,7 @@ pub(super) fn build_tool_definitions<PM: planned_agent_core::prompt::PromptManag
             .filter(|t| whitelist.contains(&t.name))
             .collect(),
     };
+
     filtered
         .into_iter()
         .map(|t| ToolDefinition {

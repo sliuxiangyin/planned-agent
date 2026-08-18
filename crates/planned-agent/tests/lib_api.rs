@@ -43,7 +43,6 @@ use planned_agent::{
     // chat 模块
     ChatService,
     ChatConfig,
-    ChatResponse,
     ChatEvent,
 };
 

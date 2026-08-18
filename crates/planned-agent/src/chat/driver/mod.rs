@@ -108,6 +108,7 @@ pub(super) async fn driver_loop<PM: planned_agent_core::prompt::PromptManager + 
             }
         }
     }
+    tracing::info!("[driver] driver loop 退出（channel 关闭或 State 已 drop）");
 }
 
 /// 根据 config 选择 UI 策略：主 agent 阻塞确认，子 agent 挂起返回。

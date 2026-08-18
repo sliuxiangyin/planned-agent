@@ -1,7 +1,7 @@
 //! 通用聊天面板组件：消息列表 + 输入区 + composer 工具栏。
 //!
 //! 这是一个纯 UI 组件，封装了完整的聊天界面渲染：
-//! - 消息列表（含 ReasoningView + Markdown）
+//! - 消息列表（含 ReasoningView + ToolView + Markdown）
 //! - PendingUI 交互卡片
 //! - 输入区（Textarea + 发送/停止按钮）
 //! - Composer 工具栏（模板选择、思考模式、温度选择）
@@ -22,18 +22,22 @@ use crate::components::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::chat::chat_flow::{ChatSignals, PendingUI};
 use crate::components::chat::chat_ui_actions_view::ChatUIActionsView;
 use crate::components::chat::reasoning_view::ReasoningView;
+use crate::components::chat::tool_view::ToolView;
 use crate::components::dropdown_menu::{
     DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 };
-use dioxus_primitives::tooltip::{Tooltip as TooltipPrim, TooltipContent as TooltipContentPrim, TooltipTrigger as TooltipTriggerPrim};
 use crate::components::scroll_area::ScrollArea;
 use crate::components::textarea::Textarea;
 use crate::services::chat_service::ChatServiceSignal;
+use dioxus_primitives::tooltip::{
+    Tooltip as TooltipPrim, TooltipContent as TooltipContentPrim,
+    TooltipTrigger as TooltipTriggerPrim,
+};
 
 use crate::components::chat::chat_flow::send_message;
 
-/// 本组件专属样式（复用 plan.css 中的 .flexible-page 样式）。
-const PLAN_CSS: Asset = asset!("/assets/plan.css");
+#[css_module("/src/components/chat/chat_panel/style.css")]
+struct Styles;
 
 /// 完整聊天面板 Props。
 #[derive(Props, Clone, PartialEq)]
@@ -110,47 +114,127 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
         );
     });
 
+    // ── 消息快照与气泡分组：一条 user 消息之后的连续 assistant 消息合并为一个气泡 ──
+    let msgs: Vec<Message> = chat.messages.read().clone();
+    let reasonings: Vec<Option<String>> = chat.reasoning_texts.read().clone();
+    let tool_entries = chat.tool_call_entries.read().clone();
+
+    struct Bubble {
+        is_assistant: bool,
+        indices: Vec<usize>,
+    }
+    let mut bubbles: Vec<Bubble> = Vec::new();
+    {
+        let mut i = 0usize;
+        while i < msgs.len() {
+            match msgs[i].role {
+                MessageRole::User => {
+                    bubbles.push(Bubble {
+                        is_assistant: false,
+                        indices: vec![i],
+                    });
+                    i += 1;
+                }
+                MessageRole::Assistant => {
+                    let start = i;
+                    while i < msgs.len() && matches!(msgs[i].role, MessageRole::Assistant) {
+                        i += 1;
+                    }
+                    bubbles.push(Bubble {
+                        is_assistant: true,
+                        indices: (start..i).collect(),
+                    });
+                }
+                _ => {
+                    i += 1;
+                }
+            }
+        }
+    }
+
     rsx! {
-        document::Stylesheet { href: PLAN_CSS }
-        div { class: "flexible-page",
+        div { class: Styles::flexible_page,
 
             // ═══════════════════════════════════════════════════════
             // 消息列表
             // ═══════════════════════════════════════════════════════
-            div { class: "chat-messages",
+            div { class: Styles::chat_messages,
                 ScrollArea {
                     id: "chat-scroll",
-                    div { class: "chat-messages__list",
-                        for (idx, msg) in chat.messages.read().iter().enumerate() {
-                            {
-                                let is_streaming = sidx == Some(idx);
-                                let text = display_text(msg);
-                                let class = format!(
-                                    "chat-message chat-message--{} {}",
-                                    role_css_class(&msg.role),
-                                    if is_streaming { "chat-message--streaming" } else { "" }
-                                );
-                                let r_text: String = chat
-                                    .reasoning_texts
-                                    .read()
-                                    .get(idx)
-                                    .and_then(|o| o.clone())
-                                    .unwrap_or_default();
-                                let has_reasoning = !r_text.is_empty();
-                                let show_streaming_cursor =
-                                    is_streaming && text.is_empty() && !has_reasoning;
-                                rsx! {
-                                    div { class: "{class}",
-                                        if has_reasoning {
-                                            ReasoningView {
-                                                text: r_text,
-                                                is_streaming: is_streaming,
+                    div { class: Styles::chat_messages__list,
+                        for bubble in bubbles.iter() {
+                            if bubble.is_assistant {
+                                {
+                                    let is_streaming_bubble =
+                                        bubble.indices.iter().any(|&j| sidx == Some(j));
+                                    let bubble_class = if is_streaming_bubble {
+                                        format!(
+                                            "{} {} {}",
+                                            Styles::chat_message,
+                                            Styles::chat_message__assistant,
+                                            Styles::chat_message__streaming
+                                        )
+                                    } else {
+                                        format!(
+                                            "{} {}",
+                                            Styles::chat_message,
+                                            Styles::chat_message__assistant
+                                        )
+                                    };
+                                    rsx! {
+                                        div { class: "{bubble_class}",
+                                            for &j in bubble.indices.iter() {
+                                                {
+                                                    let msg = &msgs[j];
+                                                    let is_streaming = sidx == Some(j);
+                                                    let text = display_text(msg);
+                                                    let r_text = reasonings
+                                                        .get(j)
+                                                        .and_then(|o| o.clone())
+                                                        .unwrap_or_default();
+                                                    let has_reasoning = !r_text.is_empty();
+                                                    let show_streaming_cursor =
+                                                        is_streaming && text.is_empty() && !has_reasoning;
+                                                    let tool_calls: Vec<_> = tool_entries
+                                                        .iter()
+                                                        .filter(|(_, e)| e.msg_idx == Some(j))
+                                                        .map(|(_, e)| e.clone())
+                                                        .collect();
+                                                    rsx! {
+                                                        if has_reasoning {
+                                                            ReasoningView {
+                                                                text: r_text,
+                                                                is_streaming: is_streaming,
+                                                            }
+                                                        }
+                                                        if show_streaming_cursor {
+                                                            "▍"
+                                                        } else if !text.is_empty() {
+                                                            crate::components::markdown::Markdown { text: text.to_string() }
+                                                        }
+                                                        for entry in tool_calls.into_iter() {
+                                                            ToolView { entry: entry }
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
-                                        if show_streaming_cursor {
-                                            "▍"
-                                        } else if !text.is_empty() {
-                                            crate::components::markdown::Markdown { text: text.to_string() }
+                                    }
+                                }
+                            } else {
+                                for &j in bubble.indices.iter() {
+                                    {
+                                        let msg = &msgs[j];
+                                        let text = display_text(msg);
+                                        let user_class = format!(
+                                            "{} {}",
+                                            Styles::chat_message,
+                                            Styles::chat_message__user
+                                        );
+                                        rsx! {
+                                            div { class: "{user_class}",
+                                                crate::components::markdown::Markdown { text: text.to_string() }
+                                            }
                                         }
                                     }
                                 }
@@ -161,11 +245,10 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
                         if let Some(pending) = chat.pending_ui.read().as_ref() {
                             {
                                 let p = pending.clone();
-                                let chat_sig = chat_signal;
-                                let chat_clone = chat;
                                 let on_action = props.on_user_action.clone();
+                                let interaction_class = format!("{} {}", Styles::chat_message, Styles::chat_message__interaction);
                                 rsx! {
-                                    div { class: "chat-message chat-message--interaction",
+                                    div { class: "{interaction_class}",
                                         ChatUIActionsView {
                                             message: p.message.clone(),
                                             actions: p.actions.clone(),
@@ -184,8 +267,9 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
             // ═══════════════════════════════════════════════════════
             // 输入区（DeepSeek Web 风格 composer：textarea + 底部工具行）
             // ═══════════════════════════════════════════════════════
-            div { class: "chat-composer",
+            div { class: Styles::chat_composer,
                 Textarea {
+                    class: Styles::chat_composer__textarea,
                     placeholder: "输入消息...",
                     value: "{chat.input_text}",
                     disabled: busy,
@@ -204,23 +288,22 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
                         }
                     },
                 }
-                div { class: "chat-composer__footer",
-                    div { class: "chat-composer__tools",
+                div { class: Styles::chat_composer__footer,
+                    div { class: Styles::chat_composer__tools,
 
                         // ── 模板选择（图标 + 文字 + 下拉）──
                         if !props.templates.is_empty() {
                             TooltipPrim {
                                 TooltipTriggerPrim {
                                     DropdownMenu {
-                                        class: "chat-composer__tool",
+                                        class: Styles::chat_composer__tool,
                                         DropdownMenuTrigger {
-                                            class: "chat-composer__tool-btn",
+                                            class: Styles::chat_composer__tool_btn,
                                             FileText { size: "14" }
-                                            span { class: "chat-composer__tool-label", "{props.template_label}" }
+                                            span { class: Styles::chat_composer__tool_label, "{props.template_label}" }
                                             ChevronDown { size: "14" }
                                         }
                                         DropdownMenuContent {
-                                            class: "chat-composer__tool-menu",
                                             for (idx, name) in props.templates.iter().enumerate() {
                                                 DropdownMenuItem::<String> {
                                                     value: name.clone(),
@@ -241,9 +324,9 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
                             TooltipTriggerPrim {
                                 button {
                                     class: if props.thinking {
-                                        "chat-composer__tool-btn chat-composer__tool-btn--active"
+                                        format!("{} {}", Styles::chat_composer__tool_btn, Styles::chat_composer__tool_btn__active)
                                     } else {
-                                        "chat-composer__tool-btn"
+                                        Styles::chat_composer__tool_btn.to_string()
                                     },
                                     onclick: {
                                         let handler = props.on_thinking_change.clone();
@@ -263,15 +346,14 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
                         TooltipPrim {
                             TooltipTriggerPrim {
                                 DropdownMenu {
-                                    class: "chat-composer__tool",
+                                    class: Styles::chat_composer__tool,
                                     DropdownMenuTrigger {
-                                        class: "chat-composer__tool-btn",
+                                        class: Styles::chat_composer__tool_btn,
                                         Thermometer { size: "14" }
-                                        span { class: "chat-composer__tool-label", "{props.temperature}" }
+                                        span { class: Styles::chat_composer__tool_label, "{props.temperature}" }
                                         ChevronDown { size: "14" }
                                     }
                                     DropdownMenuContent {
-                                        class: "chat-composer__tool-menu",
                                         for (idx, t) in props.temperatures.iter().enumerate() {
                                             DropdownMenuItem::<String> {
                                                 value: t.clone(),
@@ -297,7 +379,7 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
                     // ── 发送 / 停止（圆形 icon 按钮）──
                     if !busy {
                         Button {
-                            class: "chat-composer__send",
+                            class: Styles::chat_composer__send,
                             variant: ButtonVariant::Primary,
                             size: ButtonSize::Icon,
                             title: "发送",
@@ -311,7 +393,7 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
                         }
                     } else {
                         Button {
-                            class: "chat-composer__send",
+                            class: Styles::chat_composer__send,
                             variant: ButtonVariant::Destructive,
                             size: ButtonSize::Icon,
                             title: "停止",
@@ -361,15 +443,5 @@ fn display_text(msg: &Message) -> &str {
     match &msg.content {
         Some(MessageContent::Text { text }) => text.as_str(),
         _ => "",
-    }
-}
-
-/// `MessageRole` → CSS class。
-fn role_css_class(role: &MessageRole) -> &'static str {
-    match role {
-        MessageRole::User => "user",
-        MessageRole::Assistant => "assistant",
-        MessageRole::System => "system",
-        MessageRole::Tool => "tool",
     }
 }

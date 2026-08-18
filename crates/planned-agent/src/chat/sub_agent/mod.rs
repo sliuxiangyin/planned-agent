@@ -18,33 +18,50 @@ use planned_agent_core::ai::types::{Message, MessageContent, MessageRole};
 use planned_agent_core::events::{ChatEvent as CoreChatEvent, UIAction};
 use planned_agent_core::mcp::types::ToolResult;
 use planned_agent_prompt_manager::FilePromptManager;
+use planned_agent_ai_manager::AiManager;
 use planned_agent_tool_manager::{
-    SubAgentRunOutcome, SubAgentSession, SubAgentSessionRunner, ToolStreamSender,
+    SubAgentRunOutcome, SubAgentSession, SubAgentSessionRunner, ToolRegistry, ToolStreamSender,
 };
 use serde_json::Value;
 use tracing::info;
 
-use crate::chat::service::{SendOutcome, SendTicket, ChatEvent, ChatService};
+use crate::chat::service::{SendOutcome, SendTicket, ChatConfig, ChatEvent, ChatService};
 
 // ── Runner ─────────────────────────────────────────────────────────────────
 
-/// 子 agent runner：持有 `ChatService`，直接复用其 ReAct 循环。
+/// 子 agent runner：持有 `ChatService` 工厂参数，每次 `start()`
+/// 新建独立 `ChatService`，完成即 drop，天然隔离且 driver loop
+/// 随 `Arc<State>` 归零自动退出。
 ///
 /// - `depth`：当前嵌套深度（0 = 顶层）
 /// - `max_depth`：最大允许嵌套深度（防递归）
 pub struct SubAgentRunner {
-    service: ChatService<FilePromptManager>,
+    ai_manager: AiManager,
+    tool_registry: Arc<ToolRegistry>,
+    prompt_manager: Arc<FilePromptManager>,
+    /// 子 agent 专属配置（不含 run_id，run_id 每次调用时注入）
+    config: ChatConfig,
     depth: u32,
     max_depth: u32,
 }
 
 impl SubAgentRunner {
     pub fn new(
-        service: ChatService<FilePromptManager>,
+        ai_manager: AiManager,
+        tool_registry: Arc<ToolRegistry>,
+        prompt_manager: Arc<FilePromptManager>,
+        config: ChatConfig,
         depth: u32,
         max_depth: u32,
     ) -> Self {
-        Self { service, depth, max_depth }
+        Self {
+            ai_manager,
+            tool_registry,
+            prompt_manager,
+            config,
+            depth,
+            max_depth,
+        }
     }
 }
 
@@ -76,31 +93,40 @@ impl SubAgentSessionRunner for SubAgentRunner {
             .unwrap_or("请完成指定任务");
         info!("[子agent] 准备发送任务: {}", task);
 
-        // 启动子 agent 的 driver（幂等，多次调用安全）
-        self.service.start_driver()?;
-
-        // 注入 run_id（invocation_id）：子 agent 挂起时 UIActionRequest 携带它，
-        // 前端 resume 据此路由回本会话。子 agent 串行执行，复用 service 安全。
-        self.service.set_run_id(Some(stream.invocation_id().to_string()));
+        // 每次调用新建独立 ChatService：run_id 在构造时写入 config，
+        // 完成后 service 自动 drop，driver loop 随 Arc<State> 归零自然退出，
+        // history / subscribers / config 天然隔离。
+        let mut call_config = self.config.clone();
+        call_config.run_id = Some(stream.invocation_id().to_string());
+        let service = ChatService::new(
+            self.ai_manager.clone(),
+            self.tool_registry.clone(),
+            self.prompt_manager.clone(),
+            call_config,
+        )
+        .map_err(|e| {
+            info!("[子agent] ChatService::new 失败: {}", e);
+            e
+        })?;
+        service.start_driver()?;
 
         // 发送任务给子 agent 的 ChatService
-        let ticket = self
-            .service
-            .send_text(task)
-            .map_err(|e| {
-                info!("[子agent] send_text 失败: {}", e);
-                anyhow::anyhow!("{}", e)
-            })?;
+        let ticket = service.send_text(task).map_err(|e| {
+            info!("[子agent] send_text 失败: {}", e);
+            anyhow::anyhow!("{}", e)
+        })?;
         info!("[子agent] send_text 成功，ticket 已返回，开始收集事件");
 
         // 收集事件直到完成或挂起
-        collect_until_outcome(&self.service, ticket, &stream, self.depth, self.max_depth).await
+        // - Completed/Failed：service 随函数返回后 drop
+        // - Suspended：service clone 移入 ChatSubAgentSession 持有
+        collect_until_outcome(&service, ticket, &stream, self.depth, self.max_depth).await
     }
 }
 
 // ── Session ────────────────────────────────────────────────────────────────
 
-/// 子 agent 会话：保存 `ChatService` 引用，支持 resume。
+/// 子 agent 会话：持有独立的 `ChatService`（由 `start()` 创建），支持 resume。
 ///
 /// `ChatService` 内部维护 history（checkpoint），挂起时历史保留，
 /// resume 时压入 tool 消息闭合协议后从历史继续。

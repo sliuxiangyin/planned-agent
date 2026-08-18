@@ -6,7 +6,8 @@ use tracing::info;
 
 use planned_agent_core::mcp::types::Tool;
 use planned_agent_core::tool_registry::{ToolSource, ToolCategory, ToolExecutor};
-use crate::sub_agent::executor::{SubAgentSessionRunner, SubAgentToolExecutor};
+use crate::sub_agent::types::SubAgentSessionRunner;
+use crate::sub_agent::executor::SubAgentToolExecutor;
 use crate::sub_agent::session::SubAgentSessionStore;
 use crate::sub_agent::stream::ToolStreamSender;
 use crate::core::types::{ToolMetadata, ToolRegistryStats, ToolOutcome};

@@ -8,5 +8,5 @@
 mod hook;
 mod types;
 
-pub(crate) use hook::use_chat_service;
+pub(crate) use hook::{use_chat_service, use_sub_agent};
 pub(crate) use types::ChatServiceSignal;

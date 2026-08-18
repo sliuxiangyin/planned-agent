@@ -18,7 +18,7 @@ use planned_agent_core::ai::types::{
 use planned_agent_core::events::ChatEvent as CoreChatEvent;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{info, warn};
 
 use super::bridge::ToolExecutionBridge;
 use super::confirm::await_confirm;
@@ -75,6 +75,15 @@ pub(super) async fn run_conversation<
 
         // ── 构造请求 ──
         let tools = build_tool_definitions(state);
+        // 打印下加载的工具
+        for tool in &tools {
+            info!(
+                "已加载工具: {} - {}",
+                tool.function.name,
+                tool.function.description.as_deref().unwrap_or("(无描述)")
+            );
+        }
+
         let (temperature, max_tokens) = {
             let cfg = state.config.lock().unwrap();
             (cfg.temperature, cfg.max_tokens)
@@ -128,9 +137,9 @@ pub(super) async fn run_conversation<
                             if !r.is_empty() {
                                 has_reasoning = true;
                                 reasoning.push_str(r);
-                                state
-                                    .subscribers
-                                    .emit(ChatEvent::Chat(CoreChatEvent::ReasoningDelta(r.clone())));
+                                state.subscribers.emit(ChatEvent::Chat(
+                                    CoreChatEvent::ReasoningDelta(r.clone()),
+                                ));
                             }
                         }
                         if let Some(deltas) = &delta.tool_calls {
@@ -164,13 +173,14 @@ pub(super) async fn run_conversation<
                                         }
                                     }
                                 }
-                                if !acc.id.is_empty() && !acc.name.is_empty() && !acc.start_emitted {
-                                    state
-                                        .subscribers
-                                        .emit(ChatEvent::Chat(CoreChatEvent::ToolCallStart {
+                                if !acc.id.is_empty() && !acc.name.is_empty() && !acc.start_emitted
+                                {
+                                    state.subscribers.emit(ChatEvent::Chat(
+                                        CoreChatEvent::ToolCallStart {
                                             id: acc.id.clone(),
                                             name: acc.name.clone(),
-                                        }));
+                                        },
+                                    ));
                                     acc.start_emitted = true;
                                 }
                             }
@@ -184,7 +194,10 @@ pub(super) async fn run_conversation<
                         consecutive_stream_errors, MAX_STREAM_ERRORS, e
                     );
                     if consecutive_stream_errors >= MAX_STREAM_ERRORS {
-                        warn!("chat: 连续 {} 次流式 chunk 错误，终止消费", MAX_STREAM_ERRORS);
+                        warn!(
+                            "chat: 连续 {} 次流式 chunk 错误，终止消费",
+                            MAX_STREAM_ERRORS
+                        );
                         break;
                     }
                 }

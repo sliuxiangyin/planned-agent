@@ -43,9 +43,8 @@ pub struct ChatConfig {
     ///   `invocation_id` 即父 agent 调用该子 agent 时的 `tool_call_id`，前端
     ///   resume 时据此路由回正确的挂起会话）
     ///
-    /// 子 agent 的 `ChatService` 是注册时创建、多次调用复用的，因此 run_id
-    /// 由 runner 在每次 `start` 前通过 [`crate::chat::ChatService::set_run_id`]
-    /// 动态注入（子 agent 串行执行，复用安全）。
+    /// 子 agent 的 `ChatService` 在每次 `start()` 时新建、完成即 drop，
+    /// run_id 在构造时写入 config，天然隔离。
     pub run_id: Option<String>,
 }
 

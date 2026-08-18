@@ -1,4 +1,4 @@
-//! v2 聊天服务的集成测试。
+﻿//! v2 聊天服务的集成测试。
 //!
 //! 完整对话流程的端到端测试，覆盖：单轮文本、UI 确认闭环、串行队列、取消、
 //! 错误处理、panic 隔离、history 回滚等。
@@ -15,7 +15,7 @@ mod tests {
         DeltaToolCall, Message, MessageContent, MessageRole, ToolType,
     };
     use planned_agent_core::ai::ChatCompletionStream;
-    use planned_agent_core::events::ChatEvent;
+    use planned_agent_core::events::ChatEvent as CoreChatEvent;
     use planned_agent_core::prompt::{PromptContext, PromptInfo, PromptManager, PromptTemplate};
     use planned_agent_tool_manager::ToolRegistry;
     use serde_json::{json, Value};
@@ -162,12 +162,14 @@ mod tests {
     }
 
     fn make_service(script: Vec<Vec<ChatCompletionChunk>>) -> ChatService<MockPromptManager> {
-        ChatService::from_ai_client(
+        let svc = ChatService::from_ai_client(
             Arc::new(ScriptedAiClient::new(script)),
             Arc::new(ToolRegistry::new()),
             Arc::new(MockPromptManager),
             ChatConfig::new(),
-        )
+        );
+        svc.start_driver().expect("启动 driver 失败");
+        svc
     }
 
     fn request_user_action_args(message: &str, action_ids: &[&str]) -> Value {
@@ -206,7 +208,7 @@ mod tests {
         let mut done = false;
         while let Ok(ev) = events.try_recv() {
             match ev {
-                ChatEvent::Chat(ChatEvent::TextDelta(t)) => texts.push(t),
+                ChatEvent::Chat(CoreChatEvent::TextDelta(t)) => texts.push(t),
                 ChatEvent::Done { cancelled } => {
                     assert!(!cancelled);
                     done = true;
@@ -258,7 +260,7 @@ mod tests {
         loop {
             let ev = events.recv().await.expect("收到事件");
             match ev {
-                ChatEvent::Chat(ChatEvent::UIActionRequest { message, .. }) => {
+                ChatEvent::Chat(CoreChatEvent::UIActionRequest { message, .. }) => {
                     assert_eq!(message, "请选择计划方式");
                     pending_count += 1;
                     break;
@@ -278,7 +280,7 @@ mod tests {
         loop {
             let ev = events.recv().await.expect("收到事件");
             match ev {
-                ChatEvent::Chat(ChatEvent::UIActionRequest { message, .. }) => {
+                ChatEvent::Chat(CoreChatEvent::UIActionRequest { message, .. }) => {
                     assert_eq!(message, "确认计划");
                     pending_count += 1;
                     break;
@@ -360,7 +362,7 @@ mod tests {
 
         loop {
             let ev = events.recv().await.expect("收到事件");
-            if matches!(ev, ChatEvent::Chat(ChatEvent::UIActionRequest { .. })) {
+            if matches!(ev, ChatEvent::Chat(CoreChatEvent::UIActionRequest { .. })) {
                 break;
             }
             if matches!(ev, ChatEvent::Done { .. }) {
@@ -407,7 +409,7 @@ mod tests {
 
         loop {
             let ev = events.recv().await.expect("收到事件");
-            if matches!(ev, ChatEvent::Chat(ChatEvent::UIActionRequest { .. })) {
+            if matches!(ev, ChatEvent::Chat(CoreChatEvent::UIActionRequest { .. })) {
                 break;
             }
         }
@@ -446,7 +448,7 @@ mod tests {
         let ticket = svc.send_text("问一下").expect("send 成功");
         loop {
             let ev = events.recv().await.expect("收到事件");
-            if matches!(ev, ChatEvent::Chat(ChatEvent::UIActionRequest { .. })) {
+            if matches!(ev, ChatEvent::Chat(CoreChatEvent::UIActionRequest { .. })) {
                 break;
             }
         }
@@ -483,7 +485,7 @@ mod tests {
         let ticket = svc.send_text("问一下").expect("send 成功");
         loop {
             let ev = events.recv().await.expect("收到事件");
-            if matches!(ev, ChatEvent::Chat(ChatEvent::UIActionRequest { .. })) {
+            if matches!(ev, ChatEvent::Chat(CoreChatEvent::UIActionRequest { .. })) {
                 break;
             }
         }
@@ -644,7 +646,7 @@ mod tests {
         let ticket = svc.send_text("问一下").expect("send 成功");
         loop {
             let ev = events.recv().await.expect("收到事件");
-            if matches!(ev, ChatEvent::Chat(ChatEvent::UIActionRequest { .. })) {
+            if matches!(ev, ChatEvent::Chat(CoreChatEvent::UIActionRequest { .. })) {
                 break;
             }
         }

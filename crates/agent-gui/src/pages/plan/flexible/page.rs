@@ -5,24 +5,22 @@
 //! - 子 agent 注册（demo_agent）
 //! - 模板切换与可用模板列表
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use dioxus::prelude::*;
-use planned_agent::chat::{ChatConfig, SubAgentRunner};
-use planned_agent::ChatService;
+use planned_agent::chat::ChatConfig;
 use planned_agent_core::prompt::PromptManager;
-use planned_agent_tool_manager::ToolCategory;
 
-use crate::components::chat::{ChatPanel, chat_flow::{ChatSignals, ensure_subscription, handle_user_action, PendingUI}};
-use crate::components::page_header::PageHeader;
 use crate::components::button::{Button, ButtonSize, ButtonVariant};
-use crate::context::{AiContext, PromptContext, ToolsContext};
-use crate::services::chat_service::{use_chat_service, ChatServiceSignal};
+use crate::components::chat::{
+    chat_flow::{ensure_subscription, handle_user_action, ChatSignals, PendingUI},
+    ChatPanel,
+};
+use crate::components::page_header::PageHeader;
+use crate::context::PromptContext;
+use crate::services::chat_service::{use_chat_service, use_sub_agent, ChatServiceSignal};
 
 use dioxus_icons::lucide::Trash2;
-
-/// 子 agent 注册幂等锁（进程内只注册一次）
-static SUB_AGENT_REGISTERED: OnceLock<()> = OnceLock::new();
 
 /// 子 agent 工具名称
 const SUB_AGENT_TOOL_NAME: &str = "demo_agent";
@@ -31,7 +29,7 @@ const SUB_AGENT_TOOL_NAME: &str = "demo_agent";
 const SUB_AGENT_PROMPT: &str = "chat/request_user_action_demo";
 
 /// 默认父 agent 的 system prompt 模板
-const DEFAULT_TEMPLATE: &str = "thorough/thorough_system";
+const DEFAULT_TEMPLATE: &str = "flexible/flexible_parent_control";
 
 #[component]
 pub fn FlexiblePage() -> Element {
@@ -43,6 +41,7 @@ pub fn FlexiblePage() -> Element {
     let input_text = use_signal_sync(String::new);
     let pending_tool_call_id = use_signal_sync(|| None::<String>);
     let subscription = use_signal_sync(|| None::<planned_agent::chat::SubscriptionGuard>);
+    let tool_call_entries = use_signal_sync(std::collections::HashMap::new);
     let mut chat = ChatSignals {
         messages,
         reasoning_texts,
@@ -51,6 +50,7 @@ pub fn FlexiblePage() -> Element {
         input_text,
         pending_tool_call_id,
         subscription,
+        tool_call_entries,
     };
 
     // ── option 栏状态 ──
@@ -78,59 +78,25 @@ pub fn FlexiblePage() -> Element {
         });
     }
 
-    // ── 注册子 agent（幂等；仅在 ai/tools/prompt 全部就绪时执行一次）──
-    let ai_resource = use_context::<Resource<Option<Arc<AiContext>>>>();
-    let tools_resource = use_context::<Resource<Option<Arc<ToolsContext>>>>();
-    let prompt_resource = use_context::<Resource<Option<Arc<PromptContext>>>>();
-    let ai = ai_resource.read().as_ref().and_then(|x| x.clone());
-    let tools_ctx = tools_resource.read().as_ref().and_then(|x| x.clone());
-    let prompt = prompt_resource.read().as_ref().and_then(|x| x.clone());
-    if let (Some(ai), Some(ctx), Some(prompt)) = (ai, tools_ctx, prompt) {
-        SUB_AGENT_REGISTERED.get_or_init(|| {
-            let child_service = match ChatService::new(
-                (*ai.manager).clone(),
-                ctx.registry.clone(),
-                prompt.manager.clone(),
-                ChatConfig {
-                    system_prompt_template: Some(SUB_AGENT_PROMPT.to_string()),
-                    ..Default::default()
-                },
-            ) {
-                Ok(svc) => svc,
-                Err(e) => {
-                    tracing::error!("子 agent ChatService 创建失败: {}", e);
-                    return;
+    // ── 注册子 agent（幂等；由 use_sub_agent 内部管理）──
+    use_sub_agent(
+        SUB_AGENT_TOOL_NAME,
+        "交互演示子 agent：依次演示 confirm/select/input/multi_select 四种 UI 交互类型",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "任务描述（如：开始演示）"
                 }
-            };
-
-            let runner = SubAgentRunner::new(child_service, 0, 3);
-
-            let tool = planned_agent_core::mcp::types::Tool {
-                name: SUB_AGENT_TOOL_NAME.to_string(),
-                description: "交互演示子 agent：依次演示 confirm/select/input/multi_select 四种 UI 交互类型".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "task": {
-                            "type": "string",
-                            "description": "任务描述（如：开始演示）"
-                        }
-                    },
-                    "required": ["task"]
-                }),
-            };
-            ctx.registry.register_sub_agent(
-                tool,
-                vec![ToolCategory::Utility],
-                Arc::new(runner),
-            );
-            tracing::info!(
-                "子 agent 已注册: {} (prompt={}, max_depth=3)",
-                SUB_AGENT_TOOL_NAME,
-                SUB_AGENT_PROMPT
-            );
-        });
-    }
+            },
+            "required": ["task"]
+        }),
+        ChatConfig {
+            system_prompt_template: Some(SUB_AGENT_PROMPT.to_string()),
+            ..Default::default()
+        },
+    );
 
     // ── 可用模板列表 ──
     let mut templates = use_signal_sync(|| Vec::<String>::new());
@@ -172,7 +138,15 @@ pub fn FlexiblePage() -> Element {
                         size: ButtonSize::IconSm,
                         disabled: busy,
                         title: "清空会话",
-                        onclick: move |_| chat.clear(),
+                        onclick: move |_| {
+                            if let Some(ref svc) = *chat_signal.read() {
+                                svc.stop();
+                                if let Err(e) = svc.reset_session() {
+                                    tracing::error!("清空会话重置失败: {}", e);
+                                }
+                            }
+                            chat.clear();
+                        },
                         Trash2 { size: "16" }
                     }
                 }),
@@ -206,7 +180,15 @@ pub fn FlexiblePage() -> Element {
                 on_thinking_change: Some(Callback::new(move |v: bool| thinking.set(v))),
                 temperature: temperature.read().clone(),
                 on_temperature_change: Some(Callback::new(move |v: String| temperature.set(v))),
-                on_clear: Callback::new(move |_| chat.clear()),
+                on_clear: Callback::new(move |_| {
+                    if let Some(ref svc) = *chat_signal.read() {
+                        svc.stop();
+                        if let Err(e) = svc.reset_session() {
+                            tracing::error!("清空会话重置失败: {}", e);
+                        }
+                    }
+                    chat.clear();
+                }),
             }
         }
     }

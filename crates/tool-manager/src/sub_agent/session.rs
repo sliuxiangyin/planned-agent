@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use tokio::sync::oneshot;
 
-use crate::sub_agent::executor::SubAgentSession;
+use crate::sub_agent::types::SubAgentSession;
 
 /// 默认 TTL：挂起会话 10 分钟未被 resume 即被清理
 pub const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(10 * 60);

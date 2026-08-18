@@ -9,8 +9,8 @@
 //!   （解析速度 ~10 MB/s，KB 级文本每次解析亚毫秒，可每 chunk 调用一次）
 //! - **清理**：[`ammonia`] 白名单过滤，去掉 `<script>` / `<style>` / `onclick=` 等
 //!   危险内容，避免 LLM 输出未闭合标签或恶意 HTML 触发 XSS
-//! - **样式**：本组件**不带**样式表，markdown 元素的视觉由 `plan.css` 控制（与
-//!   `.chat-message` 容器配合，详见 `assets/plan.css` 的 `.chat-message .markdown *` 段）
+//! - **样式**：本组件**不带**样式表，markdown 元素的视觉由容器组件的样式控制（与
+//!   `.chat-message` 容器配合，详见 `chat_panel/style.css` 的 `.chat-message .markdown *` 段）
 //!
 //! ## Props
 //!

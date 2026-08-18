@@ -1,18 +1,9 @@
-//! 子 agent 会话式执行抽象。
+//! 子 agent 会话式执行实现。
 //!
-//! 子 agent 以"会话"为单位执行，支持挂起-恢复：
-//! - [`SubAgentSessionRunner`]：首次启动（`start`）；
-//! - [`SubAgentRunOutcome`]：单次执行的结果——完成（`Done`）或
-//!   挂起等待用户输入（`AwaitingUserAction`，内部状态交给框架保管）；
-//! - [`SubAgentSession`]：挂起时保留的子 agent 内部状态（含其 history），
-//!   用户确认后经 `resume` 恢复执行；
-//! - 框架（[`crate::session::SubAgentSessionStore`]）负责会话的生命周期：
-//!   挂起保留 → resume 时取出 → 完成/取消/TTL 清理。
-//!
-//! 过程事件经 [`ToolStreamSender`] 走旁路通道实时送达调用方（UI），
-//! 最终结果走 `ToolResult → history → LLM` 闭环。
-//! 挂起信息通过 `ToolResult.content` 结构化传递（不走流）：
-//! `{"status":"awaiting_user_action","session_id":...,"message":...,"actions":[...]}`。
+//! 接口定义见 [`super::types`]，本模块只包含业务逻辑：
+//! - [`OneShotSubAgentRunner`]：一次性子 agent 适配器（不挂起）；
+//! - [`SubAgentToolExecutor`]：会话式执行器（挂起-恢复循环）；
+//! - [`resume_loop`]：共享的多次挂起-恢复循环。
 
 use std::future::Future;
 use std::pin::Pin;
@@ -26,53 +17,19 @@ use tokio::sync::oneshot;
 use planned_agent_core::mcp::types::ToolResult;
 use planned_agent_core::tool_registry::ToolExecutor;
 
+use super::types::{SubAgentRunOutcome, SubAgentSession, SubAgentSessionRunner};
 use crate::sub_agent::stream::ToolStreamSender;
-
-/// 子 agent 单次执行的结果
-pub enum SubAgentRunOutcome {
-    /// 完成：框架清理会话，`ToolResult` 走既有闭环
-    Done(ToolResult),
-    /// 挂起等待用户输入：`session` 交给框架保管（history 不丢），
-    /// `message`/`actions` 用于渲染用户交互视图
-    AwaitingUserAction {
-        session: Box<dyn SubAgentSession>,
-        message: String,
-        actions: Value,
-    },
-}
-
-/// 子 agent 会话：框架只负责存储与生命周期，状态内容由实现方定义。
-///
-/// 实现方在挂起时把内部状态（如 LLM 对话 history）装进 `Box<dyn SubAgentSession>`
-/// 交给框架；`resume` 时框架把用户选择注入，实现方用保留的 history 继续执行。
-#[async_trait]
-pub trait SubAgentSession: Send + Sync {
-    /// 恢复执行。可能再次返回 `AwaitingUserAction`（继续挂起，框架更新会话）。
-    async fn resume(
-        &mut self,
-        user_input: Value,
-        stream: ToolStreamSender,
-    ) -> Result<SubAgentRunOutcome>;
-}
-
-/// 子 agent 会话式执行体（统一注册入口的 runner 类型）
-#[async_trait]
-pub trait SubAgentSessionRunner: Send + Sync {
-    /// 首次启动。返回 `AwaitingUserAction` 时框架生成 `session_id` 并保管会话。
-    async fn start(
-        &self,
-        arguments: Value,
-        stream: ToolStreamSender,
-    ) -> Result<SubAgentRunOutcome>;
-}
 
 /// 一次性子 agent 适配器：把"单次执行闭包"包装成会话式 runner。
 ///
 /// 适用于无需用户交互的子 agent：`start` 直接执行并返回 `Done`，
 /// 永远不挂起。这样注册入口统一为 [`SubAgentSessionRunner`]。
 pub struct OneShotSubAgentRunner {
-    execute_fn:
-        Arc<dyn Fn(Value, ToolStreamSender) -> Pin<Box<dyn Future<Output = Result<ToolResult>> + Send>> + Send + Sync>,
+    execute_fn: Arc<
+        dyn Fn(Value, ToolStreamSender) -> Pin<Box<dyn Future<Output = Result<ToolResult>> + Send>>
+            + Send
+            + Sync,
+    >,
 }
 
 impl OneShotSubAgentRunner {
@@ -99,6 +56,40 @@ impl SubAgentSessionRunner for OneShotSubAgentRunner {
     ) -> Result<SubAgentRunOutcome> {
         let result = (self.execute_fn)(arguments, stream).await?;
         Ok(SubAgentRunOutcome::Done(result))
+    }
+}
+
+/// 通用 resume 循环：resume → 如果又挂起就放回 store → 等下一次用户操作 → 再 resume
+/// 两条路径（resume 路径 + spawned task）共用同一段逻辑，避免重复维护。
+async fn resume_loop(
+    mut session: Box<dyn SubAgentSession>,
+    user_input: Value,
+    store: Arc<crate::sub_agent::session::SubAgentSessionStore>,
+    sid: String,
+    tool_name: String,
+    stream: ToolStreamSender,
+) -> Result<SubAgentRunOutcome> {
+    let mut outcome = session.resume(user_input, stream.clone()).await;
+    loop {
+        match outcome {
+            Err(e) => return Err(e),
+            Ok(SubAgentRunOutcome::Done(result)) => {
+                return Ok(SubAgentRunOutcome::Done(result));
+            }
+            Ok(SubAgentRunOutcome::AwaitingUserAction {
+                session: next_session,
+                ..
+            }) => {
+                // 子 agent 又挂起了 → 放回 store → 等下一次用户操作
+                let (tx, rx) = oneshot::channel();
+                store.upsert(sid.clone(), next_session, tool_name.clone(), tx);
+                let inp = rx
+                    .await
+                    .map_err(|_| anyhow!("子 agent resume 通道关闭（可能已取消/超时）"))?;
+                let mut s = store.take(&sid)?;
+                outcome = s.resume(inp, stream.clone()).await;
+            }
+        }
     }
 }
 
@@ -156,39 +147,39 @@ impl SubAgentToolExecutor {
             if !self.store.get(sid) {
                 return Err(anyhow!("Sub agent session not found or expired: {}", sid));
             }
-            
+
             // 创建新的 resume signal
             let (tx, rx) = oneshot::channel();
-            
+
             // 先注册 resume signal（让 signal_resume 能找到）
             self.store.upsert_resume_signal(sid.clone(), tx);
-            
-            // 等待 signal_resume 发送用户输入
-            let user_input = rx.await
-                .map_err(|_| anyhow!("子 agent resume 通道关闭（可能已取消/超时）"))?;
-            
-            // 取出会话并恢复
-            let mut session = self.store.take(sid)?;
 
-            // 可能多次挂起，循环直到完成
-            let mut outcome = session.resume(user_input, stream.clone()).await?;
-            loop {
-                match outcome {
-                    SubAgentRunOutcome::Done(mut result) => {
-                        result.call_id = invocation_id.to_string();
-                        return Ok(result);
-                    }
-                    SubAgentRunOutcome::AwaitingUserAction { session: next_session, .. } => {
-                        // 更新 store 中的会话（resume 后再次挂起）
-                        let (tx, rx) = oneshot::channel();
-                        self.store.upsert(sid.clone(), next_session, self.tool_name.clone(), tx);
-                        let user_input = rx.await
-                            .map_err(|_| anyhow!("子 agent resume 通道关闭（可能已取消/超时）"))?;
-                        let mut session = self.store.take(sid)?;
-                        outcome = session.resume(user_input, stream.clone()).await?;
-                    }
+            // 等待 signal_resume 发送用户输入
+            let user_input = rx
+                .await
+                .map_err(|_| anyhow!("子 agent resume 通道关闭（可能已取消/超时）"))?;
+
+            // 取出会话，调用共享 resume 循环
+            let session = self.store.take(sid)?;
+            let outcome = resume_loop(
+                session,
+                user_input,
+                self.store.clone(),
+                sid.clone(),
+                self.tool_name.clone(),
+                stream,
+            )
+            .await?;
+
+            // 补上 call_id 后返回
+            return match outcome {
+                SubAgentRunOutcome::Done(mut result) => {
+                    result.call_id = invocation_id.to_string();
+                    Ok(result)
                 }
-            }
+                // resume_loop 不会返回 AwaitingUserAction（循环内部已处理）
+                _ => unreachable!("resume_loop should only return Done or Err"),
+            };
         }
 
         // 首次调用路径：start 并返回结构化挂起或完成结果
@@ -198,33 +189,49 @@ impl SubAgentToolExecutor {
                 result.call_id = invocation_id.to_string();
                 Ok(result)
             }
-            SubAgentRunOutcome::AwaitingUserAction { session, message, actions } => {
+            SubAgentRunOutcome::AwaitingUserAction {
+                session,
+                message,
+                actions,
+            } => {
                 // 首次挂起：存入 store，返回结构化 ToolResult
                 let sid = invocation_id.to_string();
                 let store = self.store.clone();
                 let sid_clone = sid.clone();
                 let stream_clone = stream.clone();
+                let tool_name_clone = self.tool_name.clone();
 
                 let (tx, rx) = oneshot::channel();
-                // 后台任务：等 signal_resume 发来用户输入后恢复执行
+
+                // 后台任务：等 signal_resume 唤醒后，调用共享 resume_loop 处理
+                // 多次挂起-恢复循环（子 agent 可能多次调用 request_user_action）。
                 tokio::spawn(async move {
                     if let Ok(user_input) = rx.await {
-                        // signal_resume 已取出 tx，这里 rx 收到信号
-                        // 注意：此时 store 中还没有会话（因为下面才 upsert），
-                        // 需要等 upsert 完成后才能 take。用短暂轮询等待。
-                        let mut session = loop {
+                        // 等外层 upsert 完成后再从 store 取出 session（polling 等待）
+                        let session = loop {
                             if let Ok(s) = store.take(&sid_clone) {
                                 break s;
                             }
                             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                         };
-                        let _ = session.resume(user_input, stream_clone).await;
+
+                        // 调用共享 resume 循环（resume → 挂起 → 放回 store → 等用户 → 再 resume → ...）
+                        let _ = resume_loop(
+                            session,
+                            user_input,
+                            store,
+                            sid_clone,
+                            tool_name_clone,
+                            stream_clone,
+                        )
+                        .await;
                     }
                 });
 
                 // 等后台任务启动后再 upsert
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                self.store.upsert(sid.clone(), session, self.tool_name.clone(), tx);
+                self.store
+                    .upsert(sid.clone(), session, self.tool_name.clone(), tx);
 
                 Ok(ToolResult {
                     call_id: invocation_id.to_string(),
@@ -255,13 +262,16 @@ impl ToolExecutor for SubAgentToolExecutor {
         let outcome = match &resume_sid {
             Some(sid) => {
                 let mut session = self.store.take(sid)?;
-                let user_input = arguments
-                    .get("user_input")
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                session.resume(user_input, ToolStreamSender::disabled()).await
+                let user_input = arguments.get("user_input").cloned().unwrap_or(Value::Null);
+                session
+                    .resume(user_input, ToolStreamSender::disabled())
+                    .await
             }
-            None => self.runner.start(arguments, ToolStreamSender::disabled()).await,
+            None => {
+                self.runner
+                    .start(arguments, ToolStreamSender::disabled())
+                    .await
+            }
         };
 
         match outcome? {

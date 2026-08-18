@@ -83,7 +83,19 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         });
         Self { state }
     }
+}
 
+impl<PM: PromptManager + Send + Sync + 'static> Drop for ChatService<PM> {
+    /// 销毁时记录日志，便于排查 ChatService 泄漏或意外重建。
+    fn drop(&mut self) {
+        tracing::info!(
+            "ChatService 已销毁 (model={})",
+            self.state.ai_client.model_name(),
+        );
+    }
+}
+
+impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
     // ── 事件订阅 ──
 
     /// 注册事件监听，返回订阅 ID（可用 [`Self::unsubscribe`] 取消）。

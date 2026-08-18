@@ -28,8 +28,6 @@ pub use core::registry::ToolRegistry;
 pub use adapter::custom::CustomToolExecutor;
 pub use adapter::mcp::McpManagerAdapter;
 pub use sub_agent::stream::{StreamKind, ToolStreamEvent, ToolStreamSender};
-pub use sub_agent::executor::{
-    OneShotSubAgentRunner, SubAgentRunOutcome, SubAgentSession, SubAgentSessionRunner,
-    SubAgentToolExecutor,
-};
+pub use sub_agent::types::{SubAgentRunOutcome, SubAgentSession, SubAgentSessionRunner};
+pub use sub_agent::executor::{OneShotSubAgentRunner, SubAgentToolExecutor};
 pub use sub_agent::session::SubAgentSessionStore;
