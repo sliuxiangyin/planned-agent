@@ -60,7 +60,7 @@ impl SubAgentSessionRunner for OneShotSubAgentRunner {
 }
 
 /// 通用 resume 循环：resume → 如果又挂起就放回 store → 等下一次用户操作 → 再 resume
-/// 两条路径（resume 路径 + spawned task）共用同一段逻辑，避免重复维护。
+/// 直到子 agent 完成（Done）或出错。由 `execute_streamed` 内部调用。
 async fn resume_loop(
     mut session: Box<dyn SubAgentSession>,
     user_input: Value,
@@ -95,14 +95,10 @@ async fn resume_loop(
 
 /// 子 agent 执行器：实现 [`ToolExecutor`]，内部包装 [`SubAgentSessionRunner`]。
 ///
-/// - 流式入口（`call_tool_streamed`）：
-///   - 参数含 `session_id` → 从会话存储 **take** 出会话（防重入）→ `resume`；
-///   - 否则 → `start`；
-///   - `Done` → 会话已取出/未创建，正常返回，`call_id` 覆写为 `invocation_id`；
-///   - `AwaitingUserAction` → 会话入存储（新会话生成 `session_id`，恢复的会话
-///     沿用原 id 更新），返回结构化挂起 `ToolResult`；
+/// - 流式入口（`call_tool_streamed`）：调用 `start`，若子 agent 挂起则阻塞等待
+///   前端 `signal_resume` 唤醒，通过 `resume_loop` 处理所有后续轮次，直到完成。
 /// - 非流式入口（`call_tool`）：传入 no-op 流句柄，行为与普通工具一致
-///   （挂起时同样返回结构化 content，调用方自行解析）。
+///   （挂起时返回结构化 content，调用方自行解析）。
 pub struct SubAgentToolExecutor {
     tool_name: String,
     runner: Arc<dyn SubAgentSessionRunner>,
@@ -123,65 +119,18 @@ impl SubAgentToolExecutor {
         }
     }
 
-    /// 流式执行入口：阻塞到子 agent 真正完成（含 resume 后继续）。
+    /// 流式执行入口：阻塞到子 agent 真正完成。
     ///
     /// `invocation_id` 同时用于流事件、最终 `ToolResult.call_id`、以及挂起会话的
-    /// 存储 key（即 run_id）。子 agent 挂起（`AwaitingUserAction`）时，会话连同
-    /// resume 信号存入 store，本方法阻塞等待前端 `signal_resume` 唤醒，随后取出
-    /// 会话继续 `resume`，循环直到 `Done`。
+    /// 存储 key（即 run_id）。子 agent 挂起（`AwaitingUserAction`）时，会话存入
+    /// store 并阻塞等待前端 `signal_resume` 唤醒，随后通过 `resume_loop` 处理
+    /// 所有后续轮次（多次挂起-恢复），直到子 agent 完成后返回最终 `ToolResult`。
     pub async fn execute_streamed(
         &self,
         arguments: Value,
         invocation_id: &str,
         stream: ToolStreamSender,
     ) -> Result<ToolResult> {
-        // 检查是否为 resume 调用（带 session_id）
-        let resume_sid: Option<String> = arguments
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        // resume 路径：从 store 取出会话并恢复，等待 signal_resume 发送用户输入
-        if let Some(sid) = &resume_sid {
-            // 先检查会话是否存在
-            if !self.store.get(sid) {
-                return Err(anyhow!("Sub agent session not found or expired: {}", sid));
-            }
-
-            // 创建新的 resume signal
-            let (tx, rx) = oneshot::channel();
-
-            // 先注册 resume signal（让 signal_resume 能找到）
-            self.store.upsert_resume_signal(sid.clone(), tx);
-
-            // 等待 signal_resume 发送用户输入
-            let user_input = rx
-                .await
-                .map_err(|_| anyhow!("子 agent resume 通道关闭（可能已取消/超时）"))?;
-
-            // 取出会话，调用共享 resume 循环
-            let session = self.store.take(sid)?;
-            let outcome = resume_loop(
-                session,
-                user_input,
-                self.store.clone(),
-                sid.clone(),
-                self.tool_name.clone(),
-                stream,
-            )
-            .await?;
-
-            // 补上 call_id 后返回
-            return match outcome {
-                SubAgentRunOutcome::Done(mut result) => {
-                    result.call_id = invocation_id.to_string();
-                    Ok(result)
-                }
-                // resume_loop 不会返回 AwaitingUserAction（循环内部已处理）
-                _ => unreachable!("resume_loop should only return Done or Err"),
-            };
-        }
-
         // 首次调用路径：start 并返回结构化挂起或完成结果
         let outcome = self.runner.start(arguments, stream.clone()).await?;
         match outcome {
@@ -191,58 +140,43 @@ impl SubAgentToolExecutor {
             }
             SubAgentRunOutcome::AwaitingUserAction {
                 session,
-                message,
-                actions,
+                ..
             } => {
-                // 首次挂起：存入 store，返回结构化 ToolResult
+                // 首次挂起：存入 store（带 resume signal），然后阻塞等待完成。
+                //
+                // 不再 spawn 后台 task + 立即返回 awaiting_user_action。
+                // 而是：存 session → 等用户输入 → resume_loop 直到 Done → 返回最终结果。
+                // 这样父 agent 的 history 里 tool result 是子 agent 的最终输出，
+                // 而非中间挂起状态，父 LLM 不会误判。
                 let sid = invocation_id.to_string();
-                let store = self.store.clone();
-                let sid_clone = sid.clone();
-                let stream_clone = stream.clone();
-                let tool_name_clone = self.tool_name.clone();
-
                 let (tx, rx) = oneshot::channel();
-
-                // 后台任务：等 signal_resume 唤醒后，调用共享 resume_loop 处理
-                // 多次挂起-恢复循环（子 agent 可能多次调用 request_user_action）。
-                tokio::spawn(async move {
-                    if let Ok(user_input) = rx.await {
-                        // 等外层 upsert 完成后再从 store 取出 session（polling 等待）
-                        let session = loop {
-                            if let Ok(s) = store.take(&sid_clone) {
-                                break s;
-                            }
-                            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                        };
-
-                        // 调用共享 resume 循环（resume → 挂起 → 放回 store → 等用户 → 再 resume → ...）
-                        let _ = resume_loop(
-                            session,
-                            user_input,
-                            store,
-                            sid_clone,
-                            tool_name_clone,
-                            stream_clone,
-                        )
-                        .await;
-                    }
-                });
-
-                // 等后台任务启动后再 upsert
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                 self.store
                     .upsert(sid.clone(), session, self.tool_name.clone(), tx);
 
-                Ok(ToolResult {
-                    call_id: invocation_id.to_string(),
-                    content: json!({
-                        "status": "awaiting_user_action",
-                        "session_id": sid,
-                        "message": message,
-                        "actions": actions,
-                    }),
-                    is_error: false,
-                })
+                // 等前端 signal_resume 发送用户输入
+                let user_input = rx
+                    .await
+                    .map_err(|_| anyhow!("子 agent resume 通道关闭（可能已取消/超时）"))?;
+
+                // 取出会话，进入 resume_loop 阻塞直到子 agent 真正完成
+                let session = self.store.take(&sid)?;
+                let outcome = resume_loop(
+                    session,
+                    user_input,
+                    self.store.clone(),
+                    sid,
+                    self.tool_name.clone(),
+                    stream,
+                )
+                .await?;
+
+                match outcome {
+                    SubAgentRunOutcome::Done(mut result) => {
+                        result.call_id = invocation_id.to_string();
+                        Ok(result)
+                    }
+                    _ => unreachable!("resume_loop should only return Done or Err"),
+                }
             }
         }
     }

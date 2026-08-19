@@ -1,0 +1,149 @@
+/* ── ToolView 组件样式 ────────────────────────────────────────────── */
+
+.tool-view {
+    margin-bottom: 6px;
+    border-radius: 8px;
+    background: var(--primary-color-5);
+    border-left: 2px solid var(--primary-color-7);
+    overflow: hidden;
+    transition: background 0.3s ease;
+}
+
+.tool-view:hover {
+    background: var(--primary-color-6);
+}
+
+/* ── Header ── */
+.tool-view-header {
+    padding: 5px 10px;
+    cursor: pointer;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.8rem;
+    color: var(--secondary-color-3);
+}
+
+.tool-view-header:hover {
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.tool-view-chevron {
+    flex-shrink: 0;
+    transition: transform 0.2s ease;
+}
+
+/* 展开时旋转箭头：data-open 放在容器 div 上 */
+.tool-view[data-open="true"] .tool-view-chevron {
+    transform: rotate(90deg);
+}
+
+/* ── 状态图标容器 ── */
+.tool-view-icon {
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* ── 状态图标颜色 ── */
+.tool-view-icon-pending {
+    color: var(--secondary-warning-color);
+}
+
+.tool-view-icon-running {
+    color: var(--focused-border-color);
+    animation: icon-spin 1s linear infinite;
+}
+
+.tool-view-icon-completed {
+    color: var(--secondary-success-color);
+}
+
+.tool-view-icon-error {
+    color: var(--secondary-error-color);
+}
+
+@keyframes icon-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+/* ── Tool 名称 ── */
+.tool-view-name {
+    font-family: var(--font-mono, "SF Mono", "Cascadia Code", monospace);
+    font-weight: 500;
+    color: var(--text-primary, var(--secondary-color-2));
+}
+
+/* ── 内容区（展开后） ── */
+.tool-view-content {
+    border-top: 1px dashed rgba(255, 255, 255, 0.06);
+    font-size: 0.82em;
+    max-height: 320px;
+    overflow-y: auto;
+}
+
+/* ── Input / Output 区域 ── */
+.tool-view-section {
+    padding: 6px 10px;
+}
+
+.tool-view-section + .tool-view-section {
+    border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.tool-view-section-label {
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--secondary-color-5);
+    margin-bottom: 4px;
+}
+
+.tool-view-code {
+    font-family: var(--font-mono, "SF Mono", "Cascadia Code", monospace);
+    font-size: 0.78rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: rgba(0, 0, 0, 0.25);
+    padding: 6px 8px;
+    border-radius: 4px;
+    color: var(--secondary-color-3);
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+/* ── 错误状态特殊样式 ── */
+.tool-view-error {
+    border-left-color: var(--secondary-error-color);
+    background: rgba(220, 38, 38, 0.06);
+}
+
+.tool-view-error .tool-view-code {
+    color: #f87171;
+}
+
+/* ── 运行中状态 ── */
+.tool-view-running {
+    border-left-color: var(--focused-border-color);
+}
+
+/* ── Pending 动画 ── */
+.tool-view-pending {
+    animation: tool-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes tool-pulse {
+    0%, 100% {
+        background: var(--primary-color-5);
+    }
+    50% {
+        background: var(--primary-color-6);
+    }
+}

@@ -65,7 +65,9 @@ pub(super) async fn run_conversation<
     let mut round = 1usize;
 
     loop {
+        info!("[round] === 第 {} 轮开始 ===", round);
         if state.cancelled.load(Ordering::SeqCst) {
+            info!("[round] 已取消，break");
             break;
         }
 
@@ -76,13 +78,13 @@ pub(super) async fn run_conversation<
         // ── 构造请求 ──
         let tools = build_tool_definitions(state);
         // 打印下加载的工具
-        for tool in &tools {
-            info!(
-                "已加载工具: {} - {}",
-                tool.function.name,
-                tool.function.description.as_deref().unwrap_or("(无描述)")
-            );
-        }
+        // for tool in &tools {
+        //     info!(
+        //         "已加载工具: {} - {}",
+        //         tool.function.name,
+        //         tool.function.description.as_deref().unwrap_or("(无描述)")
+        //     );
+        // }
 
         let (temperature, max_tokens) = {
             let cfg = state.config.lock().unwrap();
@@ -113,6 +115,7 @@ pub(super) async fn run_conversation<
         let mut accumulators: BTreeMap<u32, ToolCallAccumulator> = BTreeMap::new();
 
         let mut consecutive_stream_errors = 0u32;
+        let mut last_stream_error = String::new();
         const MAX_STREAM_ERRORS: u32 = 5;
         while let Some(chunk_result) = inner.next().await {
             if state.cancelled.load(Ordering::SeqCst) {
@@ -189,10 +192,12 @@ pub(super) async fn run_conversation<
                 }
                 Err(e) => {
                     consecutive_stream_errors += 1;
-                    warn!(
+                    let msg = format!(
                         "Stream chunk error ({}/{}): {}",
                         consecutive_stream_errors, MAX_STREAM_ERRORS, e
                     );
+                    warn!("{}", msg);
+                    last_stream_error = msg;
                     if consecutive_stream_errors >= MAX_STREAM_ERRORS {
                         warn!(
                             "chat: 连续 {} 次流式 chunk 错误，终止消费",
@@ -217,6 +222,11 @@ pub(super) async fn run_conversation<
                 },
             })
             .collect();
+
+        // 流式结束后，若累积了未达阈值的错误且没有任何有效内容，将错误报告给前端
+        if consecutive_stream_errors > 0 && !has_content && tool_calls_vec.is_empty() {
+            state.subscribers.emit(ChatEvent::Error(last_stream_error));
+        }
 
         for acc in accumulators.values() {
             if acc.id.is_empty() {
@@ -258,10 +268,66 @@ pub(super) async fn run_conversation<
                 message: assistant_msg,
             }));
 
+        // ── 打印本轮结束后 history 摘要 ──
+        {
+            let snap = state.history.snapshot();
+            info!(
+                "[round] === 第 {} 轮结束，history 共 {} 条消息 ===",
+                round,
+                snap.len()
+            );
+            for (i, msg) in snap.iter().enumerate() {
+                let role = match msg.role {
+                    MessageRole::System => "System",
+                    MessageRole::User => "User",
+                    MessageRole::Assistant => "Assistant",
+                    MessageRole::Tool => "Tool",
+                };
+                let content_preview = msg
+                    .content
+                    .as_ref()
+                    .map(|c| {
+                        let text = match c {
+                            MessageContent::Text { text } => text.as_str(),
+                            MessageContent::ToolResult { content, .. } => content.as_str(),
+                            _ => "",
+                        };
+                        text.to_string()
+                    })
+                    .unwrap_or_else(|| "(无内容)".to_string());
+                let tool_calls_info = msg
+                    .tool_calls
+                    .as_ref()
+                    .map(|tcs| {
+                        let names: Vec<&str> =
+                            tcs.iter().map(|tc| tc.function.name.as_str()).collect();
+                        format!(" tool_calls={:?}", names)
+                    })
+                    .unwrap_or_default();
+                info!(
+                    "[round]   [{}] {}{}: {}",
+                    i,
+                    role,
+                    tool_calls_info,
+                    content_preview.replace('\n', " ")
+                );
+            }
+            info!("[round] === history 摘要结束 ===");
+        }
+
         // ── 结束条件 ──
         if tool_calls_vec.is_empty() {
+            info!("[round] 无 tool_calls，break（本轮 LLM 未调用工具）");
             break;
         }
+        info!(
+            "[round] 本轮有 {} 个 tool_calls: {:?}",
+            tool_calls_vec.len(),
+            tool_calls_vec
+                .iter()
+                .map(|tc| tc.function.name.as_str())
+                .collect::<Vec<_>>()
+        );
         if round >= state.config.lock().unwrap().max_tool_rounds {
             warn!(
                 "chat: 达到 max_tool_rounds={}, 终止循环",
@@ -277,6 +343,11 @@ pub(super) async fn run_conversation<
             .iter()
             .partition(|tc| UI_TOOL_NAMES.contains(&tc.function.name.as_str()));
 
+        info!(
+            "[round] 后端工具 {} 个, UI 工具 {} 个",
+            backend_calls.len(),
+            ui_calls.len()
+        );
         // 后端工具：直接执行，结果作为 tool 消息入历史
         for call in &backend_calls {
             if state.cancelled.load(Ordering::SeqCst) {
@@ -284,6 +355,10 @@ pub(super) async fn run_conversation<
             }
             let args: Value = serde_json::from_str(&call.function.arguments)
                 .unwrap_or_else(|_| Value::String(call.function.arguments.clone()));
+            info!(
+                "[round] 执行工具: {} (id={}) args:{:?}",
+                call.function.name, call.id, args
+            );
 
             let outcome = if bridge.needs_stream(&call.function.name) {
                 // 子 agent 工具：使用流式调用，创建 stream 接收事件并转发
@@ -315,6 +390,10 @@ pub(super) async fn run_conversation<
                     (true, Value::String(format!("Error: {}", e)))
                 }
             };
+            info!(
+                "[round] 工具 {} 执行完毕: is_error={}",
+                call.function.name, is_error
+            );
             state.history.push_tool(&call.id, &content);
             state
                 .subscribers
@@ -325,6 +404,7 @@ pub(super) async fn run_conversation<
                     content,
                 }));
         }
+        info!("[round] 所有后端工具执行完毕，round += 1，继续循环");
 
         // UI 工具（request_user_action）：不执行，发事件 + 按策略处理
         for call in &ui_calls {

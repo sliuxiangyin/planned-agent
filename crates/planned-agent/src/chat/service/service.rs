@@ -88,9 +88,14 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
 impl<PM: PromptManager + Send + Sync + 'static> Drop for ChatService<PM> {
     /// 销毁时记录日志，便于排查 ChatService 泄漏或意外重建。
     fn drop(&mut self) {
+        let role = match &self.state.config.lock().unwrap().run_id {
+            Some(id) => format!("sub_agent(run_id={})", id),
+            None => "main_agent".to_string(),
+        };
         tracing::info!(
-            "ChatService 已销毁 (model={})",
+            "ChatService 已销毁 (model={}, role={})",
             self.state.ai_client.model_name(),
+            role,
         );
     }
 }

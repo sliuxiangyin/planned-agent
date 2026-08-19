@@ -14,18 +14,18 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use planned_agent_ai_manager::AiManager;
 use planned_agent_core::ai::types::{Message, MessageContent, MessageRole};
 use planned_agent_core::events::{ChatEvent as CoreChatEvent, UIAction};
 use planned_agent_core::mcp::types::ToolResult;
 use planned_agent_prompt_manager::FilePromptManager;
-use planned_agent_ai_manager::AiManager;
 use planned_agent_tool_manager::{
     SubAgentRunOutcome, SubAgentSession, SubAgentSessionRunner, ToolRegistry, ToolStreamSender,
 };
 use serde_json::Value;
 use tracing::info;
 
-use crate::chat::service::{SendOutcome, SendTicket, ChatConfig, ChatEvent, ChatService};
+use crate::chat::service::{ChatConfig, ChatEvent, ChatService, SendOutcome, SendTicket};
 
 // ── Runner ─────────────────────────────────────────────────────────────────
 
@@ -72,7 +72,10 @@ impl SubAgentSessionRunner for SubAgentRunner {
         arguments: Value,
         stream: ToolStreamSender,
     ) -> Result<SubAgentRunOutcome> {
-        info!("[子agent] start() 被调用, depth={}, max_depth={}", self.depth, self.max_depth);
+        info!(
+            "[子agent] start() 被调用, depth={}, max_depth={}",
+            self.depth, self.max_depth
+        );
 
         // 防递归
         if self.depth >= self.max_depth {
@@ -88,9 +91,7 @@ impl SubAgentSessionRunner for SubAgentRunner {
         }
 
         // 提取 task 参数
-        let task = arguments["task"]
-            .as_str()
-            .unwrap_or("请完成指定任务");
+        let task = arguments["task"].as_str().unwrap_or("请完成指定任务");
         info!("[子agent] 准备发送任务: {}", task);
 
         // 每次调用新建独立 ChatService：run_id 在构造时写入 config，
@@ -137,12 +138,12 @@ pub struct ChatSubAgentSession {
 }
 
 impl ChatSubAgentSession {
-    pub fn new(
-        service: ChatService<FilePromptManager>,
-        depth: u32,
-        max_depth: u32,
-    ) -> Self {
-        Self { service, depth, max_depth }
+    pub fn new(service: ChatService<FilePromptManager>, depth: u32, max_depth: u32) -> Self {
+        Self {
+            service,
+            depth,
+            max_depth,
+        }
     }
 }
 
@@ -199,7 +200,10 @@ async fn collect_until_outcome(
     // 注册临时事件监听：转发子 agent 内部事件，并捕获挂起 UI 信息
     let _guard = service.on_chat_with_guard(move |event| {
         if let ChatEvent::Chat(chat_event) = &event {
-            if let CoreChatEvent::UIActionRequest { message, actions, .. } = chat_event {
+            if let CoreChatEvent::UIActionRequest {
+                message, actions, ..
+            } = chat_event
+            {
                 *ui_request_clone.lock().unwrap() = Some((message.clone(), actions.clone()));
             }
             // 转发流式事件给父 agent 的 stream（含 UIActionRequest，冒泡到前端）
@@ -210,9 +214,9 @@ async fn collect_until_outcome(
     // 等待子 agent 对话结果（区分完成 / 挂起 / 失败）
     match ticket.wait_outcome().await {
         SendOutcome::Completed => {
-            info!("[子agent] 子 agent 完成，提取结果");
             let history = service.history();
             let last_text = extract_last_assistant_text(&history);
+            info!("[子agent] 子 agent 完成，提取结果：{}", last_text);
             Ok(SubAgentRunOutcome::Done(ToolResult {
                 call_id: String::new(),
                 is_error: false,
@@ -223,11 +227,7 @@ async fn collect_until_outcome(
             info!("[子agent] 子 agent 挂起，构造 AwaitingUserAction");
             let (message, actions) = ui_request.lock().unwrap().take().unwrap_or_default();
             Ok(SubAgentRunOutcome::AwaitingUserAction {
-                session: Box::new(ChatSubAgentSession::new(
-                    service.clone(),
-                    depth,
-                    max_depth,
-                )),
+                session: Box::new(ChatSubAgentSession::new(service.clone(), depth, max_depth)),
                 message,
                 actions: serde_json::to_value(actions).unwrap_or_else(|_| Value::Array(vec![])),
             })
