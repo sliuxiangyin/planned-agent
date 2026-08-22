@@ -1,8 +1,8 @@
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::path::PathBuf;
 
-use planned_agent_core::prompt::{PromptManager, PromptContext};
+use planned_agent_core::prompt::{PromptContext, PromptManager};
 use planned_agent_prompt_manager::{FilePromptManager, PromptManagerConfig};
 
 fn get_test_config() -> PromptManagerConfig {
@@ -11,7 +11,7 @@ fn get_test_config() -> PromptManagerConfig {
     // 从crate目录向上两级到达项目根目录
     let project_root = manifest_dir.parent().unwrap().parent().unwrap();
     let prompt_dir = project_root.join("prompts");
-    
+
     PromptManagerConfig {
         prompt_dir,
         ..Default::default()
@@ -28,10 +28,10 @@ struct ExtractedInfo {
 #[tokio::test]
 async fn test_prompt_manager_initialization() {
     let config = get_test_config();
-    
+
     let manager = FilePromptManager::new(config).unwrap();
     manager.initialize().await.unwrap();
-    
+
     // 检查是否加载了prompt
     let prompts = manager.list_prompts().await.unwrap();
     assert!(!prompts.is_empty());
@@ -41,13 +41,13 @@ async fn test_prompt_manager_initialization() {
 #[tokio::test]
 async fn test_prompt_exists() {
     let config = get_test_config();
-    
+
     let manager = FilePromptManager::new(config).unwrap();
     manager.initialize().await.unwrap();
-    
+
     // 检查chat/system是否存在（root prompts/chat/system.toml：通用示例模板）
     assert!(manager.exists("chat/system").await.unwrap());
-    
+
     // 检查不存在的prompt
     assert!(!manager.exists("nonexistent/prompt").await.unwrap());
 }
@@ -55,15 +55,15 @@ async fn test_prompt_exists() {
 #[tokio::test]
 async fn test_prompt_rendering() {
     let config = get_test_config();
-    
+
     let manager = FilePromptManager::new(config).unwrap();
     manager.initialize().await.unwrap();
-    
+
     // 渲染chat/system prompt（root prompts/chat/system.toml：通用示例模板）
     let context = PromptContext::new()
         .with_variable("user_name", json!("张三"))
         .with_variable("context", json!("这是一个测试"));
-    
+
     let rendered = manager.render("chat/system", &context).await.unwrap();
     println!("Rendered prompt:\n{}", rendered);
     assert!(!rendered.is_empty());
@@ -72,12 +72,15 @@ async fn test_prompt_rendering() {
 #[tokio::test]
 async fn test_prompt_with_output_schema() {
     let config = get_test_config();
-    
+
     let manager = FilePromptManager::new(config).unwrap();
     manager.initialize().await.unwrap();
-    
+
     // 检查analysis/extract_info是否有output_schema
-    let schema = manager.get_output_schema("analysis/extract_info").await.unwrap();
+    let schema = manager
+        .get_output_schema("analysis/extract_info")
+        .await
+        .unwrap();
     assert!(schema.is_some());
     println!("Output schema: {:?}", schema);
 }
@@ -85,10 +88,10 @@ async fn test_prompt_with_output_schema() {
 #[tokio::test]
 async fn test_response_validation() {
     let config = get_test_config();
-    
+
     let manager = FilePromptManager::new(config).unwrap();
     manager.initialize().await.unwrap();
-    
+
     // 测试有效的JSON响应
     let valid_response = r#"
     {
@@ -97,10 +100,13 @@ async fn test_response_validation() {
         "sentiment": "neutral"
     }
     "#;
-    
-    let is_valid = manager.validate_response("analysis/extract_info", valid_response).await.unwrap();
+
+    let is_valid = manager
+        .validate_response("analysis/extract_info", valid_response)
+        .await
+        .unwrap();
     assert!(is_valid);
-    
+
     // 测试无效的JSON响应（缺少必需字段）
     let invalid_response = r#"
     {
@@ -108,18 +114,21 @@ async fn test_response_validation() {
         "summary": "张三在北京"
     }
     "#;
-    
-    let is_valid = manager.validate_response("analysis/extract_info", invalid_response).await.unwrap();
+
+    let is_valid = manager
+        .validate_response("analysis/extract_info", invalid_response)
+        .await
+        .unwrap();
     assert!(!is_valid);
 }
 
 #[tokio::test]
 async fn test_response_parsing() {
     let config = get_test_config();
-    
+
     let manager = FilePromptManager::new(config).unwrap();
     manager.initialize().await.unwrap();
-    
+
     // 测试解析JSON响应
     let response = r#"
     {
@@ -128,8 +137,11 @@ async fn test_response_parsing() {
         "sentiment": "neutral"
     }
     "#;
-    
-    let extracted: ExtractedInfo = manager.parse_response("analysis/extract_info", response).await.unwrap();
+
+    let extracted: ExtractedInfo = manager
+        .parse_response("analysis/extract_info", response)
+        .await
+        .unwrap();
     assert_eq!(extracted.entities.len(), 3);
     assert_eq!(extracted.summary, "张三在北京的公司工作");
     assert_eq!(extracted.sentiment, "neutral");
@@ -145,7 +157,10 @@ async fn test_prompt_list() {
     let prompts = manager.list_prompts().await.unwrap();
     println!("Available prompts:");
     for prompt in &prompts {
-        println!("  - {} (has schema: {})", prompt.name, prompt.has_output_schema);
+        println!(
+            "  - {} (has schema: {})",
+            prompt.name, prompt.has_output_schema
+        );
     }
 
     // 应该至少有3个prompt
@@ -161,9 +176,15 @@ async fn test_coarse_plan_prompt_has_entity_preservation_rules() {
 
     // 渲染粗粒度计划 Prompt，验证 user_input 原样透传
     let context = PromptContext::new()
-        .with_variable("user_input", json!("打开百度，搜索安仁乡，给出前三条相关信息并整理给我"))
+        .with_variable(
+            "user_input",
+            json!("打开百度，搜索安仁乡，给出前三条相关信息并整理给我"),
+        )
         .with_variable("context", json!("无历史上下文"))
-        .with_variable("available_categories", json!("- Browser（浏览器）\n- File（文件）"));
+        .with_variable(
+            "available_categories",
+            json!("- Browser（浏览器）\n- File（文件）"),
+        );
 
     let rendered = manager
         .render("planning/coarse_plan", &context)

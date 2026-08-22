@@ -1,4 +1,4 @@
-//! plans_flexible 表迁移。
+//! plans_flexible 表迁移（含 output_schema、input_schema）。
 
 use sea_orm_migration::prelude::*;
 
@@ -8,22 +8,6 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // plans 表：添加 flexible_version 列
-        manager
-            .alter_table(
-                Table::alter()
-                    .table(Plans::Table)
-                    .add_column(
-                        ColumnDef::new(Plans::FlexibleVersion)
-                            .integer()
-                            .not_null()
-                            .default(0),
-                    )
-                    .to_owned(),
-            )
-            .await?;
-
-        // plans_flexible 表
         manager
             .create_table(
                 Table::create()
@@ -35,21 +19,12 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .primary_key(),
                     )
-                    .col(
-                        ColumnDef::new(PlansFlexible::PlanId)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(PlansFlexible::Version)
-                            .integer()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(PlansFlexible::PlanId).string().not_null())
+                    .col(ColumnDef::new(PlansFlexible::Version).integer().not_null())
                     .col(
                         ColumnDef::new(PlansFlexible::PreviousSummary)
                             .string()
-                            .not_null()
-                            .default(""),
+                            .not_null(),
                     )
                     .col(
                         ColumnDef::new(PlansFlexible::Todos)
@@ -64,10 +39,18 @@ impl MigrationTrait for Migration {
                             .default("[]"),
                     )
                     .col(
-                        ColumnDef::new(PlansFlexible::CreatedAt)
+                        ColumnDef::new(PlansFlexible::OutputSchema)
                             .string()
-                            .not_null(),
+                            .not_null()
+                            .default(""),
                     )
+                    .col(
+                        ColumnDef::new(PlansFlexible::InputSchema)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(ColumnDef::new(PlansFlexible::CreatedAt).string().not_null())
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_plans_flexible_plan_id")
@@ -79,7 +62,6 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // 索引：plan_id + version 联合查询
         manager
             .create_index(
                 Index::create()
@@ -96,17 +78,7 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
-            .drop_table(
-                Table::drop().table(PlansFlexible::Table).to_owned(),
-            )
-            .await?;
-        manager
-            .alter_table(
-                Table::alter()
-                    .table(Plans::Table)
-                    .drop_column(Plans::FlexibleVersion)
-                    .to_owned(),
-            )
+            .drop_table(Table::drop().table(PlansFlexible::Table).to_owned())
             .await?;
         Ok(())
     }
@@ -116,7 +88,6 @@ impl MigrationTrait for Migration {
 enum Plans {
     Table,
     Id,
-    FlexibleVersion,
 }
 
 #[derive(DeriveIden)]
@@ -128,5 +99,7 @@ enum PlansFlexible {
     PreviousSummary,
     Todos,
     Params,
+    OutputSchema,
+    InputSchema,
     CreatedAt,
 }

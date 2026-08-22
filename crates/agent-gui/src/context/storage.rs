@@ -4,20 +4,21 @@
 //!   1. 解析 DB 文件路径（多候选 + 自动 mkdir 父目录）
 //!   2. `Database::connect("sqlite://...?mode=rwc")` 建立连接
 //!   3. `Migrator::up(&db, None)` 应用全部 pending 迁移
-//!   4. 构造 1 个 `TestRepo`（MVP 阶段仅测试用）
+//!   4. 构造 Repo 实例
 //!
 //! 失败仅 warn（不 panic）；调用方通过 `InitStatus.storage.state` 反映。
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use dioxus::prelude::*;
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 
 use crate::config::GuiStorageConfig;
 use crate::storage::{
     migrations::Migrator,
-    repository::{MessageRepo, PlanRepo, TestRepo},
+    repository::{ChatMessageRepo, PlanRepo, TestRepo},
 };
 
 /// GUI 层 Storage 上下文
@@ -28,14 +29,18 @@ pub struct StorageContext {
     /// SQLite 连接（SeaORM DatabaseConnection）
     pub db: DatabaseConnection,
     /// tests 表仓库（验证用）
-    pub test_repo: Arc<TestRepo>,
+    test_repo: Arc<TestRepo>,
     /// plans 表仓库
-    pub plan_repo: Arc<PlanRepo>,
-    /// messages 表仓库
-    pub message_repo: Arc<MessageRepo>,
+    plan_repo: Arc<PlanRepo>,
+    /// chat_messages 表仓库（灵活模式聊天消息）
+    chat_message_repo: Arc<ChatMessageRepo>,
 }
 
 impl StorageContext {
+    pub fn test_repo(&self) -> Arc<TestRepo> { self.test_repo.clone() }
+    pub fn plan_repo(&self) -> Arc<PlanRepo> { self.plan_repo.clone() }
+    pub fn chat_message_repo(&self) -> Arc<ChatMessageRepo> { self.chat_message_repo.clone() }
+
     /// 从配置异步初始化 SQLite + 迁移 + Repos
     pub async fn init(config: &GuiStorageConfig) -> anyhow::Result<Self> {
         let path = resolve_db_path(&config.db_path)?;
@@ -58,17 +63,12 @@ impl StorageContext {
             db: db.clone(),
             test_repo: Arc::new(TestRepo::new(db.clone())),
             plan_repo: Arc::new(PlanRepo::new(db.clone())),
-            message_repo: Arc::new(MessageRepo::new(db.clone())),
+            chat_message_repo: Arc::new(ChatMessageRepo::new(db.clone())),
         })
     }
 }
 
 /// 解析 DB 文件路径：复用 config.rs try_load 的多候选模式
-///
-/// 优先级：
-///   1. 环境变量 `PLANNED_AGENT_DB_PATH`（最高优先）
-///   2. 配置里写的 `db_path`（相对路径以 cwd 为基准）
-///   3. 配置路径的父目录自动 mkdir
 fn resolve_db_path(configured: &str) -> anyhow::Result<PathBuf> {
     let raw = std::env::var("PLANNED_AGENT_DB_PATH").unwrap_or_else(|_| configured.to_string());
 
@@ -87,4 +87,17 @@ fn resolve_db_path(configured: &str) -> anyhow::Result<PathBuf> {
         std::fs::create_dir_all(parent)?;
     }
     Ok(path)
+}
+
+/// 从 `Resource<Option<Arc<StorageContext>>>` 中提取仓库，简化调用链。
+pub fn storage_repo<F, T>(
+    storage: Resource<Option<Arc<StorageContext>>>,
+    f: F,
+) -> Option<Arc<T>>
+where
+    F: FnOnce(&StorageContext) -> Arc<T>,
+{
+    let guard = storage.read();
+    let inner: &Option<Option<Arc<StorageContext>>> = &*guard;
+    inner.as_ref().and_then(|opt| opt.as_ref()).map(|ctx| f(ctx))
 }

@@ -21,5 +21,5 @@ pub use kv::KvContext;
 pub use mcp::{McpChangeNotifier, McpContext};
 pub use prompt::PromptContext;
 pub use rag::RagContext;
-pub use storage::StorageContext;
+pub use storage::{StorageContext, storage_repo};
 pub use tools::ToolsContext;

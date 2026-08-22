@@ -1,6 +1,6 @@
 //! Plan 页面主组件：组合左侧计划详情面板与右侧面板。
 //!
-//! 灵活模式右侧渲染 `FlexiblePage`（与 `pages/chat/` 实现一致的纯内存聊天面板）；
+//! 灵活模式右侧渲染 `FlexiblePage`；
 //! 周密模式右侧渲染占位内容（聊天功能开发中）。
 //! 计划模式在创建时固定，不可在聊天中切换。
 
@@ -13,13 +13,13 @@ use crate::components::alert_dialog::{
 use crate::components::resizable_panel::ResizablePanel;
 use dioxus::prelude::*;
 
-use crate::context::StorageContext;
+use crate::context::{storage_repo, StorageContext};
 
 use super::left_panel::PlanLeftPanel;
 use super::flexible::FlexiblePage;
 use super::shared::load_plan_data::load_plan_data as load_plan_data_shared;
-use super::states::{ChatState, PlanState};
-use super::types::{ParamDef, PendingUIState, PlanInfo};
+use super::states::PlanState;
+use super::types::{ParamDef, PlanInfo};
 
 /// 本页面专属样式（按需加载）。
 const PLAN_CSS: Asset = asset!("/assets/plan.css");
@@ -34,13 +34,6 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
     // ── 计划信息（从 DB 异步加载） ──
     let plan_info = use_signal_sync(|| None::<PlanInfo>);
 
-    // ── 聊天状态 ──
-    let messages = use_signal_sync(|| vec![]);
-    let input_text = use_signal_sync(String::new);
-    let streaming_idx = use_signal_sync(|| None::<usize>);
-    let pending_ui = use_signal_sync(|| None::<PendingUIState>);
-    let reasoning_texts = use_signal_sync(|| Vec::<Option<String>>::new());
-
     // ── 计划模式（从 DB 加载后固定） ──
     let plan_mode = use_signal_sync(|| None::<String>);
 
@@ -53,56 +46,37 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
     // ── 清除消息确认弹窗 ──
     let mut show_clear_dialog = use_signal_sync(|| false);
 
-    // ── 分组状态结构体：收敛所有信号，后续函数仅传入 struct ──
-    let mut chat = ChatState {
-        messages,
-        reasoning_texts,
-        streaming_idx,
-        pending_ui,
-        input_text,
-    };
-    let plan = PlanState {
+    let mut plan = PlanState {
         plan_info,
         plan_mode,
         plan_version,
         plan_params,
     };
 
-    // ── 加载计划元数据 + 历史消息 ──
+    // ── 加载计划元数据 ──
     let pid = plan_id.clone();
     use_effect(move || {
-        let storage_opt = storage.read().as_ref().and_then(|x| x.as_ref()).cloned();
-        if let Some(ctx) = storage_opt {
-            spawn(load_plan_data_shared(
-                pid.clone(),
-                ctx.plan_repo.clone(),
-                ctx.message_repo.clone(),
-                chat,
-                plan,
-            ));
+        if let Some(plan_repo) = storage_repo(storage, |ctx| ctx.plan_repo()) {
+            let pid = pid.clone();
+            spawn(async move {
+                if let Some(info) = load_plan_data_shared(pid, plan_repo).await {
+                    plan.plan_info.set(Some(info.clone()));
+                    plan.set_mode(info.mode);
+                }
+            });
         }
     });
 
-    // ── 获取 message_repo / plan_repo 用于持久化与删除 ──
-    let message_repo = storage
-        .read()
-        .as_ref()
-        .and_then(|x| x.as_ref())
-        .map(|ctx| ctx.message_repo.clone());
-    let plan_repo = storage
-        .read()
-        .as_ref()
-        .and_then(|x| x.as_ref())
-        .map(|ctx| ctx.plan_repo.clone());
+    // ── 获取 plan_repo 用于删除 ──
+    let plan_repo = storage_repo(storage, |ctx| ctx.plan_repo());
 
-    // ── 清除消息记录回调：乐观清空内存信号，异步删除 DB 记录 ──
+    // ── 清除消息记录回调：删除 chat_messages ──
     let on_confirm_clear = {
         let pid = plan_id.clone();
-        let repo = message_repo.clone();
+        let chat_msg_repo = storage_repo(storage, |ctx| ctx.chat_message_repo());
         move |_: ()| {
-            chat.clear();
             let pid = pid.clone();
-            let repo = repo.clone();
+            let repo = chat_msg_repo.clone();
             spawn(async move {
                 if let Some(ref repo) = repo {
                     if let Err(e) = repo.delete_by_plan_id(&pid).await {
@@ -117,15 +91,15 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
     let on_delete_plan = {
         let pid = plan_id.clone();
         let plan_repo = plan_repo.clone();
-        let msg_repo = message_repo.clone();
+        let chat_msg_repo = storage_repo(storage, |ctx| ctx.chat_message_repo());
         let on_back = on_back;
         move |_: ()| {
             let pid = pid.clone();
             let plan_repo = plan_repo.clone();
-            let msg_repo = msg_repo.clone();
+            let chat_msg_repo = chat_msg_repo.clone();
             let on_back = on_back;
             spawn(async move {
-                if let Some(repo) = msg_repo {
+                if let Some(repo) = chat_msg_repo {
                     if let Err(e) = repo.delete_by_plan_id(&pid).await {
                         tracing::error!("删除消息失败: {}", e);
                     }
@@ -159,7 +133,7 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
                 right: {
                     let mode = plan.mode();
                     if mode == "flexible" {
-                        rsx! { FlexiblePage {} }
+                        rsx! { FlexiblePage { plan_id: plan_id.clone() } }
                     } else {
                         render_chat_panel_placeholder()
                     }

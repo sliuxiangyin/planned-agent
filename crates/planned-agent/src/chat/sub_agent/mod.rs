@@ -91,7 +91,8 @@ impl SubAgentSessionRunner for SubAgentRunner {
         }
 
         // 提取 task 参数
-        let task = arguments["task"].as_str().unwrap_or("请完成指定任务");
+        let task = serde_json::to_string_pretty(&arguments)
+            .unwrap_or_else(|_| "请完成指定任务".to_string());
         info!("[子agent] 准备发送任务: {}", task);
 
         // 每次调用新建独立 ChatService：run_id 在构造时写入 config，

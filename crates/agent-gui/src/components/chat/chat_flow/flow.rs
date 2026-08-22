@@ -11,7 +11,6 @@
 //! `run_id`（即 `session_id`，子 agent 的 run_id）是否为空区分：空走
 //! `confirm_user_action`，非空走 `resume_sub_agent`。
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use dioxus::prelude::*;
@@ -65,8 +64,6 @@ pub struct ToolCallEntry {
     pub result: Option<serde_json::Value>,
     /// 是否出错
     pub is_error: bool,
-    /// 关联的消息索引（在 ToolCallComplete 时从 streaming_idx 获取）
-    pub msg_idx: Option<usize>,
 }
 
 /// 手动实现 PartialEq：跳过 Value 字段（不支持 PartialEq），比较其余字段。
@@ -76,30 +73,50 @@ impl PartialEq for ToolCallEntry {
             && self.phase == other.phase
             && self.arguments == other.arguments
             && self.is_error == other.is_error
-            && self.msg_idx == other.msg_idx
     }
+}
+
+/// GUI 层的消息包装，自包含所有 UI 状态。
+///
+/// 替代了原来的并行信号（`reasoning_texts`、`streaming_idx`、`tool_call_entries`），
+/// 让每条消息携带自身的推理文本、streaming 状态和工具调用条目。
+#[derive(Clone)]
+pub struct ChatMessage {
+    /// 底层消息数据（role、content、reasoning_content、tool_calls 等）
+    pub message: Message,
+    /// 显示序号（递增，用于前端稳定排序/动画 key）
+    pub sequence_order: u64,
+    /// 是否正在 streaming（替代 `streaming_idx` 游标）
+    pub is_streaming: bool,
+    /// 本条消息关联的 Tool 调用条目（替代全局 `tool_call_entries` flat map）
+    pub tool_call_entries: Vec<ToolCallEntry>,
 }
 
 /// 消息状态（纯内存，Signal 均为 `Copy` 可直接进闭包/异步块）。
 #[derive(Clone, Copy, PartialEq)]
 pub struct ChatSignals {
-    pub messages: Signal<Vec<Message>, SyncStorage>,
-    pub reasoning_texts: Signal<Vec<Option<String>>, SyncStorage>,
-    pub streaming_idx: Signal<Option<usize>, SyncStorage>,
+    pub messages: Signal<Vec<ChatMessage>, SyncStorage>,
     pub pending_ui: Signal<Option<PendingUI>, SyncStorage>,
     pub input_text: Signal<String, SyncStorage>,
     /// 最近一次 `request_user_action` tool call 的 id
     pub pending_tool_call_id: Signal<Option<String>, SyncStorage>,
     /// 当前 service 上已注册的事件订阅守卫（RAII 自动退订）
     pub subscription: Signal<Option<SubscriptionGuard>, SyncStorage>,
-    /// 所有 tool 调用条目（key = tool_call_id）
-    pub tool_call_entries: Signal<HashMap<String, ToolCallEntry>, SyncStorage>,
+    /// 持久化回调：ToolExecuted / RoundEnd 时调用，传入当前 ChatMessage
+    pub persist: Signal<Option<Arc<dyn Fn(&ChatMessage) + Send + Sync>>, SyncStorage>,
 }
 
 impl ChatSignals {
-    /// 当前 streaming 消息索引。
-    pub fn sidx(&self) -> Option<usize> {
-        *self.streaming_idx.read()
+    /// 获取当前 streaming 消息及其持久化回调（供 handle_event 在运行时内 spawn）。
+    fn streaming_to_persist(&self) -> Option<(Arc<dyn Fn(&ChatMessage) + Send + Sync>, ChatMessage)> {
+        let f = self.persist.read().clone()?;
+        let cm = self.messages.read().iter().rev().find(|m| m.is_streaming).cloned()?;
+        Some((f, cm))
+    }
+
+    /// 是否有任何消息正在 streaming。
+    pub fn is_streaming(&self) -> bool {
+        self.messages.read().iter().any(|m| m.is_streaming)
     }
 
     /// 最后一条 Assistant 消息的索引。
@@ -107,28 +124,28 @@ impl ChatSignals {
         self.messages
             .read()
             .iter()
-            .rposition(|m| matches!(m.role, MessageRole::Assistant))
+            .rposition(|m| matches!(m.message.role, MessageRole::Assistant))
     }
 
     /// 推入用户消息 + Assistant 占位（作为第一轮 LLM 响应的载体）。
-    pub fn push_user_turn(&mut self, user_text: String) -> usize {
+    pub fn push_user_turn(&mut self, user_text: String, seq: &mut u64) {
         let user_msg = Message {
             role: MessageRole::User,
             content: Some(MessageContent::Text { text: user_text }),
             ..Default::default()
         };
-        {
-            let mut msgs = self.messages.write();
-            msgs.push(user_msg);
-            self.reasoning_texts.write().push(None);
-        }
-        let asst_idx = self.push_assistant_placeholder();
-        self.streaming_idx.set(Some(asst_idx));
-        asst_idx
+        self.messages.write().push(ChatMessage {
+            message: user_msg,
+            sequence_order: *seq,
+            is_streaming: false,
+            tool_call_entries: Vec::new(),
+        });
+        *seq += 1;
+        self.push_assistant_placeholder(seq);
     }
 
-    /// 新建一条空 assistant 消息（一轮 LLM 响应的载体），返回其索引。
-    pub fn push_assistant_placeholder(&mut self) -> usize {
+    /// 新建一条空 assistant streaming 消息（一轮 LLM 响应的载体）。
+    pub fn push_assistant_placeholder(&mut self, seq: &mut u64) {
         let asst_msg = Message {
             role: MessageRole::Assistant,
             content: Some(MessageContent::Text {
@@ -136,20 +153,19 @@ impl ChatSignals {
             }),
             ..Default::default()
         };
-        let idx;
-        {
-            let mut msgs = self.messages.write();
-            idx = msgs.len();
-            msgs.push(asst_msg);
-            self.reasoning_texts.write().push(Some(String::new()));
-        }
-        idx
+        self.messages.write().push(ChatMessage {
+            message: asst_msg,
+            sequence_order: *seq,
+            is_streaming: true,
+            tool_call_entries: Vec::new(),
+        });
+        *seq += 1;
     }
 
     /// 向指定索引的消息追加文本。
     pub fn append_text(&mut self, idx: usize, chunk: &str) {
-        if let Some(msg) = self.messages.write().get_mut(idx) {
-            if let Some(MessageContent::Text { text }) = &mut msg.content {
+        if let Some(cm) = self.messages.write().get_mut(idx) {
+            if let Some(MessageContent::Text { text }) = &mut cm.message.content {
                 text.push_str(chunk);
             }
         }
@@ -157,28 +173,41 @@ impl ChatSignals {
 
     /// 向当前 streaming 消息追加文本。
     pub fn append_streaming(&mut self, chunk: &str) {
-        if let Some(idx) = self.sidx() {
-            self.append_text(idx, chunk);
-        }
-    }
-
-    /// 向指定索引追加推理文本。
-    pub fn append_reasoning(&mut self, idx: usize, chunk: &str) {
-        if let Some(Some(buf)) = self.reasoning_texts.write().get_mut(idx) {
-            buf.push_str(chunk);
+        if let Some(cm) = self
+            .messages
+            .write()
+            .iter_mut()
+            .find(|m| m.is_streaming)
+        {
+            if let Some(MessageContent::Text { text }) = &mut cm.message.content {
+                text.push_str(chunk);
+            }
         }
     }
 
     /// 向当前 streaming 消息追加推理文本。
     pub fn append_streaming_reasoning(&mut self, chunk: &str) {
-        if let Some(idx) = self.sidx() {
-            self.append_reasoning(idx, chunk);
+        if let Some(cm) = self
+            .messages
+            .write()
+            .iter_mut()
+            .find(|m| m.is_streaming)
+        {
+            let buf = cm
+                .message
+                .reasoning_content
+                .get_or_insert_with(String::new);
+            buf.push_str(chunk);
         }
     }
 
-    /// 停止 streaming（保留当前内容）。
+    /// 停止 streaming（将所有 is_streaming=true 的消息标记为 false）。
     pub fn stop_streaming(&mut self) {
-        self.streaming_idx.set(None);
+        for cm in self.messages.write().iter_mut() {
+            if cm.is_streaming {
+                cm.is_streaming = false;
+            }
+        }
     }
 
     /// 向最后一条 Assistant 消息追加文本。
@@ -206,108 +235,125 @@ impl ChatSignals {
     /// 清空全部消息与相关状态。
     pub fn clear(&mut self) {
         self.messages.set(vec![]);
-        self.reasoning_texts.set(vec![]);
-        self.streaming_idx.set(None);
         self.pending_ui.set(None);
         self.pending_tool_call_id.set(None);
-        self.tool_call_entries.set(HashMap::new());
     }
 
-    // ── Tool 调用管理 ──
+    // ── Tool 调用管理（per-message） ──
 
-    /// 收到 ToolCallStart：创建新的 Pending 条目（跳过 request_user_action）。
-    pub fn tool_call_start(&mut self, id: &str, name: &str) {
-        self.tool_call_entries.write().insert(
-            id.to_string(),
-            ToolCallEntry {
+    /// 在当前 streaming 消息上创建新的 Tool 调用条目。
+    pub fn tool_call_start(&mut self, _id: &str, name: &str) {
+        if let Some(cm) = self
+            .messages
+            .write()
+            .iter_mut()
+            .find(|m| m.is_streaming)
+        {
+            cm.tool_call_entries.push(ToolCallEntry {
                 name: name.to_string(),
                 phase: ToolCallPhase::Pending,
                 arguments: String::new(),
                 result: None,
                 is_error: false,
-                msg_idx: None,
-            },
-        );
-    }
-
-    /// 收到 ToolCallArgsDelta：追加参数片段。
-    pub fn tool_call_append_args(&mut self, id: &str, delta: &str) {
-        if let Some(entry) = self.tool_call_entries.write().get_mut(id) {
-            entry.arguments.push_str(delta);
+            });
         }
     }
 
-    /// 收到 ToolCallComplete：参数就绪，切换为 Running，并关联消息索引。
-    pub fn tool_call_complete(&mut self, id: &str, name: &str, arguments: &serde_json::Value) {
-        let mut entries = self.tool_call_entries.write();
-        if let Some(entry) = entries.get_mut(id) {
-            entry.phase = ToolCallPhase::Running;
-            entry.arguments = serde_json::to_string_pretty(arguments).unwrap_or_default();
-        } else {
-            // 如果没收到 Start（比如直接从 Complete 开始），补建条目
-            entries.insert(
-                id.to_string(),
-                ToolCallEntry {
+    /// 在当前 streaming 消息上追加 Tool 参数片段。
+    pub fn tool_call_append_args(&mut self, id: &str, delta: &str) {
+        if let Some(cm) = self
+            .messages
+            .write()
+            .iter_mut()
+            .find(|m| m.is_streaming)
+        {
+            // 按 name 匹配最后一个 Pending/Running 条目
+            if let Some(entry) = cm
+                .tool_call_entries
+                .iter_mut()
+                .rfind(|e| e.name == id || e.arguments.is_empty())
+            {
+                entry.arguments.push_str(delta);
+            }
+        }
+    }
+
+    /// 在当前 streaming 消息上标记 Tool 参数就绪。
+    pub fn tool_call_complete(&mut self, _id: &str, name: &str, arguments: &serde_json::Value) {
+        let pretty = serde_json::to_string_pretty(arguments).unwrap_or_default();
+        if let Some(cm) = self
+            .messages
+            .write()
+            .iter_mut()
+            .find(|m| m.is_streaming)
+        {
+            // 找到同名的 Pending 条目并更新
+            if let Some(entry) = cm
+                .tool_call_entries
+                .iter_mut()
+                .rfind(|e| e.name == name && e.phase == ToolCallPhase::Pending)
+            {
+                entry.phase = ToolCallPhase::Running;
+                entry.arguments = pretty;
+            } else {
+                // 补建条目（未收到 Start）
+                cm.tool_call_entries.push(ToolCallEntry {
                     name: name.to_string(),
                     phase: ToolCallPhase::Running,
-                    arguments: serde_json::to_string_pretty(arguments).unwrap_or_default(),
+                    arguments: pretty,
                     result: None,
                     is_error: false,
-                    msg_idx: None,
-                },
-            );
+                });
+            }
         }
     }
 
-    /// 收到 ToolExecuted：执行结束，切换为 Completed / Error。
+    /// 在对应消息上标记 Tool 执行完成。
     pub fn tool_call_executed(
         &mut self,
-        id: &str,
+        _id: &str,
         name: &str,
         is_error: bool,
         content: &serde_json::Value,
     ) {
-        let mut entries = self.tool_call_entries.write();
-        let phase = if is_error {
-            ToolCallPhase::Error
-        } else {
-            ToolCallPhase::Completed
-        };
-        if let Some(entry) = entries.get_mut(id) {
-            entry.phase = phase;
-            entry.is_error = is_error;
-            entry.result = Some(content.clone());
-        } else {
-            entries.insert(
-                id.to_string(),
-                ToolCallEntry {
+        let mut found = false;
+        for cm in self.messages.write().iter_mut() {
+            if let Some(entry) = cm
+                .tool_call_entries
+                .iter_mut()
+                .find(|e| e.name == name && matches!(e.phase, ToolCallPhase::Running | ToolCallPhase::Pending))
+            {
+                entry.phase = if is_error {
+                    ToolCallPhase::Error
+                } else {
+                    ToolCallPhase::Completed
+                };
+                entry.is_error = is_error;
+                entry.result = Some(content.clone());
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            // 兜底：在最后一条 streaming 消息（或最后一条 assistant）上补建
+            let phase = if is_error {
+                ToolCallPhase::Error
+            } else {
+                ToolCallPhase::Completed
+            };
+            let target_idx = self
+                .messages
+                .read()
+                .iter()
+                .rposition(|m| m.is_streaming || matches!(m.message.role, MessageRole::Assistant));
+            if let Some(idx) = target_idx {
+                self.messages.write()[idx].tool_call_entries.push(ToolCallEntry {
                     name: name.to_string(),
                     phase,
                     arguments: String::new(),
                     result: Some(content.clone()),
                     is_error,
-                    msg_idx: None,
-                },
-            );
-        }
-    }
-
-    /// 获取指定消息索引关联的所有 Tool 调用条目（按插入顺序）。
-    pub fn tool_calls_for_message(&self, msg_idx: usize) -> Vec<(String, ToolCallEntry)> {
-        let entries = self.tool_call_entries.read();
-        entries
-            .iter()
-            .filter(|(_, entry)| entry.msg_idx == Some(msg_idx))
-            .map(|(id, entry)| (id.clone(), entry.clone()))
-            .collect()
-    }
-
-    /// 在 ToolCallComplete 时将当前 streaming 消息关联到 tool call。
-    pub fn associate_tool_call_to_message(&mut self, id: &str) {
-        let msg_idx = *self.streaming_idx.read();
-        if let Some(idx) = msg_idx {
-            if let Some(entry) = self.tool_call_entries.write().get_mut(id) {
-                entry.msg_idx = Some(idx);
+                });
             }
         }
     }
@@ -318,7 +364,18 @@ impl ChatSignals {
 /// 发送消息：push user turn → send_text 入队。
 pub fn send_message(chat_signal: ChatServiceSignal, mut chat: ChatSignals, text: String) {
     chat.clear_pending();
-    chat.push_user_turn(text.clone());
+
+    // 计算当前 sequence_order 起始值
+    let seq_start = chat.messages.read().iter().map(|m| m.sequence_order).max().unwrap_or(0) + 1;
+    let mut seq = seq_start;
+    chat.push_user_turn(text.clone(), &mut seq);
+
+    // ── 持久化 user 消息 ──
+    if let Some(ref persist_fn) = *chat.persist.read() {
+        if let Some(cm) = chat.messages.read().last() {
+            persist_fn(cm);
+        }
+    }
 
     let chat_svc = (*chat_signal.read()).clone();
     let Some(chat_svc) = chat_svc else {
@@ -334,7 +391,6 @@ pub fn send_message(chat_signal: ChatServiceSignal, mut chat: ChatSignals, text:
 }
 
 /// 注册一次事件订阅（guard 存入 subscription signal，drop 时自动退订）。
-/// 首次 service ready 后调用一次即可，重复调用无效（已订阅则跳过）。
 pub fn ensure_subscription(
     chat_svc: &Arc<ChatService<FilePromptManager>>,
     mut chat: ChatSignals,
@@ -350,17 +406,38 @@ fn handle_event(mut chat: ChatSignals, ev: ServiceChatEvent) {
     match ev {
         // ── 流式文本/推理 ──
         ServiceChatEvent::Chat(ChatEvent::TextDelta(chunk)) => {
+            tracing::debug!(
+                target: "chat_flow",
+                streaming = chat.is_streaming(),
+                chunk_len = chunk.len(),
+                chunk = %chunk,
+                "TextDelta"
+            );
             chat.append_streaming(&chunk);
         }
         ServiceChatEvent::Chat(ChatEvent::ReasoningDelta(chunk)) => {
+            tracing::debug!(
+                target: "chat_flow",
+                streaming = chat.is_streaming(),
+                chunk_len = chunk.len(),
+                chunk = %chunk,
+                "ReasoningDelta"
+            );
             chat.append_streaming_reasoning(&chunk);
         }
 
-        // ── 新一轮 LLM 响应开始：无 streaming 时新建 assistant 消息 ──
+        // ── 新一轮 LLM 响应开始：无 streaming 消息时新建 assistant 占位 ──
         ServiceChatEvent::Chat(ChatEvent::RoundStart { .. }) => {
-            if chat.streaming_idx.read().is_none() {
-                let idx = chat.push_assistant_placeholder();
-                chat.streaming_idx.set(Some(idx));
+            tracing::debug!(
+                target: "chat_flow",
+                streaming = chat.is_streaming(),
+                "RoundStart"
+            );
+            if !chat.is_streaming() {
+                // 计算 sequence_order
+                let seq = chat.messages.read().iter().map(|m| m.sequence_order).max().unwrap_or(0) + 1;
+                let mut seq = seq;
+                chat.push_assistant_placeholder(&mut seq);
             }
         }
 
@@ -368,35 +445,80 @@ fn handle_event(mut chat: ChatSignals, ev: ServiceChatEvent) {
         ServiceChatEvent::Chat(ChatEvent::ToolCallStart { id, name })
             if name == "request_user_action" =>
         {
+            tracing::debug!(
+                target: "chat_flow",
+                id = %id,
+                name = %name,
+                "ToolCallStart (request_user_action — 记录 pending_tool_call_id)"
+            );
             chat.pending_tool_call_id.set(Some(id));
         }
 
-        // ── 其他 tool 调用：创建 Pending 条目 ──
+        // ── 其他 tool 调用：在 streaming 消息上创建条目 ──
         ServiceChatEvent::Chat(ChatEvent::ToolCallStart { id, name }) => {
+            tracing::debug!(
+                target: "chat_flow",
+                id = %id,
+                name = %name,
+                "ToolCallStart"
+            );
             chat.tool_call_start(&id, &name);
         }
 
         // ── Tool 参数增量 ──
         ServiceChatEvent::Chat(ChatEvent::ToolCallArgsDelta { id, delta }) => {
+            tracing::debug!(
+                target: "chat_flow",
+                id = %id,
+                delta_len = delta.len(),
+                delta = %delta,
+                "ToolCallArgsDelta"
+            );
             chat.tool_call_append_args(&id, &delta);
         }
 
-        // ── Tool 参数就绪，关联消息索引 ──
+        // ── Tool 参数就绪 ──
         ServiceChatEvent::Chat(ChatEvent::ToolCallComplete { id, name, arguments }) => {
-            // request_user_action 不渲染为 ToolView：跳过补建与消息关联
+            tracing::debug!(
+                target: "chat_flow",
+                id = %id,
+                name = %name,
+                arguments = %arguments,
+                streaming = chat.is_streaming(),
+                "ToolCallComplete"
+            );
+            // request_user_action 不渲染为 ToolView：跳过
             if name != "request_user_action" {
                 chat.tool_call_complete(&id, &name, &arguments);
-                chat.associate_tool_call_to_message(&id);
             }
         }
 
         // ── Tool 执行完成 ──
         ServiceChatEvent::Chat(ChatEvent::ToolExecuted { id, name, is_error, content }) => {
+            tracing::debug!(
+                target: "chat_flow",
+                id = %id,
+                name = %name,
+                is_error = is_error,
+                content = %content,
+                "ToolExecuted"
+            );
             chat.tool_call_executed(&id, &name, is_error, &content);
+            if let Some((f, cm)) = chat.streaming_to_persist() {
+                f(&cm);
+            }
         }
 
         // ── 一轮 assistant 消息已写入历史：结束本消息 streaming ──
         ServiceChatEvent::Chat(ChatEvent::RoundEnd { .. }) => {
+            tracing::debug!(
+                target: "chat_flow",
+                streaming = chat.is_streaming(),
+                "RoundEnd — 停止 streaming"
+            );
+            if let Some((f, cm)) = chat.streaming_to_persist() {
+                f(&cm);
+            }
             chat.stop_streaming();
         }
 
@@ -407,6 +529,15 @@ fn handle_event(mut chat: ChatSignals, ev: ServiceChatEvent) {
             session_id,
         }) => {
             let tool_call_id = chat.pending_tool_call_id.read().clone().unwrap_or_default();
+            tracing::debug!(
+                target: "chat_flow",
+                tool_call_id = %tool_call_id,
+                session_id = ?session_id,
+                message = %message,
+                actions_count = actions.len(),
+                actions = ?actions.iter().map(|a| &a.label).collect::<Vec<_>>(),
+                "UIActionRequest"
+            );
             chat.set_pending(PendingUI {
                 message,
                 actions,
@@ -416,7 +547,14 @@ fn handle_event(mut chat: ChatSignals, ev: ServiceChatEvent) {
         }
 
         // ── 对话结束 ──
-        ServiceChatEvent::Done { cancelled: _ } => {
+        ServiceChatEvent::Done { cancelled } => {
+            tracing::debug!(
+                target: "chat_flow",
+                cancelled = cancelled,
+                streaming = chat.is_streaming(),
+                has_pending = chat.has_pending(),
+                "Done — 对话结束"
+            );
             chat.stop_streaming();
             chat.clear_pending();
             chat.pending_tool_call_id.set(None);
@@ -424,7 +562,13 @@ fn handle_event(mut chat: ChatSignals, ev: ServiceChatEvent) {
 
         // ── 错误 ──
         ServiceChatEvent::Error(e) => {
-            tracing::error!("聊天事件错误: {}", e);
+            tracing::error!(
+                target: "chat_flow",
+                error = %e,
+                streaming = chat.is_streaming(),
+                has_pending = chat.has_pending(),
+                "聊天事件错误"
+            );
             if chat.pending_ui.read().is_none() {
                 chat.stop_streaming();
                 chat.append_to_last_assistant(&format!("\n\n*聊天出错: {}*", e));
@@ -452,8 +596,9 @@ pub fn handle_user_action(
     }
 
     // 新建下一条 assistant 消息作为本轮 LLM 响应的载体
-    let new_idx = chat.push_assistant_placeholder();
-    chat.streaming_idx.set(Some(new_idx));
+    let seq = chat.messages.read().iter().map(|m| m.sequence_order).max().unwrap_or(0) + 1;
+    let mut seq = seq;
+    chat.push_assistant_placeholder(&mut seq);
     chat.clear_pending();
     chat.pending_tool_call_id.set(None);
 

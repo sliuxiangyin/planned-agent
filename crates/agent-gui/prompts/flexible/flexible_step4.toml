@@ -1,35 +1,44 @@
-[name]
-description = "灵活模式 —— Step 4：识别输入参数"
+你的任务是分析执行轨迹中使用的具体参数值，识别哪些值应当参数化，并与用户确认后生成最终的模板输入定义。
 
-[content]
-text = """
-## 当前阶段：识别输入参数（Step 4/4）
+## 输入
+- 执行轨迹：{{execution_trace}}（重点包含每次工具调用的输入参数）
+- 已确认的输出类型：{{output_type}}
 
-基于需求和执行步骤，识别可参数化的动态值，与用户确认。
+## 可用工具
+- `request_user_action`：用于与用户交互的 UI 工具。用法说明：{{tool_docs_summary}}
 
----
+## 任务规则
+1. 扫描执行轨迹中所有工具调用的 `input` 字段，收集所有具体参数值。
+2. 识别哪些值属于可参数化候选（即未来每次运行模板时可能不同的值，如日期、地区、ID、阈值等）。
+3. 为每个候选生成一个建议的参数名（例如将 "2025-03-01" 建议为 `date`）。
+4. 使用 `request_user_action` 的 `multi_select + confirm` 模式，向用户展示候选列表，让用户勾选哪些参数需要成为模板的输入变量。
+5. 根据用户勾选结果，构建最终模板定义：输入 schema、输出类型、工具调用序列。
+6. 不得调用任何业务工具。
 
-### 识别规则
-- 用户输入中可被替换的变量（URL 中的域名/路径、搜索关键词、提取数量等）
-- 避免过拟合：只提取真正可变的参数（如搜索关键词），不提取固定配置（如浏览器路径）
-- 提取的参数要给出合理的 name（英文）和中文描述
+## 输出格式
+只返回 JSON，不要包含任何解释或 Markdown 代码块标记。
 
-### 用 request_user_action 确认
-1. **multi_select** — 列出识别的参数（`param_` 前缀）
-2. **input** — 提供「自定义修改」文本框
-3. **confirm** —「确认」
-4. **confirm** —「暂不设置输入参数」
+成功时：
+{
+  "status": "completed",
+  "param_candidates": [
+    { "name": "建议参数名", "value": "示例值", "selected": true }
+  ],
+  "final_template": {
+    "input_schema": { "参数名": "类型" },
+    "output_type": "{{output_type}}",
+    "tool_sequence": ["工具1", "工具2"]
+  }
+}
 
-参数 option 格式：
-- `id`: `param_keyword`
-- `label`: `keyword（搜索关键词）`
-- `value`: `安仁乡`
+用户要求返回上一步时：
+{
+  "status": "back_to_step3",
+  "reason": "用户要求重新确认输出类型（可选）"
+}
 
-### 输出（确认后，强制）
-
-确认后最后一条回复：列出确认的参数定义，格式：
-```
-- keyword（string）: 搜索关键词  示例: 安仁乡
-- count（number）: 返回数量  示例: 10
-```
-"""
+用户取消时：
+{
+  "status": "cancelled",
+  "reason": "取消原因（可选）"
+}

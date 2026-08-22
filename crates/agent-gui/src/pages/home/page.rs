@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 
-use crate::context::{InitStatus, ModuleState, StorageContext};
+use crate::context::{storage_repo, InitStatus, ModuleState, StorageContext};
 
 use super::components::active_plans::ActivePlans;
 use super::components::agent_insights::AgentInsightsPanel;
@@ -42,11 +42,9 @@ pub fn HomePage(on_navigate: EventHandler<PageRoute>) -> Element {
 
     // 当 storage 就绪时加载 plans
     use_effect(move || {
-        let storage_opt = storage.read().as_ref().and_then(|x| x.as_ref()).cloned();
-        if let Some(ctx) = storage_opt {
+        if let Some(repo) = storage_repo(storage, |ctx| ctx.plan_repo()) {
             if !*plans_loaded.read() {
                 plans_loaded.set(true);
-                let repo = ctx.plan_repo.clone();
                 spawn(async move {
                     match repo.find_all().await {
                         Ok(list) => {
@@ -113,9 +111,7 @@ pub fn HomePage(on_navigate: EventHandler<PageRoute>) -> Element {
         let storage = storage.clone();
         let on_navigate = on_navigate.clone();
         move |data: CreatePlanData| {
-            let storage_opt = storage.read().as_ref().and_then(|x| x.as_ref()).cloned();
-            if let Some(ctx) = storage_opt {
-                let repo = ctx.plan_repo.clone();
+            if let Some(repo) = storage_repo(storage, |ctx| ctx.plan_repo()) {
                 spawn(async move {
                     match repo.create(&data.name, &data.mode).await {
                         Ok(plan_model) => {
