@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use planned_agent_core::ai::types::{Message, MessageRole};
+use planned_agent_core::ai::types::{Message, MessageContent, MessageRole};
 
 use crate::components::chat::chat_flow::{ChatMessage, ChatStorage, ToolCallEntry, ToolCallPhase};
 use crate::storage::repository::ChatMessageRepo;
@@ -22,12 +22,23 @@ impl ChatMessageStorage {
 #[async_trait]
 impl ChatStorage for ChatMessageStorage {
     async fn persist_message(&self, plan_id: &str, msg: &ChatMessage) {
-        tracing::debug!(
+        // 幂等：同 plan_id + sequence_order 已存在则跳过
+        // （RoundEnd 会全量重放本轮所有消息，避免重复写入）
+        if let Ok(Some(_)) = self
+            .repo
+            .find_by_plan_and_seq(plan_id, msg.sequence_order as i32)
+            .await
+        {
+            return;
+        }
+
+        tracing::info!(
             target: "persist",
             sequence_order = msg.sequence_order,
             role = ?msg.message.role,
             is_streaming = msg.is_streaming,
             tool_calls_count = msg.tool_call_entries.len(),
+            plan_id = %plan_id,
             "persist_message 被调用"
         );
 
@@ -59,7 +70,8 @@ impl ChatStorage for ChatMessageStorage {
 
         let mut result = Vec::with_capacity(rows.len());
 
-        for row in rows {
+        // 第一遍：反序列化所有消息
+        for row in &rows {
             let message: Message = match serde_json::from_str(&row.message_json) {
                 Ok(m) => m,
                 Err(e) => {
@@ -68,15 +80,59 @@ impl ChatStorage for ChatMessageStorage {
                 }
             };
 
+            let tool_call_id = message.tool_call_id.clone();
             let tool_call_entries = build_tool_call_entries(&message);
 
             result.push(ChatMessage {
                 message,
                 sequence_order: row.sequence_order as u64,
                 is_streaming: false,
+                tool_call_id,
                 tool_call_entries,
             });
         }
+
+        // 第二遍：将 Tool 消息的 content 按 tool_call_id 关联到 Assistant 的 tool_call_entries
+        for i in 0..result.len() {
+            match result[i].message.role {
+                MessageRole::Tool => {
+                    let Some(tool_call_id) = result[i].tool_call_id.clone() else {
+                        continue;
+                    };
+                    let Some(content_text) = result[i].message.content.as_ref().and_then(|c| {
+                        if let MessageContent::Text { text } = c { Some(text.as_str()) } else { None }
+                    }) else {
+                        continue;
+                    };
+                    let result_value = serde_json::from_str(content_text)
+                        .unwrap_or_else(|_| serde_json::Value::String(content_text.to_string()));
+                    // 找到携带该 tool_call_id 的 Assistant 消息，回填到对应 entry
+                    // （tool_call_id 全局唯一，向前扫描所有 assistant 直到命中）
+                    for cm in result.iter_mut().take(i).rev() {
+                        if matches!(cm.message.role, MessageRole::Assistant) {
+                            if let Some(entry) = cm
+                                .tool_call_entries
+                                .iter_mut()
+                                .find(|e| e.tool_call_id == tool_call_id)
+                            {
+                                entry.result = Some(result_value);
+                                break;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        tracing::info!(
+            target: "persist",
+            plan_id = %plan_id,
+            total = rows.len(),
+            loaded = result.len(),
+            roles = ?result.iter().map(|m| format!("{:?}", m.message.role)).collect::<Vec<_>>(),
+            "load_messages"
+        );
 
         result
     }
@@ -104,6 +160,7 @@ fn determine_msg_type(cm: &ChatMessage) -> &'static str {
                 "text"
             }
         }
+        MessageRole::Tool => "tool_result",
         _ => "text",
     }
 }
@@ -119,9 +176,8 @@ fn build_tool_call_entries(message: &Message) -> Vec<ToolCallEntry> {
     tool_calls
         .iter()
         .map(|tc| ToolCallEntry {
-            name: tc.function.name.clone(),
+            tool_call_id: tc.id.clone(),
             phase: ToolCallPhase::Completed,
-            arguments: tc.function.arguments.clone(),
             result: None,
             is_error: false,
         })

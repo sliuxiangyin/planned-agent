@@ -9,8 +9,10 @@
 //!
 //! 业务逻辑（ChatFlow、ChatService 初始化）由调用方在页面层处理。
 
+use std::collections::HashMap;
+
 use dioxus::prelude::*;
-use planned_agent_core::ai::types::MessageRole;
+use planned_agent_core::ai::types::{MessageContent, MessageRole};
 
 use dioxus_icons::lucide::{ArrowUp, Brain, ChevronDown, FileText, Square, Thermometer};
 
@@ -19,7 +21,9 @@ use crate::components::alert_dialog::{
     AlertDialogTitle,
 };
 use crate::components::button::{Button, ButtonSize, ButtonVariant};
-use crate::components::chat::chat_flow::{ChatMessage, ChatSignals, PendingUI, ToolCallEntry};
+use crate::components::chat::chat_flow::{
+    send_message, ChatMessage, ChatSignals, PendingUI, ToolCallPhase, ToolViewData,
+};
 use crate::components::chat::chat_ui_actions_view::ChatUIActionsView;
 use crate::components::chat::reasoning_view::ReasoningView;
 use crate::components::chat::tool_view::ToolView;
@@ -45,7 +49,7 @@ struct RenderMessage {
     text: String,
     reasoning: String,
     is_streaming: bool,
-    tool_calls: Vec<ToolCallEntry>,
+    tool_calls: Vec<ToolViewData>,
 }
 
 /// 一组气泡的渲染数据（连续同角色消息合并为一个气泡）。
@@ -57,42 +61,98 @@ struct RenderBubble {
 }
 
 /// 从 `ChatMessage` 列表构建渲染气泡。
+///
+/// 严格按 OpenAI 消息序列渲染：`User → Assistant(tool_calls) → Tool → Assistant(text)`。
+/// - User → 独立 user 气泡
+/// - Assistant → 独立 assistant 气泡（reasoning + ToolView + text），
+///   无论是否携带 tool_calls，text 都保留渲染（assistant 可边说边调用工具）
+/// - Tool → 不产生气泡，按 `tool_call_id` 回填到对应 Assistant 的 ToolViewData.result
 fn build_bubbles(chat_msgs: &[ChatMessage]) -> Vec<RenderBubble> {
-    let mut bubbles = Vec::new();
-    let mut i = 0;
+    tracing::info!(target: "render", "build_bubbles: 输入 {} 条消息, roles={:?}", chat_msgs.len(),
+        chat_msgs.iter().map(|m| format!("{}:{:?}", m.sequence_order, m.message.role)).collect::<Vec<_>>()
+    );
+    let mut bubbles: Vec<RenderBubble> = Vec::new();
+    // tool_call_id → (bubble 索引, msg 索引, entry 索引)，供 Tool 消息精确回填 result
+    let mut tool_index: HashMap<String, (usize, usize, usize)> = HashMap::new();
 
-    while i < chat_msgs.len() {
-        match chat_msgs[i].message.role {
+    for cm in chat_msgs {
+        match cm.message.role {
             MessageRole::User => {
                 bubbles.push(RenderBubble {
                     is_assistant: false,
-                    messages: vec![to_render_message(&chat_msgs[i])],
+                    messages: vec![to_render_message(cm)],
                     is_streaming: false,
                 });
-                i += 1;
             }
+            // Assistant：独立气泡，同时渲染 reasoning / tool_calls / text
             MessageRole::Assistant => {
-                let start = i;
-                while i < chat_msgs.len()
-                    && matches!(chat_msgs[i].message.role, MessageRole::Assistant)
-                {
-                    i += 1;
+                let mut render_msg = to_render_message(cm);
+                render_msg.tool_calls = resolve_tool_entries(cm);
+                let bubble_idx = bubbles.len();
+                for (entry_idx, entry) in render_msg.tool_calls.iter().enumerate() {
+                    tool_index.insert(entry.tool_call_id.clone(), (bubble_idx, 0, entry_idx));
                 }
-                let msgs: Vec<RenderMessage> = (start..i)
-                    .map(|j| to_render_message(&chat_msgs[j]))
-                    .collect();
-                let is_streaming = msgs.iter().any(|m| m.is_streaming);
                 bubbles.push(RenderBubble {
                     is_assistant: true,
-                    messages: msgs,
-                    is_streaming,
+                    messages: vec![render_msg],
+                    is_streaming: cm.is_streaming,
                 });
             }
-            _ => i += 1,
+            // Tool：按 tool_call_id 回填 result，不产生独立气泡
+            MessageRole::Tool => {
+                if let Some(id) = cm.tool_call_id.as_deref() {
+                    if let Some(&(b, m, e)) = tool_index.get(id) {
+                        if let Some(result) = parse_tool_result(cm) {
+                            bubbles[b].messages[m].tool_calls[e].result = Some(result);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
     bubbles
+}
+
+/// 组合一条消息的 ToolView 渲染数据。
+///
+/// `name`/`arguments` 以 `Message.tool_calls` 为权威；
+/// `phase`/`result`/`is_error` 取自实时 `tool_call_entries`（按 tool_call_id 关联，
+/// 无则视为 Completed —— 历史加载后无实时状态）。
+fn resolve_tool_entries(cm: &ChatMessage) -> Vec<ToolViewData> {
+    let Some(tcs) = &cm.message.tool_calls else {
+        return Vec::new();
+    };
+    tcs.iter()
+        .map(|tc| {
+            let state = cm
+                .tool_call_entries
+                .iter()
+                .find(|e| e.tool_call_id == tc.id);
+            ToolViewData {
+                tool_call_id: tc.id.clone(),
+                name: tc.function.name.clone(),
+                arguments: tc.function.arguments.clone(),
+                phase: state
+                    .map(|s| s.phase.clone())
+                    .unwrap_or(ToolCallPhase::Completed),
+                result: state.and_then(|s| s.result.clone()),
+                is_error: state.map(|s| s.is_error).unwrap_or(false),
+            }
+        })
+        .collect()
+}
+
+/// 解析 Tool 消息的 content（JSON 字符串）为结果值。
+fn parse_tool_result(cm: &ChatMessage) -> Option<serde_json::Value> {
+    let content_text = cm.message.content.as_ref().and_then(|c| {
+        if let MessageContent::Text { text } = c { Some(text.as_str()) } else { None }
+    })?;
+    Some(
+        serde_json::from_str(content_text)
+            .unwrap_or_else(|_| serde_json::Value::String(content_text.to_string())),
+    )
 }
 
 /// 将 `ChatMessage` 转换为渲染数据。
@@ -101,7 +161,7 @@ fn to_render_message(cm: &ChatMessage) -> RenderMessage {
         text: display_text(&cm.message).to_string(),
         reasoning: cm.message.reasoning_content.clone().unwrap_or_default(),
         is_streaming: cm.is_streaming,
-        tool_calls: cm.tool_call_entries.clone(),
+        tool_calls: Vec::new(), // 由 build_bubbles 填充
     }
 }
 
@@ -137,7 +197,7 @@ pub struct ChatPanelProps {
 /// 完整聊天面板组件。
 #[component]
 pub fn ChatPanel(props: ChatPanelProps) -> Element {
-    let mut chat = props.chat;
+    let chat = props.chat;
     let chat_service_signal = props.chat_service_signal;
 
     let mut show_clear_dialog = use_signal_sync(|| false);
@@ -265,12 +325,15 @@ fn render_assistant_bubble(bubble: &RenderBubble) -> Element {
 
 fn render_assistant_message(msg: &RenderMessage) -> Element {
     let has_reasoning = !msg.reasoning.is_empty();
-    let show_cursor = msg.is_streaming && msg.text.is_empty() && !has_reasoning;
+    // 有工具调用进行中时用 ToolView 的 Pending/Running 动画代替光标
+    let show_cursor = msg.is_streaming && msg.text.is_empty() && !has_reasoning && msg.tool_calls.is_empty();
 
     rsx! {
         if has_reasoning {
             ReasoningView { text: msg.reasoning.clone(), is_streaming: msg.is_streaming }
         }
+        // 文本在 ToolView 之前显示（与 ChatGPT / Claude / Cursor 一致）：
+        // assistant 通常先说一段话，再发起工具调用；工具面板紧随其说明文本之后
         if show_cursor {
             "▍"
         } else if !msg.text.is_empty() {
@@ -326,7 +389,7 @@ fn render_composer(
                         if !busy {
                             let text = chat.input_text.read().trim().to_string();
                             if !text.is_empty() {
-                                chat.send_message(chat_service_signal, text);
+                                send_message(&mut chat, chat_service_signal, text);
                             }
                         }
                     }
@@ -430,7 +493,7 @@ fn render_composer(
                         onclick: move |_| {
                             let text = chat.input_text.read().trim().to_string();
                             if !text.is_empty() {
-                                chat.send_message(chat_service_signal, text);
+                                send_message(&mut chat, chat_service_signal, text);
                             }
                         },
                         ArrowUp { size: "18" }
