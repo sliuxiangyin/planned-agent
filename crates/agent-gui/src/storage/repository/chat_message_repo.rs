@@ -41,6 +41,20 @@ impl ChatMessageRepo {
         Ok(res)
     }
 
+    /// 按 plan_id + sequence_order 查找（用于持久化幂等去重）
+    pub async fn find_by_plan_and_seq(
+        &self,
+        plan_id: &str,
+        sequence_order: i32,
+    ) -> StorageResult<Option<chat_message::Model>> {
+        let model = chat_message::Entity::find()
+            .filter(chat_message::Column::PlanId.eq(plan_id))
+            .filter(chat_message::Column::SequenceOrder.eq(sequence_order))
+            .one(&self.db)
+            .await?;
+        Ok(model)
+    }
+
     /// 按 plan_id 查找全部消息（按 sequence_order 正序）
     pub async fn find_by_plan_id(
         &self,

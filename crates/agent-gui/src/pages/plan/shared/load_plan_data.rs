@@ -1,6 +1,4 @@
 //! 加载计划数据：元数据。
-//!
-//! 历史消息加载由 `load_chat_messages` 负责（灵活模式）。
 
 use std::sync::Arc;
 

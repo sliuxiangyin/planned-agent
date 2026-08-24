@@ -8,14 +8,14 @@
 use dioxus::prelude::*;
 use dioxus_icons::lucide::{CircleCheckBig, CircleDot, CircleX, LoaderCircle};
 
-use crate::components::chat::chat_flow::{ToolCallEntry, ToolCallPhase};
+use crate::components::chat::chat_flow::{ToolCallPhase, ToolViewData};
 
 #[css_module("/src/components/chat/tool_view/style.css")]
 struct Styles;
 
 /// 单个 Tool 调用的可折叠详情卡片。
 #[component]
-pub fn ToolView(entry: ToolCallEntry) -> Element {
+pub fn ToolView(entry: ToolViewData) -> Element {
     let mut open = use_signal(|| false);
     let is_open = *open.read();
 

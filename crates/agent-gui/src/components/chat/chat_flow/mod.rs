@@ -1,3 +1,7 @@
-pub mod flow;
+pub mod signals;
+pub mod storage;
+pub mod types;
 
-pub use flow::{send_message, ChatSignals, ChatMessage, ensure_subscription, handle_user_action, PendingUI, ToolCallEntry, ToolCallPhase};
+pub use signals::ChatSignals;
+pub use storage::{ChatStorage, DummyStorage};
+pub use types::{ChatContext, ChatMessage, PendingUI, ToolCallEntry, ToolCallPhase};

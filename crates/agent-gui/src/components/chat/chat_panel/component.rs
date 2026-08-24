@@ -34,8 +34,6 @@ use dioxus_primitives::tooltip::{
     TooltipTrigger as TooltipTriggerPrim,
 };
 
-use crate::components::chat::chat_flow::send_message;
-
 #[css_module("/src/components/chat/chat_panel/style.css")]
 struct Styles;
 
@@ -113,7 +111,7 @@ fn to_render_message(cm: &ChatMessage) -> RenderMessage {
 #[derive(Props, Clone, PartialEq)]
 pub struct ChatPanelProps {
     pub chat: ChatSignals,
-    pub chat_signal: ChatServiceSignal,
+    pub chat_service_signal: ChatServiceSignal,
     pub on_user_action: EventHandler<(planned_agent::UIAction, String, PendingUI)>,
     #[props(default = String::new())]
     pub template_label: String,
@@ -140,7 +138,7 @@ pub struct ChatPanelProps {
 #[component]
 pub fn ChatPanel(props: ChatPanelProps) -> Element {
     let mut chat = props.chat;
-    let chat_signal = props.chat_signal;
+    let chat_service_signal = props.chat_service_signal;
 
     let mut show_clear_dialog = use_signal_sync(|| false);
 
@@ -215,7 +213,7 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
             // 输入区
             // ═══════════════════════════════════════════════════════
             { render_composer(
-                busy, chat, chat_signal,
+                busy, chat, chat_service_signal,
                 &props.template_label, props.templates.clone(),
                 props.thinking, props.temperature.clone(), props.temperatures.clone(),
                 props.on_thinking_change.clone(), props.on_temperature_change.clone(),
@@ -302,7 +300,7 @@ fn render_user_bubble(bubble: &RenderBubble) -> Element {
 fn render_composer(
     busy: bool,
     mut chat: ChatSignals,
-    chat_signal: ChatServiceSignal,
+    chat_service_signal: ChatServiceSignal,
     template_label: &str,
     templates: Vec<String>,
     thinking: bool,
@@ -328,7 +326,7 @@ fn render_composer(
                         if !busy {
                             let text = chat.input_text.read().trim().to_string();
                             if !text.is_empty() {
-                                send_message(chat_signal, chat, text);
+                                chat.send_message(chat_service_signal, text);
                             }
                         }
                     }
@@ -432,7 +430,7 @@ fn render_composer(
                         onclick: move |_| {
                             let text = chat.input_text.read().trim().to_string();
                             if !text.is_empty() {
-                                send_message(chat_signal, chat, text);
+                                chat.send_message(chat_service_signal, text);
                             }
                         },
                         ArrowUp { size: "18" }
@@ -444,7 +442,7 @@ fn render_composer(
                         size: ButtonSize::Icon,
                         title: "停止",
                         onclick: move |_| {
-                            if let Some(ref svc) = *chat_signal.read() {
+                            if let Some(ref svc) = *chat_service_signal.read() {
                                 svc.stop();
                             }
                         },
