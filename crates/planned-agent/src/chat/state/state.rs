@@ -17,6 +17,9 @@ use std::sync::{Arc, Weak, Mutex};
 use anyhow::Result;
 use planned_agent_ai_manager::AiManager;
 use planned_agent_core::ai::types::Message;
+use planned_agent_core::ai::types::MessageContent;
+use planned_agent_core::ai::types::MessageRole;
+use planned_agent_core::ai::types::ToolCall;
 use planned_agent_core::prompt::PromptManager;
 use planned_agent_tool_manager::ToolRegistry;
 use serde_json::Value;
@@ -24,6 +27,7 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use super::command::RunState;
+use crate::chat::storage::ChatHistoryStore;
 use crate::chat::service::ChatConfig;
 use crate::chat::service::{SubscriptionId, ChatEvent};
 
@@ -65,15 +69,20 @@ pub(crate) fn resolve_ai_client(
 ///
 /// 内部用 `Mutex<Vec<Message>>` 同步互斥（service 的同步锁足够；不跨
 /// `.await` 持锁是 `History` 的不变式）。
+///
+/// `store` 在每次写入/清理操作时同步持久化，保证崩溃后可从 DB 恢复。
 pub struct History {
     inner: Mutex<Vec<Message>>,
+    store: Arc<dyn ChatHistoryStore>,
 }
 
 impl History {
-    /// 创建空历史。
-    pub fn new() -> Self {
+    /// 创建历史，从 store 恢复已有消息填入内存。
+    pub fn new(store: Arc<dyn ChatHistoryStore>) -> Self {
+        let loaded = store.load();
         Self {
-            inner: Mutex::new(Vec::new()),
+            inner: Mutex::new(loaded),
+            store,
         }
     }
 
@@ -93,12 +102,15 @@ impl History {
     }
 
     /// 在首部插入一条 system 消息（幂等由调用方保证）。
+    ///
+    /// 不持久化：system prompt 是配置产物，下次 send 时 `inject_system_prompt`
+    /// 会从模板重新注入，不需要存入 store。
     pub fn push_front_system(&self, text: String) {
         self.inner.lock().unwrap().insert(
             0,
             Message {
-                role: planned_agent_core::ai::types::MessageRole::System,
-                content: Some(planned_agent_core::ai::types::MessageContent::Text { text }),
+                role: MessageRole::System,
+                content: Some(MessageContent::Text { text }),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -109,24 +121,26 @@ impl History {
     }
 
     /// 写入一条 user 消息，返回写入前的长度作为回滚点。
-    pub fn push_user(&self, msg: planned_agent_core::ai::types::Message) -> usize {
+    pub fn push_user(&self, msg: Message) -> usize {
         let mut guard = self.inner.lock().unwrap();
         let mark = guard.len();
+        self.store.append(&msg);
         guard.push(msg);
         mark
     }
 
     /// 写入一条 assistant 消息。
-    pub fn push_assistant(&self, msg: planned_agent_core::ai::types::Message) {
+    pub fn push_assistant(&self, msg: Message) {
+        self.store.append(&msg);
         self.inner.lock().unwrap().push(msg);
     }
 
     /// 写入一条 tool 消息（`tool_call_id` 对应、content 序列化为 JSON 文本）。
     pub fn push_tool(&self, tool_call_id: &str, content: &Value) {
         let json = serde_json::to_string(content).unwrap_or_else(|_| content.to_string());
-        self.inner.lock().unwrap().push(Message {
-            role: planned_agent_core::ai::types::MessageRole::Tool,
-            content: Some(planned_agent_core::ai::types::MessageContent::ToolResult {
+        let msg = Message {
+            role: MessageRole::Tool,
+            content: Some(MessageContent::ToolResult {
                 tool_call_id: tool_call_id.to_string(),
                 content: json,
             }),
@@ -135,28 +149,42 @@ impl History {
             name: None,
             reasoning_content: None,
             ..Default::default()
-        });
+        };
+        self.store.append(&msg);
+        self.inner.lock().unwrap().push(msg);
     }
 
     /// 回滚历史到指定长度（用于对话失败时丢弃脏上下文）。
     pub fn rollback_to(&self, mark: usize) {
+        // store 不持久化 system（每次重注入），因此按非 system 条数截断
+        let system_count = self.leading_system_count();
         self.inner.lock().unwrap().truncate(mark);
+        self.store.rollback_to(mark.saturating_sub(system_count));
+    }
+
+    /// 前导 system 消息数量（store 中不存在 system，用于索引偏移换算）。
+    fn leading_system_count(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap()
+            .iter()
+            .take_while(|m| matches!(m.role, MessageRole::System))
+            .count()
     }
 
     /// 清空历史（会话重置）。
     pub fn clear(&self) {
         self.inner.lock().unwrap().clear();
+        self.store.clear();
     }
 
     /// 找到最后一条 assistant 消息里 `request_user_action` 的 tool_call_id。
     ///
     /// 用于子 agent resume：挂起时 `assistant(tool_calls=[request_user_action])`
-    /// 保留在历史尾部，resume 时据此 tool_call_id 压入 tool 消息闭合协议。
+    /// 保留在历史尾部，resume 时据此确认挂起调用存在，将选择结果闭合为 text。
     pub fn find_pending_ui_tool_call_id(&self) -> Option<String> {
-        use planned_agent_core::ai::types::MessageRole;
         let history = self.inner.lock().unwrap();
-        for msg in history.iter().rev() {
-            if matches!(msg.role, MessageRole::Assistant) {
+        for msg in history.iter().rev() {            if matches!(msg.role, MessageRole::Assistant) {
                 if let Some(tcs) = &msg.tool_calls {
                     for tc in tcs {
                         if tc.function.name == "request_user_action" {
@@ -169,62 +197,120 @@ impl History {
         None
     }
 
+    /// 闭合挂起的 `request_user_action`：把用户选择文本追加到 assistant 的
+    /// content，并**摘除**其 tool_calls 中的 `request_user_action` 调用。
+    ///
+    /// - 不删除 assistant 消息本身（content 保留，追加选择文本）；
+    /// - 已闭合的后端工具调用**保留**（它们有对应 tool 消息）；
+    /// - store 同步：删除该 assistant 行（及之后），重写修改后的消息及后续全部。
+    ///
+    /// 返回是否找到并修改了挂起的调用。
+    pub fn close_pending_ui_tool_call(&self, text: &str) -> bool {
+        let system_count = self.leading_system_count();
+        let (store_rollback, tail);
+        {
+            let mut history = self.inner.lock().unwrap();
+            let Some(idx) = history.iter().rposition(|m| {
+                matches!(m.role, MessageRole::Assistant)
+                    && m.tool_calls.as_ref().is_some_and(|tcs| {
+                        tcs.iter().any(|tc| tc.function.name == "request_user_action")
+                    })
+            }) else {
+                return false;
+            };
+            let msg = &mut history[idx];
+            // ① content 保留 + 追加选择文本
+            match &mut msg.content {
+                Some(MessageContent::Text { text: t }) => t.push_str(text),
+                None => msg.content = Some(MessageContent::Text { text: text.to_string() }),
+                Some(_) => {}
+            }
+            // ② 只摘除 request_user_action，保留其他（已闭合的）工具调用
+            if let Some(tcs) = &mut msg.tool_calls {
+                tcs.retain(|tc| tc.function.name != "request_user_action");
+                if tcs.is_empty() {
+                    msg.tool_calls = None;
+                }
+            }
+            // ③ store 重放材料：该 assistant 及其后全部消息（含已闭合的 tool 结果）
+            store_rollback = idx - system_count; // store.rollback_to(len) 删 seq > len
+            tail = history[idx..].to_vec();
+        } // guard drop
+        self.store.rollback_to(store_rollback);
+        for m in &tail {
+            self.store.append(m);
+        }
+        true
+    }
+
     /// 移除最后一条 assistant(tool_calls) 中没有对应 tool 消息跟随的调用；
     /// 若整条 assistant 一个都没闭合则整条移除。
     ///
     /// 用于「等待 UI 确认期间用户取消」的场景。
+    /// 移除消息时同步 store。
     pub fn clean_unclosed_assistant_tool_calls(&self) {
-        use planned_agent_core::ai::types::{MessageRole, ToolCall};
-        let mut history = self.inner.lock().unwrap();
-        let Some(idx) = history.iter().rposition(|m| {
-            matches!(m.role, MessageRole::Assistant)
-                && m.tool_calls.as_ref().is_some_and(|tcs| !tcs.is_empty())
-        }) else {
-            return;
-        };
-        // 该 assistant 之后已闭合（有 tool 消息跟随）的调用 id
-        let closed: HashSet<String> = history
-            .iter()
-            .skip(idx + 1)
-            .filter_map(|m| m.tool_call_id.clone())
-            .collect();
-        let tcs = history[idx].tool_calls.take().unwrap_or_default();
-        let closed_calls: Vec<ToolCall> = tcs
-            .into_iter()
-            .filter(|tc| closed.contains(&tc.id))
-            .collect();
-        if closed_calls.is_empty() {
-            // 一个都没闭合：整条 assistant 移除
-            history.remove(idx);
-        } else {
-            // 部分闭合：只保留已闭合的调用
-            history[idx].tool_calls = Some(closed_calls);
+        let len_before;
+        {
+            let mut history = self.inner.lock().unwrap();
+            len_before = history.len();
+            let Some(idx) = history.iter().rposition(|m| {
+                matches!(m.role, MessageRole::Assistant)
+                    && m.tool_calls.as_ref().is_some_and(|tcs| !tcs.is_empty())
+            }) else {
+                return;
+            };
+            // 该 assistant 之后已闭合（有 tool 消息跟随）的调用 id
+            let closed: HashSet<String> = history
+                .iter()
+                .skip(idx + 1)
+                .filter_map(|m| m.tool_call_id.clone())
+                .collect();
+            let tcs = history[idx].tool_calls.take().unwrap_or_default();
+            let closed_calls: Vec<ToolCall> = tcs
+                .into_iter()
+                .filter(|tc| closed.contains(&tc.id))
+                .collect();
+            if closed_calls.is_empty() {
+                // 一个都没闭合：整条 assistant 移除
+                history.remove(idx);
+            } else {
+                // 部分闭合：只保留已闭合的调用（in-place 修改，不影响 store）
+                history[idx].tool_calls = Some(closed_calls);
+            }
+        } // guard drop，release lock
+        // 若移除了消息，同步 store（扣除前导 system 偏移）
+        let len_after = self.inner.lock().unwrap().len();
+        if len_after < len_before {
+            let system_count = self.leading_system_count();
+            self.store.rollback_to(len_after.saturating_sub(system_count));
         }
     }
 
     /// 若最后一条是带 tool_calls 的 assistant，且并非第一条 assistant，
-    /// 移除它（用于达到 `max_tool_rounds` 时的清理）。
+    /// 移除它（用于达到 `max_tool_rounds` 时的清理）。移除时同步 store。
     pub fn pop_last_assistant_tool_calls_if_not_first(&self) {
-        use planned_agent_core::ai::types::MessageRole;
-        let mut history = self.inner.lock().unwrap();
-        if let Some(last) = history.last() {
-            if matches!(last.role, MessageRole::Assistant)
-                && last.tool_calls.is_some()
-                && history
-                    .iter()
-                    .filter(|m| matches!(m.role, MessageRole::Assistant))
-                    .count()
-                    > 1
-            {
-                history.pop();
+        let len_before;
+        {
+            let mut history = self.inner.lock().unwrap();
+            len_before = history.len();
+            if let Some(last) = history.last() {
+                if matches!(last.role, MessageRole::Assistant)
+                    && last.tool_calls.is_some()
+                    && history
+                        .iter()
+                        .filter(|m| matches!(m.role, MessageRole::Assistant))
+                        .count()
+                        > 1
+                {
+                    history.pop();
+                }
             }
+        } // guard drop
+        let len_after = self.inner.lock().unwrap().len();
+        if len_after < len_before {
+            let system_count = self.leading_system_count();
+            self.store.rollback_to(len_after.saturating_sub(system_count));
         }
-    }
-}
-
-impl Default for History {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

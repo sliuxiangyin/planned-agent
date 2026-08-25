@@ -3,12 +3,8 @@
 //! `PendingUI`、`ToolCallPhase`、`ToolCallEntry`、`ChatMessage` ——
 //! 纯数据类型，不含业务逻辑。
 
-use std::sync::Arc;
-
 use planned_agent_core::ai::types::Message;
 use planned_agent_core::events::UIAction;
-
-use super::storage::ChatStorage;
 
 // ── UI 交互 ──────────────────────────────────────────────────────────────
 
@@ -114,24 +110,3 @@ pub struct ChatMessage {
     pub tool_call_entries: Vec<ToolCallEntry>,
 }
 
-// ── 会话上下文 ────────────────────────────────────────────────────────────
-
-/// 不可变的会话上下文 —— 持久化存储 + plan_id。
-///
-/// 初始化时构造一次，之后只读，不参与响应式更新。
-/// 与 `ChatSignals` 分离，避免用 `Signal` 包裹非响应式数据。
-#[derive(Clone)]
-pub struct ChatContext {
-    /// 持久化存储后端
-    pub storage: Arc<dyn ChatStorage>,
-    /// 当前会话的 plan_id
-    pub plan_id: String,
-}
-
-/// 手动实现 PartialEq：`Arc<dyn ChatStorage>` 不实现 PartialEq，
-/// 比较 plan_id + Arc 指针相等性（同一实例即相等）。
-impl PartialEq for ChatContext {
-    fn eq(&self, other: &Self) -> bool {
-        self.plan_id == other.plan_id && Arc::ptr_eq(&self.storage, &other.storage)
-    }
-}

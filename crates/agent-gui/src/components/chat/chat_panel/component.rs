@@ -32,11 +32,13 @@ use crate::components::dropdown_menu::{
 };
 use crate::components::scroll_area::ScrollArea;
 use crate::components::textarea::Textarea;
-use crate::services::chat_service::ChatServiceSignal;
 use dioxus_primitives::tooltip::{
     Tooltip as TooltipPrim, TooltipContent as TooltipContentPrim,
     TooltipTrigger as TooltipTriggerPrim,
 };
+use planned_agent::ChatService;
+use planned_agent_prompt_manager::FilePromptManager;
+use std::sync::Arc;
 
 #[css_module("/src/components/chat/chat_panel/style.css")]
 struct Styles;
@@ -145,9 +147,15 @@ fn resolve_tool_entries(cm: &ChatMessage) -> Vec<ToolViewData> {
 }
 
 /// 解析 Tool 消息的 content（JSON 字符串）为结果值。
+///
+/// 同时处理两种 content 变体：
+/// - `MessageContent::Text`：实时 streaming 路径创建（`tool_call_executed`）
+/// - `MessageContent::ToolResult`：服务端持久化后加载（`push_tool` / `reconcile_with_snapshot`）
 fn parse_tool_result(cm: &ChatMessage) -> Option<serde_json::Value> {
-    let content_text = cm.message.content.as_ref().and_then(|c| {
-        if let MessageContent::Text { text } = c { Some(text.as_str()) } else { None }
+    let content_text = cm.message.content.as_ref().and_then(|c| match c {
+        MessageContent::Text { text } => Some(text.as_str()),
+        MessageContent::ToolResult { content, .. } => Some(content.as_str()),
+        _ => None,
     })?;
     Some(
         serde_json::from_str(content_text)
@@ -168,10 +176,11 @@ fn to_render_message(cm: &ChatMessage) -> RenderMessage {
 // ── Props ──────────────────────────────────────────────────────────────────
 
 /// 完整聊天面板 Props。
-#[derive(Props, Clone, PartialEq)]
+/// 完整聊天面板 Props。
+#[derive(Props, Clone)]
 pub struct ChatPanelProps {
     pub chat: ChatSignals,
-    pub chat_service_signal: ChatServiceSignal,
+    pub chat_service: Arc<ChatService<FilePromptManager>>,
     pub on_user_action: EventHandler<(planned_agent::UIAction, String, PendingUI)>,
     #[props(default = String::new())]
     pub template_label: String,
@@ -192,13 +201,27 @@ pub struct ChatPanelProps {
     pub on_clear: EventHandler<()>,
 }
 
+/// 手动实现 PartialEq：`Arc<ChatService>` 不实现 PartialEq，
+/// 用指针相等性判断（同一实例即相等）。
+impl PartialEq for ChatPanelProps {
+    fn eq(&self, other: &Self) -> bool {
+        self.chat == other.chat
+            && Arc::ptr_eq(&self.chat_service, &other.chat_service)
+            && self.template_label == other.template_label
+            && self.templates == other.templates
+            && self.thinking == other.thinking
+            && self.temperature == other.temperature
+            && self.temperatures == other.temperatures
+    }
+}
+
 // ── 组件 ──────────────────────────────────────────────────────────────────
 
 /// 完整聊天面板组件。
 #[component]
 pub fn ChatPanel(props: ChatPanelProps) -> Element {
     let chat = props.chat;
-    let chat_service_signal = props.chat_service_signal;
+    let svc = props.chat_service.clone();
 
     let mut show_clear_dialog = use_signal_sync(|| false);
 
@@ -273,7 +296,7 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
             // 输入区
             // ═══════════════════════════════════════════════════════
             { render_composer(
-                busy, chat, chat_service_signal,
+                busy, chat, svc.clone(),
                 &props.template_label, props.templates.clone(),
                 props.thinking, props.temperature.clone(), props.temperatures.clone(),
                 props.on_thinking_change.clone(), props.on_temperature_change.clone(),
@@ -309,9 +332,18 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
 
 fn render_assistant_bubble(bubble: &RenderBubble) -> Element {
     let bubble_class = if bubble.is_streaming {
-        format!("{} {} {}", Styles::chat_message, Styles::chat_message__assistant, Styles::chat_message__streaming)
+        format!(
+            "{} {} {}",
+            Styles::chat_message,
+            Styles::chat_message__assistant,
+            Styles::chat_message__streaming
+        )
     } else {
-        format!("{} {}", Styles::chat_message, Styles::chat_message__assistant)
+        format!(
+            "{} {}",
+            Styles::chat_message,
+            Styles::chat_message__assistant
+        )
     };
 
     rsx! {
@@ -326,7 +358,8 @@ fn render_assistant_bubble(bubble: &RenderBubble) -> Element {
 fn render_assistant_message(msg: &RenderMessage) -> Element {
     let has_reasoning = !msg.reasoning.is_empty();
     // 有工具调用进行中时用 ToolView 的 Pending/Running 动画代替光标
-    let show_cursor = msg.is_streaming && msg.text.is_empty() && !has_reasoning && msg.tool_calls.is_empty();
+    let show_cursor =
+        msg.is_streaming && msg.text.is_empty() && !has_reasoning && msg.tool_calls.is_empty();
 
     rsx! {
         if has_reasoning {
@@ -363,7 +396,7 @@ fn render_user_bubble(bubble: &RenderBubble) -> Element {
 fn render_composer(
     busy: bool,
     mut chat: ChatSignals,
-    chat_service_signal: ChatServiceSignal,
+    svc: Arc<ChatService<FilePromptManager>>,
     template_label: &str,
     templates: Vec<String>,
     thinking: bool,
@@ -373,6 +406,9 @@ fn render_composer(
     on_temperature_change: Option<EventHandler<String>>,
     apply_template: impl Fn(String) + Clone + 'static,
 ) -> Element {
+    let svc_send = svc.clone();
+    let svc_stop = svc.clone();
+    let svc_key = svc.clone();
     rsx! {
         div { class: Styles::chat_composer,
             Textarea {
@@ -389,7 +425,7 @@ fn render_composer(
                         if !busy {
                             let text = chat.input_text.read().trim().to_string();
                             if !text.is_empty() {
-                                send_message(&mut chat, chat_service_signal, text);
+                                send_message(&mut chat, &svc_key, text);
                             }
                         }
                     }
@@ -493,7 +529,7 @@ fn render_composer(
                         onclick: move |_| {
                             let text = chat.input_text.read().trim().to_string();
                             if !text.is_empty() {
-                                send_message(&mut chat, chat_service_signal, text);
+                                send_message(&mut chat, &svc_send, text);
                             }
                         },
                         ArrowUp { size: "18" }
@@ -505,9 +541,7 @@ fn render_composer(
                         size: ButtonSize::Icon,
                         title: "停止",
                         onclick: move |_| {
-                            if let Some(ref svc) = *chat_service_signal.read() {
-                                svc.stop();
-                            }
+                            svc_stop.stop();
                         },
                         Square { size: "16" }
                     }

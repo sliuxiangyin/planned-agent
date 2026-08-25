@@ -11,7 +11,7 @@ pub mod error;
 
 // 公共 re-export —— 阶段 2 业务接入时会被使用
 #[allow(unused_imports)]
-pub use chat_message_storage::ChatMessageStorage;
+pub use chat_message_storage::ChatMessageStore;
 #[allow(unused_imports)]
 pub use error::{StorageError, StorageResult};
 #[allow(unused_imports)]

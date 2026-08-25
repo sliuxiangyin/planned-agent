@@ -7,7 +7,7 @@ use dioxus::prelude::*;
 use planned_agent::chat::SubscriptionGuard;
 use planned_agent_core::ai::types::{Message, MessageContent, MessageRole};
 
-use super::types::{ChatContext, ChatMessage, PendingUI, ToolCallEntry, ToolCallPhase};
+use super::types::{ChatMessage, PendingUI, ToolCallEntry, ToolCallPhase};
 
 /// 消息状态（纯内存，Signal 均为 `Copy` 可直接进闭包/异步块）。
 #[derive(Clone, Copy, PartialEq)]
@@ -17,11 +17,6 @@ pub struct ChatSignals {
     pub input_text: Signal<String, SyncStorage>,
     pub pending_tool_call_id: Signal<Option<String>, SyncStorage>,
     pub subscription: Signal<Option<SubscriptionGuard>, SyncStorage>,
-    /// 已持久化的最大 sequence_order（增量持久化游标）。
-    /// `RoundEnd` 只持久化 `seq > 该值` 的消息，避免全量重放与并发重复写。
-    pub last_persisted_seq: Signal<u64, SyncStorage>,
-    /// 会话上下文（storage + plan_id），初始化后只读。
-    pub ctx: Signal<ChatContext, SyncStorage>,
 }
 
 // ── 状态查询 ──────────────────────────────────────────────────────────────
@@ -138,8 +133,85 @@ impl ChatSignals {
         self.messages.set(vec![]);
         self.pending_ui.set(None);
         self.pending_tool_call_id.set(None);
-        // 清空会话时 DB 同步删除，游标一并重置
-        self.last_persisted_seq.set(0);
+    }
+
+    /// 从服务端 `ChatService::history()` 恢复展示态。
+    ///
+    /// 将 `Vec<Message>` 转为 `Vec<ChatMessage>`（UI 层包装），
+    /// 用于页面初始化时从服务端 store 加载的历史重建。
+    pub fn load_from_history(&mut self, history: &[planned_agent_core::ai::types::Message]) {
+        let msgs: Vec<ChatMessage> = history
+            .iter()
+            .enumerate()
+            .map(|(i, msg)| ChatMessage {
+                message: msg.clone(),
+                sequence_order: (i + 1) as u64,
+                is_streaming: false,
+                tool_call_id: msg.tool_call_id.clone(),
+                tool_call_entries: Vec::new(), // 展示态重建由 build_bubbles 处理
+            })
+            .collect();
+        self.messages.set(msgs);
+    }
+
+    /// 用服务端快照校准 GUI messages（`HistoryUpdated` 事件处理）。
+    ///
+    /// 策略：按 `sequence_order` 做差集——
+    /// - 快照中不存在的消息 → 删除（服务端已回滚/清理）
+    /// - 快照中有但 GUI 没有的 → 重建为非 streaming 的 ChatMessage
+    /// - 正在 streaming 的消息 → 保留 GUI 侧（比快照更新；快照是回滚前截取的）
+    pub fn reconcile_with_snapshot(&mut self, snapshot: &[planned_agent_core::ai::types::Message]) {
+        // 收集当前 GUI 中正在 streaming 的消息
+        let streaming_indices: Vec<usize> = self
+            .messages
+            .read()
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.is_streaming)
+            .map(|(i, _)| i)
+            .collect();
+        let streaming_msgs: Vec<(usize, ChatMessage)> = {
+            let msgs = self.messages.read();
+            streaming_indices
+                .iter()
+                .map(|&i| (i, msgs[i].clone()))
+                .collect()
+        };
+
+        // 快照中已有消息的 sequence_order 集合
+        let snapshot_seqs: std::collections::HashSet<u64> = snapshot
+            .iter()
+            .enumerate()
+            .map(|(i, _)| (i + 1) as u64)
+            .collect();
+
+        // 保留：快照中存在的 + 正在 streaming 的
+        let mut new_msgs: Vec<ChatMessage> = Vec::with_capacity(snapshot.len());
+        let mut seq = 0u64;
+        for msg in snapshot {
+            seq += 1;
+            new_msgs.push(ChatMessage {
+                message: msg.clone(),
+                sequence_order: seq,
+                is_streaming: false,
+                tool_call_id: msg.tool_call_id.clone(),
+                tool_call_entries: Vec::new(), // 历史消息无实时状态
+            });
+        }
+
+        // 把正在 streaming 的消息插回（它们比快照更新，服务端不会在 streaming 时回滚）
+        for (_orig_idx, sm) in &streaming_msgs {
+            // 若该 streaming 消息的 sequence_order 不在快照中（被回滚了），则丢弃
+            if !snapshot_seqs.contains(&sm.sequence_order) {
+                continue;
+            }
+            // 在 new_msgs 中找到同 sequence_order 的位置，替换为 streaming 版本
+            if let Some(pos) = new_msgs.iter().position(|m| m.sequence_order == sm.sequence_order) {
+                new_msgs[pos] = sm.clone();
+            }
+        }
+
+        self.messages.set(new_msgs);
     }
 }
 

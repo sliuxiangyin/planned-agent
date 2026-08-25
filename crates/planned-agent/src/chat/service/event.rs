@@ -9,6 +9,7 @@
 
 use std::sync::Weak;
 
+use planned_agent_core::ai::types::Message;
 use planned_agent_core::events::ChatEvent as CoreChatEvent;
 
 use crate::chat::state::SubscribersInner;
@@ -40,6 +41,18 @@ pub enum ChatEvent {
     /// 且 `is_error=true` 的 tool 消息继续对话）；UI 确认等待期间的
     /// 非法调用（如 tool_call_id 不匹配）也走此通道提示。
     Error(String),
+    /// 历史被破坏性操作修改（删除/回滚/清理）后的完整快照。
+    ///
+    /// 仅在服务端执行 `pop_last` / `clean_unclosed` / `rollback_to` / `clear`
+    /// 后触发——这些操作不产生其他事件，GUI 无法感知。收到后应用快照
+    /// 校准自己的 messages（保护正在 streaming 的消息）。
+    ///
+    /// `append` 类操作（push_user/assistant/tool）**不**触发此事件——
+    /// GUI 已通过 TextDelta / ToolCallStart 等已有事件实时更新。
+    HistoryUpdated {
+        /// 修改后的完整消息快照。
+        messages: Vec<Message>,
+    },
 }
 
 /// 事件订阅 ID，由 [`crate::chat::ChatService::on_chat`] 返回，

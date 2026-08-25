@@ -23,7 +23,7 @@ pub(crate) enum Command {
     /// 通过命令队列串行执行，避免与正在运行的对话竞争 history：
     /// 当前对话（含 UI 确认等待）结束后才真正清空。
     Reset,
-    /// 子 agent resume：压入 tool 消息闭合挂起的 `request_user_action`，
+    /// 子 agent resume：把选择结果作为 text 闭合挂起的 `request_user_action`，
     /// 然后从 history 继续 `run_conversation`（**不是**新 `send`）。
     Resume {
         choice: String,

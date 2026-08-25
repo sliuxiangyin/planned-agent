@@ -11,10 +11,9 @@
 chat/
 ├── mod.rs                    # 模块入口，pub use ChatPanel
 ├── chat_flow/                # 消息流转（数据层 + 业务编排）
-│   ├── types.rs              #   纯数据类型：ChatMessage / ToolCallEntry / ToolViewData / PendingUI / ChatContext
+│   ├── types.rs              #   纯数据类型：ChatMessage / ToolCallEntry / ToolViewData / PendingUI
 │   ├── signals.rs            #   ChatSignals 信号容器（全部状态变更方法）
-│   ├── controller.rs         #   事件消费 / 发送消息 / 用户操作回调 / 持久化
-│   └── storage.rs            #   ChatStorage trait（SQLite 实现见 src/storage/）
+│   └── controller.rs         #   事件消费 / 发送消息 / 用户操作回调
 ├── chat_panel/               # 完整聊天面板（消息列表 + 输入区 + composer 工具栏）
 │   ├── component.rs          #   ChatPanel 组件 + build_bubbles 渲染预计算
 │   └── style.css
@@ -25,13 +24,15 @@ chat/
 
 | 模块 | 职责 | 关键导出 |
 |---|---|---|
-| `chat_flow` | 消息状态、事件消费、持久化 | `ChatSignals`、`send_message`、`ensure_subscription`、`handle_user_action` |
+| `chat_flow` | 消息状态、事件消费 | `ChatSignals`、`send_message`、`ensure_subscription`、`handle_user_action` |
 | `chat_panel` | 纯 UI 布局，不持有业务逻辑 | `ChatPanel`、`template_label` |
 | `chat_ui_actions_view` | `request_user_action` 交互卡片 | `ChatUIActionsView` |
 | `reasoning_view` | 推理内容折叠面板 | `ReasoningView` |
 | `tool_view` | 工具调用折叠卡片 | `ToolView` |
 
-**分层原则**：`chat_flow` 只操作 `Signal` 状态、不渲染；`chat_panel` 只渲染、不碰服务；页面层（如 `pages/plan/flexible/page.rs`）负责初始化 `ChatService`、构造 `ChatSignals`、把 `on_user_action` 接到 `handle_user_action`。
+**分层原则**：`chat_flow` 只操作 `Signal` 状态、不渲染；`chat_panel` 只渲染、不碰服务；页面层（如 `pages/plan/flexible/page.rs`）负责构造 `ChatService`（注入 `ChatMessageStore`）、从 `service.history()` 加载历史、把事件处理函数传入 `ChatPanel`。
+
+**ChatService 直接传递**：不使用 Signal 包装——`Arc<ChatService>` 在组件体中构造，各事件闭包独立 clone。`require_resource::<T>()` 辅助函数（`context/mod.rs`）简化 Resource 读取。
 
 ---
 
@@ -48,10 +49,10 @@ pub struct ChatSignals {
     pub input_text: Signal<String, SyncStorage>,            // composer 输入框
     pub pending_tool_call_id: Signal<Option<String>, SyncStorage>, // request_user_action 的 tool_call_id
     pub subscription: Signal<Option<SubscriptionGuard>, SyncStorage>, // 事件订阅 guard
-    pub last_persisted_seq: Signal<u64, SyncStorage>,       // 增量持久化游标
-    pub ctx: Signal<ChatContext, SyncStorage>,              // storage + plan_id（只读）
 }
 ```
+
+**持久化由服务端 `History` + `ChatHistoryStore` 处理**——GUI 不再持有 `last_persisted_seq`、`ctx` 等存储字段，`ChatSignals` 是纯展示缓冲。
 
 ### 2.2 `ChatMessage`（types.rs）
 
@@ -71,7 +72,7 @@ pub struct ChatMessage {
 
 **设计要点：单一数据源。** `name`/`arguments` 的权威在 `Message.tool_calls`
 （持久化也依赖它），`tool_call_entries` 只存 UI 独有状态，二者通过 `tool_call_id`
-一一关联，**不再双写**（避免多副本同步错位——历史 bug 温床）：
+一一关联，**不再双写**：
 
 ```rust
 /// 存于 ChatMessage.tool_call_entries：纯 UI 状态
@@ -84,7 +85,7 @@ pub struct ToolCallEntry {
 
 /// 渲染时组合生成，ToolView 的输入
 pub struct ToolViewData {
-    pub tool_call_id: String,   // 供 Tool 消息回填 result 的关联键
+    pub tool_call_id: String,
     pub name: String,           // ← Message.tool_calls[].function.name
     pub arguments: String,      // ← Message.tool_calls[].function.arguments
     pub phase: ToolCallPhase,   // ← ToolCallEntry
@@ -120,10 +121,7 @@ User → Assistant(tool_calls) → Tool → Assistant(text) → …
 - **Tool**：工具执行结果，由 `tool_call_executed` 追加到列表**末尾**
 - **Assistant(text)**：下一轮 RoundStart 时 push 的占位消息，流式累积最终文本
 
-> 顺序一致性保证：Tool 消息 `sequence_order = max+1` 且追加末尾；即使 `ToolExecuted`
-> 乱序/迟到（下一轮已开始），也追加末尾而非插中，保证 `sequence_order` 与列表顺序
-> 一致（load 后按 seq 排序不错位）。渲染层按 `tool_call_id` 回填结果，**不依赖**
-> Tool 消息在列表中的位置。
+> 顺序一致性保证：Tool 消息追加末尾，sequence_order 单调递增；渲染层按 `tool_call_id` 回填结果，**不依赖** Tool 消息位置。
 
 ---
 
@@ -140,16 +138,13 @@ User → Assistant(tool_calls) → Tool → Assistant(text) → …
 | `Chat(ToolCallArgsDelta)` | `tool_call_append_args` | 只更新 `message.tool_calls[].arguments` |
 | `Chat(ToolCallComplete)` | `tool_call_complete` | entry → Running；arguments 覆写完整 JSON |
 | `Chat(ToolExecuted)` | `tool_call_executed` | entry → Completed/Error + result；追加 Tool 消息 |
-| `Chat(RoundEnd)` | `persist_incremental` + `stop_streaming` | 增量持久化 |
+| `Chat(RoundEnd)` | `stop_streaming` | 轮次结束（持久化已由服务端自动处理） |
 | `Chat(UIActionRequest)` | `set_pending` | 弹出交互卡片 |
-| `Done` | `stop_streaming` + `clear_pending` + `persist_incremental` | 收尾（含用户停止） |
-| `Error(e)` | `stop_streaming` + 追加错误文本 + `persist_incremental` | 收尾（无 RoundEnd） |
+| `Done` | `stop_streaming` + `clear_pending` | 收尾 |
+| `Error(e)` | `stop_streaming` + 追加错误文本 | 收尾 |
+| **`HistoryUpdated`** | `reconcile_with_snapshot` | 用快照校准 messages（保护 streaming 状态） |
 
-**发送链路**（`send_message`）：`clear_pending` → 快照并 fire-and-forget 持久化 user 消息 →
-`push_user_turn`（push User + 预建 streaming Assistant 占位）→ `chat_svc.send_text(text)`。
-
-> 注意：user 消息持久化后**不**推进游标，游标统一由 `persist_incremental`
-> （RoundEnd/Error/Done）推进，写失败会被增量重写兜底（存储层幂等）。
+**发送链路**（`send_message`）：`clear_pending` → `push_user_turn`（push User + 预建 streaming Assistant 占位）→ `chat_svc.send_text(text)`。持久化由服务端 `History.push_user` 在内部自动完成。
 
 ---
 
@@ -185,8 +180,7 @@ ReasoningView + Markdown(text) + ToolView × N + 光标
 | `Tool` | 不产生气泡；按 `tool_call_id` 找到对应 `ToolViewData` 回填 `result` |
 | 其他（System 等） | 忽略 |
 
-维护 `tool_index: HashMap<tool_call_id, (bubble_idx, msg_idx, entry_idx)>`，
-Tool 消息精确回填（不按顺序猜测）。
+维护 `tool_index: HashMap<tool_call_id, (bubble_idx, msg_idx, entry_idx)>`，Tool 消息精确回填。
 
 ### 5.3 `resolve_tool_entries`（组合 ToolViewData）
 
@@ -203,13 +197,12 @@ Tool 消息精确回填（不按顺序猜测）。
 4. 光标 "▍"（仅当 streaming 且 text/reasoning/tool_calls 全空）
 ```
 
-> 关键：**文本在工具面板之前**。assistant 通常先说一段话再发起工具调用，
-> 工具面板应紧跟其说明文本（历史实现反序，已修正）。
+> 关键：**文本在工具面板之前**。assistant 通常先说一段话再发起工具调用。
 
 ### 5.5 输入区 + Composer 工具栏
 
-- `Textarea`：Enter 发送（Shift+Enter 换行），busy（streaming 或有 pending）时禁用
-- 工具栏：模板选择（DropdownMenu）、思考模式（Brain 按钮）、温度选择（DropdownMenu）
+- `Textarea`：Enter 发送（Shift+Enter 换行），busy 时禁用
+- 工具栏：模板选择、思考模式、温度选择
 - 发送/停止按钮：busy → 停止（`svc.stop()`）；空闲 → 发送
 
 ---
@@ -227,12 +220,12 @@ ToolCallStart(id="call_x", name="builtin_read_file")
   └─ Message.tool_calls += { id, name, args:"" }
 ToolCallArgsDelta(id, "{\"path\":\"…")      → 只更新 Message.tool_calls.arguments
 ToolCallComplete(id, args=完整JSON)          → entry→Running；arguments 覆写 pretty JSON
-RoundEnd                                     → stop_streaming + 增量持久化
+RoundEnd                                     → stop_streaming（持久化由服务端自动处理）
 ToolExecuted(id, content, is_error)          → entry→Completed/Error + result；
                                               追加 Tool 消息（末尾，seq=max+1）
 RoundStart (下一轮)                          → 新 Assistant 占位
 TextDelta:  ".env 内容如下：…"              → 最终文本
-RoundEnd                                     → stop_streaming + 增量持久化
+RoundEnd                                     → stop_streaming
 ```
 
 渲染呈现：
@@ -255,74 +248,130 @@ RoundEnd                                     → stop_streaming + 增量持久�
 
 ### 异常与兜底
 
-- **ArgsDelta 先于 ToolCallStart**：服务端同 chunk 先发 delta 再发 start，首段 delta
-  会被丢弃；`ToolCallComplete` 会用完整参数覆写，**最终数据不丢**（仅流式 UI 缺首段）
-- **Complete/Executed 时 entry 缺失**（乱序）：按 id 判断不存在才补建，同时补
-  `message.tool_calls`，保证持久化后历史可见
-- **`request_user_action`（UI 工具）**：GUI 刻意跳过其 ToolCallStart/Complete
-  （不建 entry 也不建 message.tool_calls），由交互卡片（ChatUIActionsView）替代展示
+- **ArgsDelta 先于 ToolCallStart**：首段 delta 被丢弃；`ToolCallComplete` 完整参数覆写，数据不丢
+- **Complete/Executed 时 entry 缺失**：按 id 判断不存在才补建，同时补 `message.tool_calls`
+- **`request_user_action`（UI 工具）**：GUI 刻意跳过其 ToolCallStart/Complete，由交互卡片替代
 
 ---
 
-## 7. 持久化流程（增量游标）
+## 7. 持久化流程（服务端 ChatHistoryStore）
+
+### 架构
 
 ```
-send_message:  spawn_persist(user_msg)          // fire-and-forget，不推进游标
-RoundEnd:      persist_incremental(&mut chat)   // 写 seq > last_persisted_seq 的新消息
-Done/Error:    persist_incremental(&mut chat)   // 无 RoundEnd 也补齐，防游标前移丢消息
-clear:         messages 清空 + last_persisted_seq 归 0
-历史加载:      游标推进到历史最大 seq（加载期间已有新消息则跳过覆盖）
+GUI page.rs
+  │
+  ├─ 创建 ChatMessageStore { plan_id, repo: Arc<ChatMessageRepo> }
+  │     （实现服务端 ChatHistoryStore trait，内部 tokio::spawn 异步写 SQLite）
+  │
+  └─ 注入 ChatService::new(..., Some(Arc::new(store)))
+        │
+        └─ History::new(store)
+              │
+              ├─ store.load() → 从 SQLite 恢复 Message 列表 → 填入 History.inner
+              │
+              └─ 每次写入/清理时同步 store：
+                    push_user/assistant/tool → store.append()
+                    rollback_to / pop_last / clean_unclosed → store.rollback_to()
+                    clear → store.clear()
 ```
 
-- `persist_message` 在存储层按 `plan_id + sequence_order` 幂等去重
-  （`ChatMessageRepo::find_by_plan_and_seq` 先查后插）
-- `ChatMessage.tool_call_entries` 持久化时不存储，历史加载时从
-  `Message.tool_calls` 重建（`build_tool_call_entries`，phase=Completed），
-  Tool 消息的 content 按 `tool_call_id` 回填 `result`
+### trait 定义（服务端 `crates/planned-agent/src/chat/storage.rs`）
+
+```rust
+pub trait ChatHistoryStore: Send + Sync {
+    fn load(&self) -> Vec<Message>;       // 恢复历史（构造时调用一次）
+    fn append(&self, msg: &Message);      // 追加一条消息
+    fn rollback_to(&self, len: usize);    // 回滚到指定长度
+    fn clear(&self);                      // 清空会话
+}
+```
+
+默认实现 `InMemoryStore`（不持久化），用于子 agent 临时会话和测试。
+
+### GUI 侧历史加载
+
+```
+page.rs:
+  1. 构造 ChatMessageStore(plan_id, repo)
+  2. 注入 ChatService → 服务端 History 自动 load()
+  3. service.history() 获取已恢复的 Vec<Message>
+  4. chat.load_from_history(&history) → 重建 ChatMessage 列表
+  5. build_bubbles 渲染（resolve_tool_entries 自动组合 tool_call_entries）
+```
+
+### 子 agent 不持久化
+
+子 agent 构造 `ChatService` 时传 `None`（默认 `InMemoryStore`），天然不落库。
 
 ---
 
-## 8. 交互卡片流程（request_user_action）
+## 8. HistoryUpdated 事件（展示校准）
+
+### 触发时机
+
+仅在**破坏性操作**（删除/回滚/清理）后 emit——append 类操作 GUI 已通过现有事件链知道：
+
+| 服务端操作 | 触发位置 |
+|---|---|
+| `pop_last_assistant_tool_calls_if_not_first` | `round.rs`（max_tool_rounds） |
+| `clean_unclosed_assistant_tool_calls` | `round.rs`（工具取消 + 用户取消）× 2 |
+| `rollback_to` | `driver/mod.rs`（对话失败回滚） |
+| `clear` | `driver/mod.rs`（Command::Reset） |
+
+### GUI 校准策略（`ChatSignals::reconcile_with_snapshot`）
+
+```
+收到 HistoryUpdated { messages }:
+  1. 收集当前正在 streaming 的消息（保留，比快照更新）
+  2. 按 sequence_order 构建快照 → 新的 ChatMessage 列表
+  3. 把 streaming 消息按 seq 替换回新列表
+  4. 替换 ChatSignals.messages
+```
+
+---
+
+## 9. 交互卡片流程（request_user_action）
 
 ```
 LLM 调用 request_user_action
   → 服务端 emit UIActionRequest { message, actions, session_id }
-  → handle_event: set_pending(PendingUI { tool_call_id: pending_tool_call_id, run_id: session_id })
-  → ChatPanel 在消息列表末尾渲染 ChatUIActionsView
-      ├─ message 引导文本
-      ├─ Confirm  → 按钮
-      ├─ Select   → 按钮组 + 「自定义输入」入口（D）
-      ├─ Input    → 文本框 + 确认
-      └─ MultiSelect → 复选框组 + Confirm 按钮（无 confirm 时自动补「确定」防卡死）
+  → handle_event: set_pending(PendingUI { tool_call_id, run_id })
+  → ChatPanel 末尾渲染 ChatUIActionsView
   → 用户操作 on_action((UIAction, choice))
   → handle_user_action:
-      1. 把 choice 文本追加到最后一个 assistant 消息
-      2. push 新 Assistant 占位（下一轮回复）
-      3. run_id 非空 → resume_sub_agent；否则 confirm_user_action(tool_call_id, choice)
+      1. choice 文本追加到最后一个 assistant 消息
+      2. push 新 Assistant 占位
+      3. run_id 非空 → resume_sub_agent；否则 confirm_user_action
 ```
 
 ---
 
-## 9. 关键设计决策（历史修复沉淀）
+## 10. 关键设计决策（历史修复沉淀）
 
 | 决策 | 原因 |
 |---|---|
 | 工具按 `tool_call_id` 精确路由 | 曾按 name/顺序匹配，多工具并发时参数/结果串台 |
 | `name`/`arguments` 单一数据源（`Message.tool_calls`） | 消除双写同步错位 |
-| Tool 消息追加末尾而非插中 | 保证 `sequence_order` 与列表顺序一致，load 排序不错位 |
-| 每条 Assistant 独立气泡、text 全保留 | 曾把"含 tool_calls 的 assistant"当纯工具消息，text 被丢弃 |
-| 文本在工具面板之前渲染 | 与 ChatGPT/Claude/Cursor 一致（assistant 先说后调） |
-| `persist_incremental` + 幂等去重 | 曾全量重放历史导致重复写入；Error/Done 无 RoundEnd 会漏存 |
-| `append_streaming` 用 `rfind` | 多 streaming 并存时追加到最新消息 |
+| Tool 消息追加末尾而非插中 | 保证 seq 与列表顺序一致 |
+| 每条 Assistant 独立气泡、text 全保留 | 曾把含 tool_calls 的 assistant 当纯工具消息，text 丢失 |
+| 文本在工具面板之前渲染 | 与 ChatGPT/Claude/Cursor 一致 |
+| **持久化上移服务端**（`ChatHistoryStore` trait） | 单一数据源——服务端 `History` 在每次写入/清理时同步 store，GUI 不再自行持久化 |
+| **`HistoryUpdated` 事件** | 破坏性操作（pop/clean/rollback/clear）不产生其他事件，GUI 无法感知；用快照校准 |
+| 子 agent 默认 `InMemoryStore` | 临时会话不持久化，构造时传 `None` |
 | `ToolViewData` 与 `ToolCallEntry` 分离 | 渲染结构 vs UI 状态职责分离 |
+| **`Arc<ChatService>` 直接传递**（不用 Signal） | 构造后服务指针稳定不变，Signal 追踪"一次初始化"是多余开销；`require_resource` 辅助函数简化 Resource 读取 |
+| **事件处理函数抽离出 rsx!** | rsx! 只负责布局，业务逻辑在组件体中定义为闭包/函数，可读性和可测试性更好 |
 
 ---
 
-## 10. 已知限制
+## 11. 已知限制
 
 - **同一 assistant 消息内无法区分"工具前文本"与"工具后文本"**：`Message.content`
   是整轮拼接的单字符串，渲染统一放在工具面板之前（主流模型先说后调，可接受近似）
 - **历史加载后工具错误态（is_error）无法还原**：`Message` 未持久化该字段，加载后
   统一显示为 Completed
-- **`request_user_action` 的 Tool 消息在 GUI 侧缺失**：confirm 后服务端 push_tool
-  无事件驱动，GUI 消息序列与真实 history 不完全闭合（由交互卡片替代展示）
+- **`request_user_action` 的 Tool 消息在 GUI 侧缺失**：confirm 后服务端 `push_tool`
+  无事件驱动（由交互卡片替代展示）
+- **`ChatMessageStore::append` 的 sequence_order**：从 DB 当前最大 seq + 1 推导，
+  并发 append 时理论上有 seq 冲突（幂等保护兜底，不影响功能）

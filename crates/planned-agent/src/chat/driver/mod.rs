@@ -71,6 +71,9 @@ pub(super) async fn driver_loop<PM: planned_agent_core::prompt::PromptManager + 
             Command::Reset => {
                 // 会话重置：清空历史（在队列中串行执行，此时无活跃对话）
                 state.history.clear();
+                state.subscribers.emit(ChatEvent::HistoryUpdated {
+                    messages: state.history.snapshot(),
+                });
             }
             Command::Resume {
                 choice,
@@ -78,20 +81,19 @@ pub(super) async fn driver_loop<PM: planned_agent_core::prompt::PromptManager + 
                 done,
             } => {
                 tracing::info!("[driver] 收到 Command::Resume，从挂起点继续子 agent 对话");
-                // 找到挂起的 request_user_action 的 tool_call_id
-                let Some(tool_call_id) = state.history.find_pending_ui_tool_call_id() else {
+                // 找到挂起的 request_user_action（守卫：确认有可闭合的调用）
+                let Some(_tool_call_id) = state.history.find_pending_ui_tool_call_id() else {
                     let msg = "resume: 历史中无挂起的 request_user_action，无法继续".to_string();
                     state.subscribers.emit(ChatEvent::Error(msg.clone()));
                     let _ = done.send(SendOutcome::Failed(msg));
                     continue;
                 };
-                // 回滚点：压入 tool 消息前的位置（resume 失败时恢复挂起态）
+                // 回滚点：闭合前的位置（resume 失败时恢复挂起态）
                 let mark = state.history.snapshot().len();
-                // 压入 tool 消息闭合 assistant(tool_calls)，然后从 history 继续
-                state.history.push_tool(
-                    &tool_call_id,
-                    &serde_json::json!({ "choice": choice, "action_id": action_id }),
-                );
+                // 选择结果作为 text 闭合挂起的 request_user_action（不产生 tool 消息），
+                // 然后从 history 继续
+                let choice_text = format!("\n\n[用户选择]: {choice} (action_id: {action_id})");
+                state.history.close_pending_ui_tool_call(&choice_text);
                 *state.run_state.lock().unwrap() = RunState::Running;
 
                 // resume 只在子 agent 发生，继续用挂起返回策略（可能再次挂起）
@@ -146,6 +148,9 @@ fn finish_send<PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'st
         Err(e) => {
             tracing::info!("[driver] run_conversation 错误: {}", e);
             state.history.rollback_to(mark);
+            state.subscribers.emit(ChatEvent::HistoryUpdated {
+                messages: state.history.snapshot(),
+            });
             state.subscribers.emit(ChatEvent::Error(e.to_string()));
             let _ = done.send(SendOutcome::Failed(e.to_string()));
         }

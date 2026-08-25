@@ -25,6 +25,7 @@ use super::config::ChatConfig;
 use crate::chat::driver::driver_loop;
 use super::event::{SubscriptionGuard, SubscriptionId, ChatEvent};
 use crate::chat::state::{resolve_ai_client, State};
+use crate::chat::storage::{ChatHistoryStore, InMemoryStore};
 use super::ticket::SendTicket;
 
 // ── 公开服务 ────────────────────────────────────────────────────────────────
@@ -50,6 +51,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         tool_registry: Arc<ToolRegistry>,
         prompt_manager: Arc<PM>,
         config: ChatConfig,
+        store: Option<Arc<dyn ChatHistoryStore>>,
     ) -> Result<Self> {
         let ai_client = resolve_ai_client(&ai_manager, &config)?;
         Ok(Self::from_ai_client(
@@ -57,6 +59,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
             tool_registry,
             prompt_manager,
             config,
+            store,
         ))
     }
 
@@ -66,14 +69,16 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         tool_registry: Arc<ToolRegistry>,
         prompt_manager: Arc<PM>,
         config: ChatConfig,
+        store: Option<Arc<dyn ChatHistoryStore>>,
     ) -> Self {
+        let store = store.unwrap_or_else(|| Arc::new(InMemoryStore));
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let state = std::sync::Arc::new(State {
             ai_client,
             tool_registry,
             prompt_manager,
             config: std::sync::Mutex::new(config),
-            history: crate::chat::state::History::new(),
+            history: crate::chat::state::History::new(store),
             subscribers: crate::chat::state::Subscribers::new(),
             cmd_tx,
             driver_rx: std::sync::Mutex::new(Some(cmd_rx)),
@@ -196,7 +201,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         self.state.tool_registry.signal_resume(run_id, user_input)
     }
 
-    /// 子 agent 内部 resume：压入 tool 消息闭合挂起的 `request_user_action`，
+    /// 子 agent 内部 resume：把选择结果作为 text 闭合挂起的 `request_user_action`，
     /// 然后从 history 继续 `run_conversation`（**不是**新 `send`）。
     ///
     /// 由 [`crate::chat::SubAgentSession::resume`] 调用。
@@ -265,6 +270,9 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         }
         drop(state);
         self.state.history.clear();
+        self.state.subscribers.emit(ChatEvent::HistoryUpdated {
+            messages: self.state.history.snapshot(),
+        });
     }
 
     /// 热切换 system prompt 模板（下次 `send` / `reset_session` 后生效）。

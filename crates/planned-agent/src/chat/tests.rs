@@ -167,6 +167,7 @@ mod tests {
             Arc::new(ToolRegistry::new()),
             Arc::new(MockPromptManager),
             ChatConfig::new(),
+            None, // 测试用默认 InMemoryStore
         );
         svc.start_driver().expect("启动 driver 失败");
         svc
@@ -296,51 +297,42 @@ mod tests {
         assert_eq!(pending_count, 2);
         assert!(!svc.is_awaiting_user_action(), "结束后不再 awaiting");
 
-        // 历史校验：assistant(tool_calls) 后紧跟对应 tool 消息，且 content 为 {"choice": ...}
+        // 历史校验：request_user_action 不产生 tool 消息，选择结果作为 text 闭合到 assistant
         let history = svc.history();
-        let tool_msgs: Vec<&Message> = history
-            .iter()
-            .filter(|m| matches!(m.role, MessageRole::Tool))
-            .collect();
-        assert_eq!(tool_msgs.len(), 2, "应有两条 tool 消息（c1/c2）");
-        assert_eq!(tool_msgs[0].tool_call_id.as_deref(), Some("c1"));
-        assert_eq!(tool_msgs[1].tool_call_id.as_deref(), Some("c2"));
-        let c1_content: Value = serde_json::from_str(
-            &tool_msgs[0]
-                .content
-                .as_ref()
-                .and_then(|c| match c {
-                    MessageContent::ToolResult { content, .. } => Some(content.as_str()),
-                    _ => None,
-                })
-                .expect("tool 消息内容"),
-        )
-        .unwrap();
-        assert_eq!(c1_content, json!({ "choice": "JSON", "action_id": "json" }));
-        let c2_content: Value = serde_json::from_str(
-            &tool_msgs[1]
-                .content
-                .as_ref()
-                .and_then(|c| match c {
-                    MessageContent::ToolResult { content, .. } => Some(content.as_str()),
-                    _ => None,
-                })
-                .expect("tool 消息内容"),
-        )
-        .unwrap();
-        assert_eq!(
-            c2_content,
-            json!({ "choice": "确认", "action_id": "confirm" })
-        );
-
-        // 顺序：assistant 消息的 tool_calls 之后必须紧跟同 id 的 tool 消息
-        let final_assistant_idx = history
-            .iter()
-            .position(|m| matches!(m.role, MessageRole::Assistant) && m.tool_calls.is_none())
-            .expect("最终 assistant 文本消息");
         assert!(
-            matches!(history[final_assistant_idx - 1].role, MessageRole::Tool),
-            "最终文本前应是最后一个 tool 消息"
+            !history
+                .iter()
+                .any(|m| matches!(m.role, MessageRole::Tool)),
+            "request_user_action 不应产生 tool 消息"
+        );
+        // assistant 消息 content 含选择文本
+        let assistant_texts: Vec<String> = history
+            .iter()
+            .filter(|m| matches!(m.role, MessageRole::Assistant))
+            .filter_map(|m| match &m.content {
+                Some(MessageContent::Text { text }) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            assistant_texts.iter().any(|t| t.contains("[用户选择]: JSON")),
+            "第 1 次选择应闭合到 assistant content: {:?}",
+            assistant_texts
+        );
+        assert!(
+            assistant_texts.iter().any(|t| t.contains("[用户选择]: 确认")),
+            "第 2 次选择应闭合到 assistant content: {:?}",
+            assistant_texts
+        );
+        // 不应残留未闭合的 request_user_action tool_calls
+        assert!(
+            !history.iter().any(|m| {
+                matches!(m.role, MessageRole::Assistant)
+                    && m.tool_calls.as_ref().is_some_and(|tcs| {
+                        tcs.iter().any(|tc| tc.function.name == "request_user_action")
+                    })
+            }),
+            "不应残留未闭合的 request_user_action tool_calls"
         );
     }
 

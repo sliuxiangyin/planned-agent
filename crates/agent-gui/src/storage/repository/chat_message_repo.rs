@@ -55,6 +55,20 @@ impl ChatMessageRepo {
         Ok(model)
     }
 
+    /// 删除 plan_id 下 sequence_order >= min_seq 的全部消息（回滚用）。
+    pub async fn delete_by_plan_and_gte_seq(
+        &self,
+        plan_id: &str,
+        min_seq: i32,
+    ) -> StorageResult<()> {
+        chat_message::Entity::delete_many()
+            .filter(chat_message::Column::PlanId.eq(plan_id))
+            .filter(chat_message::Column::SequenceOrder.gte(min_seq))
+            .exec(&self.db)
+            .await?;
+        Ok(())
+    }
+
     /// 按 plan_id 查找全部消息（按 sequence_order 正序）
     pub async fn find_by_plan_id(
         &self,

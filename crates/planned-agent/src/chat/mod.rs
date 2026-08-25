@@ -27,6 +27,7 @@
 //! ```text
 //! chat/
 //! ├── mod.rs      入口：模块声明 + 对外重导出（见下）
+//! ├── storage/    持久化接口：ChatHistoryStore trait + InMemoryStore 默认实现
 //! ├── service/    对外 API 层：ChatService / SendTicket / ChatConfig /
 //! │               ChatEvent（只负责接口与入队，无后台逻辑）
 //! ├── state/      内部状态层：State 容器 + History / Subscribers 封装、
@@ -43,6 +44,7 @@
 mod driver;
 mod service;
 mod state;
+pub mod storage;
 mod sub_agent;
 mod tools;
 

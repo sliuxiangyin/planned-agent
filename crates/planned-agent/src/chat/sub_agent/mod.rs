@@ -105,6 +105,7 @@ impl SubAgentSessionRunner for SubAgentRunner {
             self.tool_registry.clone(),
             self.prompt_manager.clone(),
             call_config,
+            None, // 子 agent 用默认 InMemoryStore，不持久化
         )
         .map_err(|e| {
             info!("[子agent] ChatService::new 失败: {}", e);
@@ -167,7 +168,7 @@ impl SubAgentSession for ChatSubAgentSession {
             .unwrap_or("")
             .to_string();
 
-        // 继续原对话：压入 tool 消息闭合挂起的 request_user_action，
+        // 继续原对话：把选择结果作为 text 闭合挂起的 request_user_action，
         // 然后从 history 继续 run_conversation（不是 send 新消息）。
         let ticket = self
             .service
