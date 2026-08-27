@@ -12,18 +12,25 @@
 //!   （与调用方的生命周期一致，崩溃丢最后几条，可接受）。
 //! - **snapshot 不经 store**：LLM 请求构造的 `history.snapshot()` 直接读内存，
 //!   store 只负责写穿透持久化。
+//! - **统一 `String` ID**：所有实现使用 `String` 作为持久化 ID 类型，
+//!   InMemoryStore 内部转为 `index.to_string()`，SQLite 实现直接返回 UUID。
 
 use planned_agent_core::ai::types::Message;
 
 /// 消息级持久化接口，与 `History` 的操作一一对应。
 ///
-/// 构造时由调用方绑定会话；trait 本身无 session 概念。
+/// 使用 `String` 作为持久化 ID 类型：
+/// - `InMemoryStore` 返回 `index.to_string()`；
+/// - SQLite 实现返回 UUID 主键。
 pub trait ChatHistoryStore: Send + Sync {
     /// 恢复历史（`History::new` 时调用一次，填入内存热数据）。
     fn load(&self) -> Vec<Message>;
 
-    /// 追加一条消息（`push_user` / `push_assistant` / `push_tool` 后调用）。
-    fn append(&self, msg: &Message);
+    /// 追加一条消息，返回持久化 ID。
+    fn append(&self, msg: &Message) -> String;
+
+    /// 根据 ID 更新消息内容。
+    fn update(&self, id: &str, msg: &Message);
 
     /// 回滚到指定长度（`rollback_to` / `pop_last` / `clean_unclosed` 后调用）。
     ///
@@ -39,12 +46,28 @@ pub trait ChatHistoryStore: Send + Sync {
 /// 用于子 agent 临时会话、纯内存测试、以及不需要跨重启恢复的场景。
 pub struct InMemoryStore;
 
+impl InMemoryStore {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for InMemoryStore {
+    fn default() -> Self {
+        Self
+    }
+}
+
 impl ChatHistoryStore for InMemoryStore {
     fn load(&self) -> Vec<Message> {
         Vec::new()
     }
 
-    fn append(&self, _msg: &Message) {
+    fn append(&self, _msg: &Message) -> String {
+        String::new() // 内存实现不实际存储
+    }
+
+    fn update(&self, _id: &str, _msg: &Message) {
         // 不落盘
     }
 

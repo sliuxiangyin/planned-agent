@@ -105,7 +105,6 @@ impl SubAgentSessionRunner for SubAgentRunner {
             self.tool_registry.clone(),
             self.prompt_manager.clone(),
             call_config,
-            None, // 子 agent 用默认 InMemoryStore，不持久化
         )
         .map_err(|e| {
             info!("[子agent] ChatService::new 失败: {}", e);

@@ -22,7 +22,11 @@ use super::types::PendingUI;
 ///
 /// 持久化由服务端 `History` + `ChatHistoryStore` 在 push 时自动完成，
 /// GUI 不再自行持久化。
-pub fn send_message(chat: &mut ChatSignals, svc: &Arc<ChatService<FilePromptManager>>, text: String) {
+pub fn send_message(
+    chat: &mut ChatSignals,
+    svc: &Arc<ChatService<FilePromptManager>>,
+    text: String,
+) {
     chat.clear_pending();
 
     let seq_start = chat
@@ -141,7 +145,7 @@ pub fn handle_event(mut chat: ChatSignals, ev: ServiceChatEvent) {
             tracing::error!(target: "event", event = "Error", error = %e, "聊天事件错误");
             if chat.pending_ui.read().is_none() {
                 chat.stop_streaming();
-                chat.append_to_last_assistant(&format!("\n\n*聊天出错: {}*", e));
+                chat.append_to_last_assistant(&format!("\n\n*1聊天出错: {}*", e));
             }
         }
         ServiceChatEvent::HistoryUpdated { messages } => {

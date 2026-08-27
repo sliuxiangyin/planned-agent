@@ -1,7 +1,7 @@
 //! chat_messages 表仓库 — 灵活模式聊天消息 CRUD。
 
 use chrono::Utc;
-use sea_orm::*;
+use sea_orm::{prelude::*, *};
 use uuid::Uuid;
 
 use crate::storage::entities::chat_message;
@@ -86,6 +86,28 @@ impl ChatMessageRepo {
     pub async fn delete_by_plan_id(&self, plan_id: &str) -> StorageResult<()> {
         chat_message::Entity::delete_many()
             .filter(chat_message::Column::PlanId.eq(plan_id))
+            .exec(&self.db)
+            .await?;
+        Ok(())
+    }
+
+    /// 根据 UUID id 更新消息内容
+    pub async fn update_by_id(
+        &self,
+        id: &str,
+        message_json: &str,
+        msg_type: &str,
+    ) -> StorageResult<()> {
+        chat_message::Entity::update_many()
+            .filter(chat_message::Column::Id.eq(id))
+            .col_expr(
+                chat_message::Column::MessageJson,
+                Expr::val(message_json),
+            )
+            .col_expr(
+                chat_message::Column::MsgType,
+                Expr::val(msg_type),
+            )
             .exec(&self.db)
             .await?;
         Ok(())

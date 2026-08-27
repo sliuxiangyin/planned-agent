@@ -1,11 +1,4 @@
 //! 后台 driver：串行消费命令队列，驱动多轮对话。
-//!
-//! - `mod.rs`：[`driver_loop`] —— 常驻 task，按顺序消费 `Command`，
-//!   每次 `Send` 触发一次完整对话循环；
-//! - `round.rs`：[`run_conversation`] —— 一次 send 的完整多轮 loop
-//!   （LLM 流式 / 工具执行 / UI 确认）；
-//! - `confirm.rs`：[`await_confirm`] —— 等待用户对 UI 卡片的确认；
-//! - `prompt.rs`：[`inject_system_prompt`] —— system prompt 注入（幂等）。
 
 mod bridge;
 mod confirm;
@@ -21,17 +14,10 @@ use crate::chat::service::{SendOutcome, ChatEvent};
 use crate::chat::state::{Command, RunState, State};
 use round::{run_conversation, ConversationOutcome, UIActionStrategy};
 
-/// 常驻 driver task：串行消费 `Command`。
-///
-/// - `Weak<State>`：所有 `ChatService` 实例都已 drop 时退出，避免 `State`
-///   被 driver 自身强引用导致 task 永久挂起（生命周期泄漏）；
-/// - `Send` 命令触发一次完整对话；`Confirm` 在 driver 顶层收到（没有正在
-///   等待的 UI 交互）时发 `Error` 事件并忽略。
 pub(super) async fn driver_loop<PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'static>(
     state: std::sync::Weak<State<PM>>,
     mut rx: mpsc::UnboundedReceiver<Command>,
 ) {
-    // 二级队列：awaiting 期间到达的 send 排到这里，保持串行顺序
     let mut queue: VecDeque<Command> = VecDeque::new();
 
     loop {
@@ -45,23 +31,20 @@ pub(super) async fn driver_loop<PM: planned_agent_core::prompt::PromptManager + 
         match cmd {
             Command::Send { message, done } => {
                 tracing::info!("[driver] 收到 Command::Send，开始 run_conversation");
-                // 每次新对话重置取消标志（stop 只影响当前对话，v1 同语义）
                 state.cancelled.store(false, Ordering::SeqCst);
-                // 回滚点：记录 user 消息写入前的位置；对话失败时整个对话回滚
-                let mark = state.history.push_user(message);
+                let store_id = state.history.push_user(message);
                 *state.run_state.lock().unwrap() = RunState::Running;
 
                 let ui_strategy = pick_ui_strategy(&state);
                 let bridge = bridge::SubAgentBridge::new(state.clone());
                 let result = run_conversation(&state, &mut rx, &mut queue, ui_strategy, &bridge).await;
-                finish_send(&state, result, mark, done);
+                finish_send(&state, result, store_id, done);
             }
             Command::Confirm {
                 tool_call_id,
                 choice,
                 action_id,
             } => {
-                // driver 顶层收到 confirm：没有正在等待的 UI 交互
                 state.subscribers.emit(ChatEvent::Error(format!(
                     "confirm_user_action: 当前没有等待中的 UI 交互 \
                      （tool_call_id={}, choice={}, action_id={}），已忽略",
@@ -69,7 +52,6 @@ pub(super) async fn driver_loop<PM: planned_agent_core::prompt::PromptManager + 
                 )));
             }
             Command::Reset => {
-                // 会话重置：清空历史（在队列中串行执行，此时无活跃对话）
                 state.history.clear();
                 state.subscribers.emit(ChatEvent::HistoryUpdated {
                     messages: state.history.snapshot(),
@@ -81,22 +63,22 @@ pub(super) async fn driver_loop<PM: planned_agent_core::prompt::PromptManager + 
                 done,
             } => {
                 tracing::info!("[driver] 收到 Command::Resume，从挂起点继续子 agent 对话");
-                // 找到挂起的 request_user_action（守卫：确认有可闭合的调用）
-                let Some(_tool_call_id) = state.history.find_pending_ui_tool_call_id() else {
+                let Some(store_id) = state.history.find_pending_ui_tool_call_id() else {
                     let msg = "resume: 历史中无挂起的 request_user_action，无法继续".to_string();
                     state.subscribers.emit(ChatEvent::Error(msg.clone()));
                     let _ = done.send(SendOutcome::Failed(msg));
                     continue;
                 };
-                // 回滚点：闭合前的位置（resume 失败时恢复挂起态）
-                let mark = state.history.snapshot().len();
-                // 选择结果作为 text 闭合挂起的 request_user_action（不产生 tool 消息），
-                // 然后从 history 继续
-                let choice_text = format!("\n\n[用户选择]: {choice} (action_id: {action_id})");
-                state.history.close_pending_ui_tool_call(&choice_text);
+                // 找到挂起的 request_user_action 的 tool_call_id
+                let tool_call_id = state.history.find_pending_tool_call_id().unwrap_or_default();
+                // 用户选择结果作为 tool 消息写入
+                let tool_content = serde_json::json!({
+                    "choice": choice,
+                    "action_id": action_id
+                });
+                state.history.push_tool(&tool_call_id, &tool_content);
                 *state.run_state.lock().unwrap() = RunState::Running;
 
-                // resume 只在子 agent 发生，继续用挂起返回策略（可能再次挂起）
                 let bridge = bridge::SubAgentBridge::new(state.clone());
                 let result = run_conversation(
                     &state,
@@ -106,14 +88,13 @@ pub(super) async fn driver_loop<PM: planned_agent_core::prompt::PromptManager + 
                     &bridge,
                 )
                 .await;
-                finish_send(&state, result, mark, done);
+                finish_send(&state, result, store_id, done);
             }
         }
     }
     tracing::info!("[driver] driver loop 退出（channel 关闭或 State 已 drop）");
 }
 
-/// 根据 config 选择 UI 策略：主 agent 阻塞确认，子 agent 挂起返回。
 fn pick_ui_strategy<PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'static>(
     state: &State<PM>,
 ) -> UIActionStrategy {
@@ -124,11 +105,10 @@ fn pick_ui_strategy<PM: planned_agent_core::prompt::PromptManager + Send + Sync 
     }
 }
 
-/// 收尾一次 `run_conversation`：发完成事件 / 挂起 / 错误回滚，并回填 done。
 fn finish_send<PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'static>(
     state: &std::sync::Arc<State<PM>>,
     result: anyhow::Result<ConversationOutcome>,
-    mark: usize,
+    _store_id: String,
     done: tokio::sync::oneshot::Sender<SendOutcome>,
 ) {
     *state.run_state.lock().unwrap() = RunState::Idle;
@@ -147,7 +127,7 @@ fn finish_send<PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'st
         }
         Err(e) => {
             tracing::info!("[driver] run_conversation 错误: {}", e);
-            state.history.rollback_to(mark);
+            state.history.rollback_to_store_id(&_store_id);
             state.subscribers.emit(ChatEvent::HistoryUpdated {
                 messages: state.history.snapshot(),
             });

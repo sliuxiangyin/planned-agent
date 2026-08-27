@@ -45,13 +45,12 @@ impl<PM: PromptManager + Send + Sync + 'static> std::fmt::Debug for ChatService<
 }
 
 impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
-    /// 通过 `AiManager` + 配置构造。
+    /// 通过 `AiManager` + 配置构造（使用默认 `InMemoryStore`）。
     pub fn new(
         ai_manager: AiManager,
         tool_registry: Arc<ToolRegistry>,
         prompt_manager: Arc<PM>,
         config: ChatConfig,
-        store: Option<Arc<dyn ChatHistoryStore>>,
     ) -> Result<Self> {
         let ai_client = resolve_ai_client(&ai_manager, &config)?;
         Ok(Self::from_ai_client(
@@ -59,7 +58,6 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
             tool_registry,
             prompt_manager,
             config,
-            store,
         ))
     }
 
@@ -69,9 +67,33 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         tool_registry: Arc<ToolRegistry>,
         prompt_manager: Arc<PM>,
         config: ChatConfig,
-        store: Option<Arc<dyn ChatHistoryStore>>,
     ) -> Self {
-        let store = store.unwrap_or_else(|| Arc::new(InMemoryStore));
+        let store: Arc<dyn ChatHistoryStore> = Arc::new(InMemoryStore);
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let state = std::sync::Arc::new(State {
+            ai_client,
+            tool_registry,
+            prompt_manager,
+            config: std::sync::Mutex::new(config),
+            history: crate::chat::state::History::new(store),
+            subscribers: crate::chat::state::Subscribers::new(),
+            cmd_tx,
+            driver_rx: std::sync::Mutex::new(Some(cmd_rx)),
+            driver_started: AtomicBool::new(false),
+            run_state: std::sync::Mutex::new(crate::chat::state::RunState::Idle),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        });
+        Self { state }
+    }
+
+    /// 使用自定义 store 构造。
+    pub fn with_store(
+        ai_client: Arc<dyn planned_agent_core::ai::AiClient>,
+        tool_registry: Arc<ToolRegistry>,
+        prompt_manager: Arc<PM>,
+        config: ChatConfig,
+        store: Arc<dyn ChatHistoryStore>,
+    ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let state = std::sync::Arc::new(State {
             ai_client,
@@ -91,7 +113,6 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
 }
 
 impl<PM: PromptManager + Send + Sync + 'static> Drop for ChatService<PM> {
-    /// 销毁时记录日志，便于排查 ChatService 泄漏或意外重建。
     fn drop(&mut self) {
         let role = match &self.state.config.lock().unwrap().run_id {
             Some(id) => format!("sub_agent(run_id={})", id),
@@ -108,23 +129,10 @@ impl<PM: PromptManager + Send + Sync + 'static> Drop for ChatService<PM> {
 impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
     // ── 事件订阅 ──
 
-    /// 注册事件监听，返回订阅 ID（可用 [`Self::unsubscribe`] 取消）。
-    ///
-    /// 推荐改用 [`Self::on_chat_with_guard`]：返回 RAII 守卫，作用域结束
-    /// 时自动退订，从源头避免 handler 闭包 + 其捕获上下文泄漏到已死的生命周期
-    /// （典型场景：Dioxus 页面切换、组件卸载、服务端请求结束等）。
     pub fn on_chat(&self, handler: impl Fn(ChatEvent) + Send + Sync + 'static) -> SubscriptionId {
         self.state.subscribers.subscribe(handler)
     }
 
-    /// 注册事件监听，返回 RAII 守卫 [`SubscriptionGuard`]（`Drop` 时自动退订）。
-    ///
-    /// 推荐把 guard 存放在与业务状态同寿命的作用域：guard drop → handler 退订 →
-    /// driver 不再向已死的闭包派发事件，从源头杜绝 handler 闭包 + 其捕获上下文
-    /// 跨生命周期残留导致的内存泄漏 + 写入已脱离渲染树的 Signals 等问题。
-    ///
-    /// guard 不持有 service 的强引用，不延长 service 寿命；service 全部 drop 后
-    /// guard 的 Drop 自动成为 no-op。
     pub fn on_chat_with_guard(
         &self,
         handler: impl Fn(ChatEvent) + Send + Sync + 'static,
@@ -133,18 +141,12 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         SubscriptionGuard::new(self.state.subscribers.inner_weak(), id)
     }
 
-    /// 取消事件订阅（按 ID）。
-    ///
-    /// 若已使用 [`Self::on_chat_with_guard`]，无需手动调用——guard Drop 自动退订。
     pub fn unsubscribe(&self, id: SubscriptionId) {
         self.state.subscribers.unsubscribe(id);
     }
 
     // ── 发送 ──
 
-    /// 发送单条消息并触发一次异步对话。
-    ///
-    /// 调用前须确保 [`start_driver`](Self::start_driver) 已调用。
     pub fn send(&self, message: Message) -> Result<SendTicket> {
         let (tx, rx) = oneshot::channel();
         self.state
@@ -157,7 +159,6 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         Ok(SendTicket { rx })
     }
 
-    /// 便捷方法：发送一条文本 user 消息。
     pub fn send_text(&self, text: impl Into<String>) -> Result<SendTicket> {
         self.send(Message {
             role: MessageRole::User,
@@ -169,9 +170,6 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         })
     }
 
-    /// 提交用户对 UI 交互卡片的确认。
-    ///
-    /// 调用前须确保 [`start_driver`](Self::start_driver) 已调用。
     pub fn confirm_user_action(
         &self,
         tool_call_id: &str,
@@ -189,24 +187,10 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         Ok(())
     }
 
-    /// 恢复挂起的子 agent（前端驱动 resume 入口）。
-    ///
-    /// 调用方在收到子 agent 的 `ChatEvent::UIActionRequest`（`session_id` 非空，
-    /// 即 run_id）后，用户确认时调用此方法，把选择发给挂起的子 agent。
-    ///
-    /// 这是**同步发信号**：直接操作 `ToolRegistry` 的挂起会话存储，唤醒阻塞在
-    /// `execute_streamed` 中的子 agent 继续执行——不经过本 service 的 driver 队列
-    /// （driver 此刻正阻塞在子 agent 工具调用上，无法消费新命令）。
     pub fn resume_sub_agent(&self, run_id: &str, user_input: serde_json::Value) -> Result<()> {
         self.state.tool_registry.signal_resume(run_id, user_input)
     }
 
-    /// 子 agent 内部 resume：把选择结果作为 text 闭合挂起的 `request_user_action`，
-    /// 然后从 history 继续 `run_conversation`（**不是**新 `send`）。
-    ///
-    /// 由 [`crate::chat::SubAgentSession::resume`] 调用。
-    ///
-    /// 调用前须确保 [`start_driver`](Self::start_driver) 已调用。
     pub(crate) fn resume(&self, choice: &str, action_id: &str) -> Result<SendTicket> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.state
@@ -222,14 +206,8 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
 
     // ── 控制与查询 ──
 
-    /// 请求取消当前对话（下一个检查点生效）。
-    ///
-    /// 除设置 `cancelled` 标志外，同时清理所有挂起的子 agent 会话（drop
-    /// `resume_tx`），使阻塞在 `execute_streamed` → `rx.await` 的子 agent
-    /// 立即收到通道关闭错误并返回，从而解除主 agent driver 的阻塞。
     pub fn stop(&self) {
         self.state.cancelled.store(true, Ordering::SeqCst);
-        // 清理所有挂起的子 agent 会话：drop resume_tx 唤醒阻塞的 execute_streamed
         let count = self.state.tool_registry.clear_sub_agent_sessions();
         if count > 0 {
             tracing::info!(
@@ -239,12 +217,10 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         }
     }
 
-    /// 取消状态查询。
     pub fn is_cancelled(&self) -> bool {
         self.state.cancelled.load(Ordering::SeqCst)
     }
 
-    /// 是否有正在等待用户确认的 UI 卡片。
     pub fn is_awaiting_user_action(&self) -> bool {
         matches!(
             *self.state.run_state.lock().unwrap(),
@@ -252,16 +228,10 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         )
     }
 
-    /// 内部消息历史快照。
     pub fn history(&self) -> Vec<Message> {
         self.state.history.snapshot()
     }
 
-    /// 清空内部消息历史（会话重置）。
-    ///
-    /// **立即**清空；若对话正在运行（`Running` / `AwaitingUserAction`），本方法
-    /// 会发出警告并跳过清空，避免与 driver 竞争。安全的替代方案是
-    /// [`Self::reset_session`]（入队串行清空）。
     pub fn clear(&self) {
         let state = self.state.run_state.lock().unwrap();
         if matches!(*state, crate::chat::state::RunState::Running | crate::chat::state::RunState::AwaitingUserAction) {
@@ -275,40 +245,18 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         });
     }
 
-    /// 热切换 system prompt 模板（下次 `send` / `reset_session` 后生效）。
-    ///
-    /// 仅更新配置，**不**触碰历史；配合 [`Self::reset_session`] 使用可在
-    /// 不重建 service 的前提下切换模板（新模板会在历史清空后的首次
-    /// `send` 时注入）。
     pub fn set_system_prompt_template(&self, template: Option<String>) {
         self.state.config.lock().unwrap().system_prompt_template = template;
     }
 
-    /// 热切换工具白名单（下次 `send` 时立即生效）。
-    ///
-    /// - `None`：全部工具可用
-    /// - `Some(names)`：仅白名单中的工具暴露给 LLM
     pub fn set_allowed_tools(&self, allowed: Option<Vec<String>>) {
         self.state.config.lock().unwrap().allowed_tools = allowed;
     }
 
-    /// 注入本次执行的 run_id（子 agent 每次 `start` 前调用）。
-    ///
-    /// - `None`：主 agent
-    /// - `Some(invocation_id)`：子 agent，决定 `run_conversation` 的 UI 策略
-    ///   （挂起返回 vs 阻塞确认），并作为前端 resume 的路由键。
     pub fn set_run_id(&self, run_id: Option<String>) {
         self.state.config.lock().unwrap().run_id = run_id;
     }
 
-    /// 会话重置（入队、串行安全）：清空内部消息历史。
-    ///
-    /// 与 [`Self::clear`] 的区别：本方法把清空动作放入命令队列，由 driver
-    /// 在**当前对话（含 UI 确认等待）结束后**执行，因此即使有对话正在运行
-    /// 也安全——配合 `stop()` + [`Self::set_system_prompt_template`] 即可
-    /// 实现"不重建 service 的模板热切换"。
-    ///
-    /// 调用前须确保 [`start_driver`](Self::start_driver) 已调用。
     pub fn reset_session(&self) -> Result<()> {
         self.state
             .cmd_tx
@@ -317,26 +265,19 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         Ok(())
     }
 
-    /// 获取 PromptManager 引用（供外部复用）。
     pub fn prompt_manager(&self) -> Arc<PM> {
         self.state.prompt_manager.clone()
     }
 
     // ── 内部：driver 生命周期 ──
 
-    /// 启动后台 driver task（幂等；多次调用安全）。
-    ///
-    /// 首次 `send` / `confirm_user_action` / `reset_session` 前必须调用。
-    /// 主 agent 在 service ready 后调用一次；子 agent 在 `start()` 时调用。
     pub fn start_driver(&self) -> Result<()> {
-        // 使用 compare_exchange 确保只有第一个调用者负责启动 driver
         if self
             .state
             .driver_started
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
-            // 已经启动过，直接返回
             return Ok(());
         }
         let rx = self
@@ -349,7 +290,6 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         let handle = match tokio::runtime::Handle::try_current() {
             Ok(h) => h,
             Err(e) => {
-                // 启动失败，回滚 driver_started 状态，允许后续重试
                 self.state.driver_started.store(false, Ordering::SeqCst);
                 *self.state.driver_rx.lock().unwrap() = Some(rx);
                 return Err(anyhow!(

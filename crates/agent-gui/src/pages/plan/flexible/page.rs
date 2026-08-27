@@ -63,24 +63,32 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
     let prompt_ctx = require_resource::<PromptContext>();
 
     if svc_opt.read().is_none() {
-        let store: Option<Arc<dyn planned_agent::chat::storage::ChatHistoryStore>> =
-            storage_repo(storage_resource, |ctx| ctx.chat_message_repo()).map(|repo| {
-                let s = ChatMessageStore::new(plan_id.clone(), repo);
-                Arc::new(s) as Arc<dyn planned_agent::chat::storage::ChatHistoryStore>
-            });
-        let svc = Arc::new(
-            ChatService::new(
-                (*ai_ctx.manager).clone(),
-                tools_ctx.registry.clone(),
-                prompt_ctx.manager.clone(),
-                ChatConfig {
-                    allowed_tools: None,
-                    ..Default::default()
-                },
-                store,
-            )
-            .expect("ChatService 构造失败"),
-        );
+        let svc = Arc::new({
+            if let Some(repo) = storage_repo(storage_resource, |ctx| ctx.chat_message_repo()) {
+                let store = ChatMessageStore::new(plan_id.clone(), repo);
+                ChatService::with_store(
+                    ai_ctx.manager.default().expect("获取默认 AI client 失败"),
+                    tools_ctx.registry.clone(),
+                    prompt_ctx.manager.clone(),
+                    ChatConfig {
+                        allowed_tools: None,
+                        ..Default::default()
+                    },
+                    Arc::new(store),
+                )
+            } else {
+                ChatService::new(
+                    (*ai_ctx.manager).clone(),
+                    tools_ctx.registry.clone(),
+                    prompt_ctx.manager.clone(),
+                    ChatConfig {
+                        allowed_tools: None,
+                        ..Default::default()
+                    },
+                )
+                .expect("ChatService 构造失败")
+            }
+        });
         svc.start_driver().expect("ChatService driver 启动失败");
         svc_opt.set(Some(svc));
     }
