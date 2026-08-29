@@ -252,15 +252,19 @@ impl ChatSignals {
 
 /// 从 `StoreMessage` 序列重建气泡（纯函数，仅用于历史加载 / 快照校准）。
 ///
-/// 严格按 OpenAI 消息序列渲染：`User → Assistant(tool_calls) → Tool → Assistant(text)`。
+/// 消息序列规则：
 /// - User → 独立 user 气泡
 /// - Assistant → 独立 assistant 气泡（reasoning + text + tool_calls）
-/// - Tool → 不产生气泡，按 `tool_call_id` 回填对应 `ToolViewData.result`；
-///   用 `StoreMessage.is_error_type` 判断是否 Error
+/// - Tool → 正常工具按 `tool_call_id` 回填对应 `ToolViewData.result`；
+///   `request_user_action` 的 Tool 消息**升格为独立 assistant 文本气泡**
+///   （内容为用户选择文本，如 "---\n\n**approved**\n\n"）
 /// - 其他（System 等）→ 忽略
 pub fn build_bubbles(messages: &[StoreMessage]) -> Vec<Bubble> {
     let mut bubbles: Vec<Bubble> = Vec::new();
     let mut tool_index: HashMap<String, (usize, usize)> = HashMap::new();
+    // 记录 request_user_action 的 tool_call_id，其 Tool 消息不回填 ToolViewData，
+    // 而是升格为 assistant 文本气泡
+    let mut ui_action_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for sm in messages {
         match sm.message.role {
@@ -280,6 +284,14 @@ pub fn build_bubbles(messages: &[StoreMessage]) -> Vec<Bubble> {
                     .as_ref()
                     .map(|tcs| {
                         tcs.iter()
+                            .filter(|tc| {
+                                if tc.function.name == "request_user_action" {
+                                    ui_action_ids.insert(tc.id.clone());
+                                    false // 不创建 ToolViewData
+                                } else {
+                                    true
+                                }
+                            })
                             .map(|tc| ToolViewData {
                                 tool_call_id: tc.id.clone(),
                                 name: tc.function.name.clone(),
@@ -305,11 +317,22 @@ pub fn build_bubbles(messages: &[StoreMessage]) -> Vec<Bubble> {
             }
             MessageRole::Tool => {
                 if let Some(id) = sm.message.tool_call_id.as_deref() {
-                    if let Some(&(b, e)) = tool_index.get(id) {
+                    if ui_action_ids.contains(id) {
+                        // request_user_action 的 Tool 消息 → 追加到上一个 assistant 气泡文本
+                        // 与 handle_user_action 实时路径格式一致：
+                        //   "\n\n---\n\n**{choice}**\n\n"
+                        if let Some(choice) = extract_choice(&sm.message) {
+                            if let Some(last_asst) = bubbles.iter_mut().rfind(|b| b.is_assistant) {
+                                last_asst.text.push_str(&format!(
+                                    "\n\n---\n\n**{}**\n\n", choice
+                                ));
+                            }
+                        }
+                    } else if let Some(&(b, e)) = tool_index.get(id) {
+                        // 正常工具 → 回填 result
                         if let Some(result) = parse_tool_result(&sm.message) {
                             bubbles[b].tool_calls[e].result = Some(result);
                         }
-                        // 根据 StoreMessage.is_error_type 判断是否出错
                         if sm.is_error_type != ErrorType::None {
                             bubbles[b].tool_calls[e].phase = ToolCallPhase::Error;
                             bubbles[b].tool_calls[e].is_error = true;
@@ -329,6 +352,31 @@ fn display_text(msg: &Message) -> &str {
     match &msg.content {
         Some(MessageContent::Text { text }) => text.as_str(),
         _ => "",
+    }
+}
+
+/// 从 `request_user_action` Tool 消息的 content 中提取 `choice` 字段。
+///
+/// content 格式为 JSON：`{"choice":"approved","action_id":"..."}`，
+/// 与 `handle_user_action` 实时路径的 `push_tool` 写入格式一致。
+fn extract_choice(msg: &Message) -> Option<String> {
+    let content_text = match &msg.content {
+        Some(MessageContent::ToolResult { content, .. }) => content.as_str(),
+        Some(MessageContent::Text { text }) => text.as_str(),
+        _ => return None,
+    };
+    // 尝试解析 JSON，提取 choice 字段
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(content_text) {
+        if let Some(choice) = json.get("choice").and_then(|v| v.as_str()) {
+            return Some(choice.to_string());
+        }
+    }
+    // 解析失败（非 JSON）→ 原样返回（兼容纯文本场景）
+    let trimmed = content_text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
