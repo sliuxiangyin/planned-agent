@@ -12,6 +12,8 @@ pub(crate) struct ToolCallAccumulator {
     pub arguments: String,
     /// 是否已下发过 `ChatEvent::ToolCallStart`
     pub start_emitted: bool,
+    /// 缓冲 start_emitted 之前的参数片段，start 后一次性 flush
+    pub pending_deltas: Vec<String>,
 }
 
 impl ToolCallAccumulator {
@@ -21,6 +23,7 @@ impl ToolCallAccumulator {
             name: String::new(),
             arguments: String::new(),
             start_emitted: false,
+            pending_deltas: Vec::new(),
         }
     }
 }

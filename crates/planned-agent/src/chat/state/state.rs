@@ -27,7 +27,7 @@ use tracing::warn;
 use super::command::RunState;
 use crate::chat::service::ChatConfig;
 use crate::chat::service::{ChatEvent, SubscriptionId};
-use crate::chat::storage::ChatHistoryStore;
+use crate::chat::storage::{ChatHistoryStore, ErrorType, StoreMessage};
 
 /// 无效的 store id，用于 system prompt 等不持久化的消息。
 const NO_STORE_ID: &str = "";
@@ -68,12 +68,12 @@ pub(crate) fn resolve_ai_client(
 
 /// 内部消息历史（system / user / assistant / tool 全量，按序）。
 ///
-/// 内部用 `Mutex<Vec<(String, Message)>>` 同步互斥，其中 `String` 是 store 分配的
-/// 持久化 ID（SQLite UUID / 内存空字符串），用于后续 `store.update` 定位。
+/// 内部用 `Mutex<Vec<(String, StoreMessage)>>` 同步互斥，其中 `String` 是 store 分配的
+/// 持久化 ID（SQLite UUID / 内存空字符串），`StoreMessage` 包含 `Message` + `ErrorType`。
 ///
 /// `store` 在每次写入/清理操作时同步持久化，保证崩溃后可从 DB 恢复。
 pub struct History {
-    inner: Mutex<Vec<(String, Message)>>,
+    inner: Mutex<Vec<(String, StoreMessage)>>,
     store: Arc<dyn ChatHistoryStore>,
 }
 
@@ -81,9 +81,9 @@ impl History {
     /// 创建历史，从 store 恢复已有消息填入内存。
     pub fn new(store: Arc<dyn ChatHistoryStore>) -> Self {
         let loaded = store.load();
-        let inner: Vec<(String, Message)> = loaded
+        let inner: Vec<(String, StoreMessage)> = loaded
             .into_iter()
-            .map(|m| (NO_STORE_ID.to_string(), m))
+            .map(|sm| (NO_STORE_ID.to_string(), sm))
             .collect();
         Self {
             inner: Mutex::new(inner),
@@ -97,7 +97,17 @@ impl History {
             .lock()
             .unwrap()
             .iter()
-            .map(|(_, m)| m.clone())
+            .map(|(_, sm)| sm.message.clone())
+            .collect()
+    }
+
+    /// 当前历史的完整快照（含错误类型元数据，用于 GUI 历史加载）。
+    pub fn snapshot_store(&self) -> Vec<StoreMessage> {
+        self.inner
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, sm)| sm.clone())
             .collect()
     }
 
@@ -107,7 +117,7 @@ impl History {
             .lock()
             .unwrap()
             .first()
-            .map(|(_, m)| matches!(m.role, MessageRole::System))
+            .map(|(_, sm)| matches!(sm.message.role, MessageRole::System))
             .unwrap_or(false)
     }
 
@@ -120,7 +130,7 @@ impl History {
             0,
             (
                 NO_STORE_ID.to_string(),
-                Message {
+                StoreMessage::normal(Message {
                     role: MessageRole::System,
                     content: Some(MessageContent::Text { text }),
                     tool_calls: None,
@@ -128,27 +138,37 @@ impl History {
                     name: None,
                     reasoning_content: None,
                     ..Default::default()
-                },
+                }),
             ),
         );
     }
 
     /// 写入一条 user 消息，返回 store_id。
     pub fn push_user(&self, msg: Message) -> String {
-        let store_id = self.store.append(&msg);
-        self.inner.lock().unwrap().push((store_id.clone(), msg));
+        let sm = StoreMessage::normal(msg);
+        let store_id = self.store.append(&sm);
+        self.inner.lock().unwrap().push((store_id.clone(), sm));
         store_id
     }
 
     /// 写入一条 assistant 消息，返回 store_id。
     pub fn push_assistant(&self, msg: Message) -> String {
-        let store_id = self.store.append(&msg);
-        self.inner.lock().unwrap().push((store_id.clone(), msg));
+        let sm = StoreMessage::normal(msg);
+        let store_id = self.store.append(&sm);
+        self.inner.lock().unwrap().push((store_id.clone(), sm));
         store_id
     }
 
     /// 写入一条 tool 消息（`tool_call_id` 对应、content 序列化为 JSON 文本），返回 store id。
-    pub fn push_tool(&self, tool_call_id: &str, content: &Value) -> String {
+    ///
+    /// `is_error_type` 默认 `ErrorType::None`；工具执行失败时由 `execute_backend_tool_call`
+    /// 传入 `ErrorType::ExecutionError`，使历史回显能正确显示 Error 图标。
+    pub fn push_tool(
+        &self,
+        tool_call_id: &str,
+        content: &Value,
+        is_error_type: ErrorType,
+    ) -> String {
         let json = serde_json::to_string(content).unwrap_or_else(|_| content.to_string());
         let msg = Message {
             role: MessageRole::Tool,
@@ -162,8 +182,9 @@ impl History {
             reasoning_content: None,
             ..Default::default()
         };
-        let store_id = self.store.append(&msg);
-        self.inner.lock().unwrap().push((store_id.clone(), msg));
+        let sm = StoreMessage::new(msg, is_error_type);
+        let store_id = self.store.append(&sm);
+        self.inner.lock().unwrap().push((store_id.clone(), sm));
         store_id
     }
 
@@ -183,7 +204,7 @@ impl History {
             .lock()
             .unwrap()
             .iter()
-            .take_while(|(_, m)| matches!(m.role, MessageRole::System))
+            .take_while(|(_, sm)| matches!(sm.message.role, MessageRole::System))
             .count()
     }
 
@@ -196,9 +217,9 @@ impl History {
     /// 找到最后一条包含 `request_user_action` 的 assistant 消息的 store_id。
     pub fn find_pending_ui_tool_call_id(&self) -> Option<String> {
         let history = self.inner.lock().unwrap();
-        for (store_id, msg) in history.iter().rev() {
-            if matches!(msg.role, MessageRole::Assistant) {
-                if let Some(tcs) = &msg.tool_calls {
+        for (store_id, sm) in history.iter().rev() {
+            if matches!(sm.message.role, MessageRole::Assistant) {
+                if let Some(tcs) = &sm.message.tool_calls {
                     if tcs.iter().any(|tc| tc.function.name == "request_user_action") {
                         return Some(store_id.clone());
                     }
@@ -211,9 +232,9 @@ impl History {
     /// 找到最后一条包含 `request_user_action` 的 assistant 消息的 tool_call_id。
     pub fn find_pending_tool_call_id(&self) -> Option<String> {
         let history = self.inner.lock().unwrap();
-        for (_, msg) in history.iter().rev() {
-            if matches!(msg.role, MessageRole::Assistant) {
-                if let Some(tcs) = &msg.tool_calls {
+        for (_, sm) in history.iter().rev() {
+            if matches!(sm.message.role, MessageRole::Assistant) {
+                if let Some(tcs) = &sm.message.tool_calls {
                     for tc in tcs {
                         if tc.function.name == "request_user_action" {
                             return Some(tc.id.clone());
@@ -234,23 +255,18 @@ impl History {
     /// 若该 tool_call_id 已有对应 tool 消息（已闭合），则跳过不添加。
     pub fn push_cancelled_tool(&self, tool_call_id: &str, reason: &str) -> String {
         let mut history = self.inner.lock().unwrap();
-        let already_closed = history.iter().any(|(_, m)| {
-            matches!(m.role, MessageRole::Tool) && m.tool_call_id.as_deref() == Some(tool_call_id)
+        let already_closed = history.iter().any(|(_, sm)| {
+            matches!(sm.message.role, MessageRole::Tool)
+                && sm.message.tool_call_id.as_deref() == Some(tool_call_id)
         });
         if already_closed {
             return NO_STORE_ID.to_string();
         }
-        let content = serde_json::json!({
-            "error": true,
-            "cancelled": true,
-            "message": reason
-        });
-        let json = serde_json::to_string(&content).unwrap_or_default();
         let msg = Message {
             role: MessageRole::Tool,
             content: Some(MessageContent::ToolResult {
                 tool_call_id: tool_call_id.to_string(),
-                content: json,
+                content: reason.to_string(),
             }),
             tool_call_id: Some(tool_call_id.to_string()),
             tool_calls: None,
@@ -258,8 +274,9 @@ impl History {
             reasoning_content: None,
             ..Default::default()
         };
-        let store_id = self.store.append(&msg);
-        history.push((store_id.clone(), msg));
+        let sm = StoreMessage::new(msg, ErrorType::Cancelled);
+        let store_id = self.store.append(&sm);
+        history.push((store_id.clone(), sm));
         store_id
     }
 
@@ -270,12 +287,12 @@ impl History {
         {
             let mut history = self.inner.lock().unwrap();
             len_before = history.len();
-            if let Some((_, last)) = history.last() {
-                if matches!(last.role, MessageRole::Assistant)
-                    && last.tool_calls.is_some()
+            if let Some((_, sm)) = history.last() {
+                if matches!(sm.message.role, MessageRole::Assistant)
+                    && sm.message.tool_calls.is_some()
                     && history
                         .iter()
-                        .filter(|(_, m)| matches!(m.role, MessageRole::Assistant))
+                        .filter(|(_, sm)| matches!(sm.message.role, MessageRole::Assistant))
                         .count()
                         > 1
                 {
@@ -366,5 +383,51 @@ impl Subscribers {
 impl Default for Subscribers {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ── Cancelled Tool Content ────────────────────────────────────────────────
+
+/// 工具被取消/中断时的 content 结构体。
+///
+/// 由 `close_tool_calls_with_reason`（emit）和 `History::push_cancelled_tool`（持久化）共用，
+/// 保证实时事件与历史加载的格式一致。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ToolExecuteError {
+    pub error: bool,
+    pub cancelled: bool,
+    pub message: String,
+}
+
+impl ToolExecuteError {
+    /// 构造 ToolExecuteError。
+    pub fn build(reason: &str) -> Self {
+        Self {
+            error: false,
+            cancelled: false,
+            message: reason.to_string(),
+        }
+    }
+
+    /// 设置 error 标志（返回 self 以支持链式调用）。
+    pub fn set_error(mut self, v: bool) -> Self {
+        self.error = v;
+        self
+    }
+
+    /// 设置 cancelled 标志（返回 self 以支持链式调用）。
+    pub fn set_cancelled(mut self, v: bool) -> Self {
+        self.cancelled = v;
+        self
+    }
+
+    /// 转换为 JSON 字符串（用于 `Message.content` 持久化）。
+    pub fn to_json_string(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    /// 转换为 `serde_json::Value`（用于 `ToolExecuted.content` 事件 emit）。
+    pub fn to_value(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
     }
 }

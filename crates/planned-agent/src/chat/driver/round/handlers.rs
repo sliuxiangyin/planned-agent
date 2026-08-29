@@ -16,6 +16,7 @@ use super::super::confirm::await_confirm;
 use super::UIActionStrategy;
 use crate::chat::service::ChatEvent;
 use crate::chat::state::{Command, State};
+use crate::chat::storage::ErrorType;
 use crate::chat::tools::parse_ui_actions;
 
 /// UI 工具调用结果。
@@ -66,7 +67,7 @@ pub(super) async fn handle_ui_tool_call<
                 "choice": choice,
                 "action_id": action_id
             });
-            state.history.push_tool(&call.id, &tool_content);
+            state.history.push_tool(&call.id, &tool_content, ErrorType::None);
         }
         UIActionStrategy::EmitAndSuspend => {
             return Ok(UIActionOutcome::Suspended {
@@ -122,7 +123,12 @@ pub(super) async fn execute_backend_tool_call<
         "[round] 工具 {} 执行完毕: is_error={}",
         call.function.name, is_error
     );
-    state.history.push_tool(&call.id, &content);
+    let error_type = if is_error {
+        ErrorType::ExecutionError
+    } else {
+        ErrorType::None
+    };
+    state.history.push_tool(&call.id, &content, error_type);
     state
         .subscribers
         .emit(ChatEvent::Chat(CoreChatEvent::ToolExecuted {

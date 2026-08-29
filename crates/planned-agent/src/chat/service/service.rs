@@ -232,6 +232,11 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         self.state.history.snapshot()
     }
 
+    /// 当前历史快照（含错误类型元数据，用于 GUI 历史加载）。
+    pub fn history_store(&self) -> Vec<crate::chat::storage::StoreMessage> {
+        self.state.history.snapshot_store()
+    }
+
     pub fn clear(&self) {
         let state = self.state.run_state.lock().unwrap();
         if matches!(*state, crate::chat::state::RunState::Running | crate::chat::state::RunState::AwaitingUserAction) {

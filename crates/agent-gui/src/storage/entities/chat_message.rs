@@ -14,11 +14,9 @@ pub struct Model {
     pub message_json: String,
     /// 显示排序序号
     pub sequence_order: i32,
-    /// 消息类型：user / text / reasoning / tool_call / tool_result
-    pub msg_type: String,
-    /// 工具执行是否失败（仅 tool_result 有意义）
-    #[sea_orm(default_value = false)]
-    pub is_error: bool,
+    /// 错误类型：0=无错误，1=工具执行错误，2=中断错误
+    #[sea_orm(default_value = 0)]
+    pub is_error_type: i32,
     pub created_at: String,
 }
 

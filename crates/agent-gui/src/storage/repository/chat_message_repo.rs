@@ -23,8 +23,7 @@ impl ChatMessageRepo {
         plan_id: &str,
         message_json: &str,
         sequence_order: i32,
-        msg_type: &str,
-        is_error: bool,
+        is_error_type: i32,
     ) -> StorageResult<chat_message::Model> {
         let now = Utc::now().to_rfc3339();
         let id = Uuid::new_v4().to_string();
@@ -33,8 +32,7 @@ impl ChatMessageRepo {
             plan_id: Set(plan_id.to_string()),
             message_json: Set(message_json.to_string()),
             sequence_order: Set(sequence_order),
-            msg_type: Set(msg_type.to_string()),
-            is_error: Set(is_error),
+            is_error_type: Set(is_error_type),
             created_at: Set(now),
         };
         let res = model.insert(&self.db).await?;
@@ -96,17 +94,12 @@ impl ChatMessageRepo {
         &self,
         id: &str,
         message_json: &str,
-        msg_type: &str,
     ) -> StorageResult<()> {
         chat_message::Entity::update_many()
             .filter(chat_message::Column::Id.eq(id))
             .col_expr(
                 chat_message::Column::MessageJson,
                 Expr::val(message_json),
-            )
-            .col_expr(
-                chat_message::Column::MsgType,
-                Expr::val(msg_type),
             )
             .exec(&self.db)
             .await?;

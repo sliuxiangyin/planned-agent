@@ -17,6 +17,61 @@
 
 use planned_agent_core::ai::types::Message;
 
+// ── ErrorType ─────────────────────────────────────────────────────────────
+
+/// 消息错误类型（用于区分正常消息、执行错误、中断取消）。
+///
+/// 与数据库列 `is_error_type: INTEGER` 一一对应（0/1/2）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[repr(i32)]
+pub enum ErrorType {
+    /// 无错误
+    None = 0,
+    /// 工具执行失败
+    ExecutionError = 1,
+    /// 被中断/取消
+    Cancelled = 2,
+}
+
+impl ErrorType {
+    /// 从数据库 `INTEGER` 值转换。
+    pub fn from_i32(v: i32) -> Self {
+        match v {
+            1 => ErrorType::ExecutionError,
+            2 => ErrorType::Cancelled,
+            _ => ErrorType::None,
+        }
+    }
+}
+
+// ── StoreMessage ──────────────────────────────────────────────────────────
+
+/// 持久化消息包装：`Message` + 错误类型元数据。
+///
+/// `ChatHistoryStore` 的所有方法统一使用 `StoreMessage`，
+/// 替代直接使用 `Message`，使 store 层可以携带错误分类信息。
+#[derive(Debug, Clone)]
+pub struct StoreMessage {
+    pub message: Message,
+    pub is_error_type: ErrorType,
+}
+
+impl StoreMessage {
+    pub fn new(message: Message, is_error_type: ErrorType) -> Self {
+        Self {
+            message,
+            is_error_type,
+        }
+    }
+
+    /// 无错误的便捷构造。
+    pub fn normal(message: Message) -> Self {
+        Self::new(message, ErrorType::None)
+    }
+}
+
+// ── ChatHistoryStore trait ────────────────────────────────────────────────
+
 /// 消息级持久化接口，与 `History` 的操作一一对应。
 ///
 /// 使用 `String` 作为持久化 ID 类型：
@@ -24,13 +79,13 @@ use planned_agent_core::ai::types::Message;
 /// - SQLite 实现返回 UUID 主键。
 pub trait ChatHistoryStore: Send + Sync {
     /// 恢复历史（`History::new` 时调用一次，填入内存热数据）。
-    fn load(&self) -> Vec<Message>;
+    fn load(&self) -> Vec<StoreMessage>;
 
     /// 追加一条消息，返回持久化 ID。
-    fn append(&self, msg: &Message) -> String;
+    fn append(&self, msg: &StoreMessage) -> String;
 
     /// 根据 ID 更新消息内容。
-    fn update(&self, id: &str, msg: &Message);
+    fn update(&self, id: &str, msg: &StoreMessage);
 
     /// 回滚到指定长度（`rollback_to` / `pop_last` / `clean_unclosed` 后调用）。
     ///
@@ -40,6 +95,8 @@ pub trait ChatHistoryStore: Send + Sync {
     /// 清空会话（`clear` / `reset_session` 后调用）。
     fn clear(&self);
 }
+
+// ── InMemoryStore ─────────────────────────────────────────────────────────
 
 /// 默认内存实现：不持久化，所有操作为空操作。
 ///
@@ -59,15 +116,15 @@ impl Default for InMemoryStore {
 }
 
 impl ChatHistoryStore for InMemoryStore {
-    fn load(&self) -> Vec<Message> {
+    fn load(&self) -> Vec<StoreMessage> {
         Vec::new()
     }
 
-    fn append(&self, _msg: &Message) -> String {
+    fn append(&self, _msg: &StoreMessage) -> String {
         String::new() // 内存实现不实际存储
     }
 
-    fn update(&self, _id: &str, _msg: &Message) {
+    fn update(&self, _id: &str, _msg: &StoreMessage) {
         // 不落盘
     }
 

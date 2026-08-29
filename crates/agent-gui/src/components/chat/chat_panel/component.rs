@@ -8,11 +8,10 @@
 //! - 清空会话二次确认弹窗
 //!
 //! 业务逻辑（ChatFlow、ChatService 初始化）由调用方在页面层处理。
-
-use std::collections::HashMap;
+//! 气泡数据由 `ChatSignals` 维护（`bubbles` 历史 + `active` 当前 turn），
+//! 本组件只读、只渲染。
 
 use dioxus::prelude::*;
-use planned_agent_core::ai::types::{MessageContent, MessageRole};
 
 use dioxus_icons::lucide::{ArrowUp, Brain, ChevronDown, FileText, Square, Thermometer};
 
@@ -21,9 +20,7 @@ use crate::components::alert_dialog::{
     AlertDialogTitle,
 };
 use crate::components::button::{Button, ButtonSize, ButtonVariant};
-use crate::components::chat::chat_flow::{
-    send_message, ChatMessage, ChatSignals, PendingUI, ToolCallPhase, ToolViewData,
-};
+use crate::components::chat::chat_flow::{send_message, Bubble, ChatSignals, PendingUI};
 use crate::components::chat::chat_ui_actions_view::ChatUIActionsView;
 use crate::components::chat::reasoning_view::ReasoningView;
 use crate::components::chat::tool_view::ToolView;
@@ -43,139 +40,8 @@ use std::sync::Arc;
 #[css_module("/src/components/chat/chat_panel/style.css")]
 struct Styles;
 
-// ── 渲染数据结构（预计算，rsx 只负责布局）─────────────────────────────────
-
-/// 单条消息的渲染数据。
-#[derive(Clone)]
-struct RenderMessage {
-    text: String,
-    reasoning: String,
-    is_streaming: bool,
-    tool_calls: Vec<ToolViewData>,
-}
-
-/// 一组气泡的渲染数据（连续同角色消息合并为一个气泡）。
-#[derive(Clone)]
-struct RenderBubble {
-    is_assistant: bool,
-    messages: Vec<RenderMessage>,
-    is_streaming: bool,
-}
-
-/// 从 `ChatMessage` 列表构建渲染气泡。
-///
-/// 严格按 OpenAI 消息序列渲染：`User → Assistant(tool_calls) → Tool → Assistant(text)`。
-/// - User → 独立 user 气泡
-/// - Assistant → 独立 assistant 气泡（reasoning + ToolView + text），
-///   无论是否携带 tool_calls，text 都保留渲染（assistant 可边说边调用工具）
-/// - Tool → 不产生气泡，按 `tool_call_id` 回填到对应 Assistant 的 ToolViewData.result
-fn build_bubbles(chat_msgs: &[ChatMessage]) -> Vec<RenderBubble> {
-    tracing::info!(target: "render", "build_bubbles: 输入 {} 条消息, roles={:?}", chat_msgs.len(),
-        chat_msgs.iter().map(|m| format!("{}:{:?}", m.sequence_order, m.message.role)).collect::<Vec<_>>()
-    );
-    let mut bubbles: Vec<RenderBubble> = Vec::new();
-    // tool_call_id → (bubble 索引, msg 索引, entry 索引)，供 Tool 消息精确回填 result
-    let mut tool_index: HashMap<String, (usize, usize, usize)> = HashMap::new();
-
-    for cm in chat_msgs {
-        match cm.message.role {
-            MessageRole::User => {
-                bubbles.push(RenderBubble {
-                    is_assistant: false,
-                    messages: vec![to_render_message(cm)],
-                    is_streaming: false,
-                });
-            }
-            // Assistant：独立气泡，同时渲染 reasoning / tool_calls / text
-            MessageRole::Assistant => {
-                let mut render_msg = to_render_message(cm);
-                render_msg.tool_calls = resolve_tool_entries(cm);
-                let bubble_idx = bubbles.len();
-                for (entry_idx, entry) in render_msg.tool_calls.iter().enumerate() {
-                    tool_index.insert(entry.tool_call_id.clone(), (bubble_idx, 0, entry_idx));
-                }
-                bubbles.push(RenderBubble {
-                    is_assistant: true,
-                    messages: vec![render_msg],
-                    is_streaming: cm.is_streaming,
-                });
-            }
-            // Tool：按 tool_call_id 回填 result，不产生独立气泡
-            MessageRole::Tool => {
-                if let Some(id) = cm.tool_call_id.as_deref() {
-                    if let Some(&(b, m, e)) = tool_index.get(id) {
-                        if let Some(result) = parse_tool_result(cm) {
-                            bubbles[b].messages[m].tool_calls[e].result = Some(result);
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    bubbles
-}
-
-/// 组合一条消息的 ToolView 渲染数据。
-///
-/// `name`/`arguments` 以 `Message.tool_calls` 为权威；
-/// `phase`/`result`/`is_error` 取自实时 `tool_call_entries`（按 tool_call_id 关联，
-/// 无则视为 Completed —— 历史加载后无实时状态）。
-fn resolve_tool_entries(cm: &ChatMessage) -> Vec<ToolViewData> {
-    let Some(tcs) = &cm.message.tool_calls else {
-        return Vec::new();
-    };
-    tcs.iter()
-        .map(|tc| {
-            let state = cm
-                .tool_call_entries
-                .iter()
-                .find(|e| e.tool_call_id == tc.id);
-            ToolViewData {
-                tool_call_id: tc.id.clone(),
-                name: tc.function.name.clone(),
-                arguments: tc.function.arguments.clone(),
-                phase: state
-                    .map(|s| s.phase.clone())
-                    .unwrap_or(ToolCallPhase::Completed),
-                result: state.and_then(|s| s.result.clone()),
-                is_error: state.map(|s| s.is_error).unwrap_or(false),
-            }
-        })
-        .collect()
-}
-
-/// 解析 Tool 消息的 content（JSON 字符串）为结果值。
-///
-/// 同时处理两种 content 变体：
-/// - `MessageContent::Text`：实时 streaming 路径创建（`tool_call_executed`）
-/// - `MessageContent::ToolResult`：服务端持久化后加载（`push_tool` / `reconcile_with_snapshot`）
-fn parse_tool_result(cm: &ChatMessage) -> Option<serde_json::Value> {
-    let content_text = cm.message.content.as_ref().and_then(|c| match c {
-        MessageContent::Text { text } => Some(text.as_str()),
-        MessageContent::ToolResult { content, .. } => Some(content.as_str()),
-        _ => None,
-    })?;
-    Some(
-        serde_json::from_str(content_text)
-            .unwrap_or_else(|_| serde_json::Value::String(content_text.to_string())),
-    )
-}
-
-/// 将 `ChatMessage` 转换为渲染数据。
-fn to_render_message(cm: &ChatMessage) -> RenderMessage {
-    RenderMessage {
-        text: display_text(&cm.message).to_string(),
-        reasoning: cm.message.reasoning_content.clone().unwrap_or_default(),
-        is_streaming: cm.is_streaming,
-        tool_calls: Vec::new(), // 由 build_bubbles 填充
-    }
-}
-
 // ── Props ──────────────────────────────────────────────────────────────────
 
-/// 完整聊天面板 Props。
 /// 完整聊天面板 Props。
 #[derive(Props, Clone)]
 pub struct ChatPanelProps {
@@ -242,14 +108,16 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
     };
 
     use_effect(move || {
-        let _len = chat.messages.read().len();
+        let _len = chat.bubbles.read().len();
+        let _active = chat.active.read().len();
         let _has_pending = chat.pending_ui.read().is_some();
         let _ = document::eval(
             "setTimeout(() => { const el = document.getElementById('chat-scroll'); if (el) el.scrollTop = el.scrollHeight; }, 100);"
         );
     });
 
-    let bubbles = build_bubbles(&chat.messages.read());
+    let bubbles = chat.bubbles.read();
+    let active = chat.active.read();
 
     rsx! {
         div { class: Styles::flexible_page,
@@ -262,7 +130,7 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
                     id: "chat-scroll",
                     div { class: Styles::chat_messages__list,
 
-                        for bubble in bubbles.iter() {
+                        for bubble in bubbles.iter().chain(active.iter()) {
                             if bubble.is_assistant {
                                 { render_assistant_bubble(bubble) }
                             } else {
@@ -330,7 +198,7 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
 
 // ── 气泡渲染 ──────────────────────────────────────────────────────────────
 
-fn render_assistant_bubble(bubble: &RenderBubble) -> Element {
+fn render_assistant_bubble(bubble: &Bubble) -> Element {
     let bubble_class = if bubble.is_streaming {
         format!(
             "{} {} {}",
@@ -348,14 +216,12 @@ fn render_assistant_bubble(bubble: &RenderBubble) -> Element {
 
     rsx! {
         div { class: "{bubble_class}",
-            for msg in bubble.messages.iter() {
-                { render_assistant_message(msg) }
-            }
+            { render_assistant_message(bubble) }
         }
     }
 }
 
-fn render_assistant_message(msg: &RenderMessage) -> Element {
+fn render_assistant_message(msg: &Bubble) -> Element {
     let has_reasoning = !msg.reasoning.is_empty();
     // 有工具调用进行中时用 ToolView 的 Pending/Running 动画代替光标
     let show_cursor =
@@ -378,14 +244,12 @@ fn render_assistant_message(msg: &RenderMessage) -> Element {
     }
 }
 
-fn render_user_bubble(bubble: &RenderBubble) -> Element {
+fn render_user_bubble(bubble: &Bubble) -> Element {
     let cls = format!("{} {}", Styles::chat_message, Styles::chat_message__user);
 
     rsx! {
-        for msg in bubble.messages.iter() {
-            div { class: "{cls}",
-                crate::components::markdown::Markdown { text: msg.text.clone() }
-            }
+        div { class: "{cls}",
+            crate::components::markdown::Markdown { text: bubble.text.clone() }
         }
     }
 }
@@ -556,12 +420,4 @@ fn render_composer(
 /// 模板路径 → 短标签。
 pub fn template_label(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).to_string()
-}
-
-/// 从 `Message` 取出可显示文本。
-fn display_text(msg: &planned_agent_core::ai::types::Message) -> &str {
-    match &msg.content {
-        Some(planned_agent_core::ai::types::MessageContent::Text { text }) => text.as_str(),
-        _ => "",
-    }
 }

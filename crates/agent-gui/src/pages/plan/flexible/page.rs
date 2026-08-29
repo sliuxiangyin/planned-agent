@@ -15,7 +15,7 @@ use planned_agent_prompt_manager::FilePromptManager;
 
 use crate::components::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::chat::{
-    chat_flow::{ensure_subscription, handle_user_action, ChatMessage, ChatSignals, PendingUI},
+    chat_flow::{ensure_subscription, handle_user_action, Bubble, ChatSignals, PendingUI},
     ChatPanel,
 };
 use crate::components::page_header::PageHeader;
@@ -36,13 +36,15 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
     let plan_id = props.plan_id.clone();
 
     // ── 纯内存聊天状态（展示缓冲，持久化由服务端 store 处理）──
-    let messages = use_signal_sync(Vec::<ChatMessage>::new);
+    let bubbles = use_signal_sync(Vec::<Bubble>::new);
+    let active = use_signal_sync(Vec::<Bubble>::new);
     let pending_ui = use_signal_sync(|| None::<PendingUI>);
     let input_text = use_signal_sync(String::new);
     let pending_tool_call_id = use_signal_sync(|| None::<String>);
     let subscription = use_signal_sync(|| None::<planned_agent::chat::SubscriptionGuard>);
     let mut chat = ChatSignals {
-        messages,
+        bubbles,
+        active,
         pending_ui,
         input_text,
         pending_tool_call_id,
@@ -106,7 +108,7 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
             initialized.set(true);
             let svc = svc_opt.read().clone().unwrap();
             // 从服务端 store 恢复历史
-            let history = svc.history();
+            let history = svc.history_store();
             if !history.is_empty() {
                 tracing::info!("灵活模式: 从服务端加载 {} 条历史消息", history.len());
                 chat.load_from_history(&history);

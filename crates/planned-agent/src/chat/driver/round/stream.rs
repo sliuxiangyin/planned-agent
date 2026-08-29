@@ -56,23 +56,36 @@ pub(super) fn process_stream_chunk(
                     if let Some(args) = &func.arguments {
                         if !args.is_empty() {
                             acc.arguments.push_str(args);
-                            if !acc.id.is_empty() {
+                            if acc.start_emitted {
+                                // Start 已发射，直接广播
                                 subscribers.emit(ChatEvent::Chat(
                                     CoreChatEvent::ToolCallArgsDelta {
                                         id: acc.id.clone(),
                                         delta: args.clone(),
                                     },
                                 ));
+                            } else if !acc.id.is_empty() {
+                                // Start 尚未发射，暂存缓冲区，等 Start 后 flush
+                                acc.pending_deltas.push(args.clone());
                             }
                         }
                     }
                 }
+                // id + name 都收集到后，先发射 Start，再 flush 缓冲区
                 if !acc.id.is_empty() && !acc.name.is_empty() && !acc.start_emitted {
                     subscribers.emit(ChatEvent::Chat(CoreChatEvent::ToolCallStart {
                         id: acc.id.clone(),
                         name: acc.name.clone(),
                     }));
                     acc.start_emitted = true;
+                    for delta in acc.pending_deltas.drain(..) {
+                        subscribers.emit(ChatEvent::Chat(
+                            CoreChatEvent::ToolCallArgsDelta {
+                                id: acc.id.clone(),
+                                delta,
+                            },
+                        ));
+                    }
                 }
             }
         }

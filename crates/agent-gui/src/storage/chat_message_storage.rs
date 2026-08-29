@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use planned_agent_core::ai::types::{Message, MessageRole};
-use planned_agent::chat::storage::ChatHistoryStore;
+use planned_agent::chat::storage::{ChatHistoryStore, ErrorType, StoreMessage};
+use planned_agent_core::ai::types::Message;
 
 use crate::storage::repository::ChatMessageRepo;
 
@@ -20,7 +20,7 @@ impl ChatMessageStore {
 }
 
 impl ChatHistoryStore for ChatMessageStore {
-    fn load(&self) -> Vec<Message> {
+    fn load(&self) -> Vec<StoreMessage> {
         let plan_id = self.plan_id.clone();
         let repo = self.repo.clone();
         let rows = match tokio::task::block_in_place(|| {
@@ -36,7 +36,10 @@ impl ChatHistoryStore for ChatMessageStore {
         let mut result = Vec::with_capacity(rows.len());
         for row in &rows {
             match serde_json::from_str::<Message>(&row.message_json) {
-                Ok(msg) => result.push(msg),
+                Ok(msg) => {
+                    let error_type = ErrorType::from_i32(row.is_error_type);
+                    result.push(StoreMessage::new(msg, error_type));
+                }
                 Err(e) => {
                     tracing::warn!("反序列化消息失败 (id={}): {}", row.id, e);
                 }
@@ -53,13 +56,12 @@ impl ChatHistoryStore for ChatMessageStore {
         result
     }
 
-    fn append(&self, msg: &Message) -> String {
+    fn append(&self, msg: &StoreMessage) -> String {
         let plan_id = self.plan_id.clone();
         let repo = self.repo.clone();
-        let msg_type = determine_msg_type(msg);
-        let is_error = false;
+        let is_error_type = msg.is_error_type as i32;
 
-        let msg_json = match serde_json::to_string(msg) {
+        let msg_json = match serde_json::to_string(&msg.message) {
             Ok(j) => j,
             Err(e) => {
                 tracing::error!("序列化消息失败: {}", e);
@@ -74,7 +76,7 @@ impl ChatHistoryStore for ChatMessageStore {
                     Err(_) => 1,
                 };
                 let row = repo
-                    .create(&plan_id, &msg_json, next_seq, msg_type, is_error)
+                    .create(&plan_id, &msg_json, next_seq, is_error_type)
                     .await?;
                 Ok::<_, anyhow::Error>(row)
             })
@@ -95,13 +97,11 @@ impl ChatHistoryStore for ChatMessageStore {
         }
     }
 
-    fn update(&self, id: &str, msg: &Message) {
-        let _plan_id = self.plan_id.clone();
+    fn update(&self, id: &str, msg: &StoreMessage) {
         let repo = self.repo.clone();
-        let msg_type = determine_msg_type(msg);
         let id_owned = id.to_string();
 
-        let msg_json = match serde_json::to_string(msg) {
+        let msg_json = match serde_json::to_string(&msg.message) {
             Ok(j) => j,
             Err(e) => {
                 tracing::error!("序列化消息失败: {}", e);
@@ -110,7 +110,7 @@ impl ChatHistoryStore for ChatMessageStore {
         };
 
         tokio::spawn(async move {
-            if let Err(e) = repo.update_by_id(&id_owned, &msg_json, msg_type).await {
+            if let Err(e) = repo.update_by_id(&id_owned, &msg_json).await {
                 tracing::error!("更新聊天消息失败 (id={}): {}", id_owned, e);
             }
         });
@@ -135,22 +135,5 @@ impl ChatHistoryStore for ChatMessageStore {
                 tracing::error!("清空聊天消息失败: {}", e);
             }
         });
-    }
-}
-
-fn determine_msg_type(msg: &Message) -> &'static str {
-    match msg.role {
-        MessageRole::User => "user",
-        MessageRole::Assistant => {
-            if msg.tool_calls.is_some() && !msg.tool_calls.as_ref().unwrap().is_empty() {
-                "tool_call"
-            } else if msg.reasoning_content.is_some() {
-                "reasoning"
-            } else {
-                "text"
-            }
-        }
-        MessageRole::Tool => "tool_result",
-        _ => "text",
     }
 }

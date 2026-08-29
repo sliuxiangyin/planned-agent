@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 
 use crate::chat::service::{SendOutcome, ChatEvent};
 use crate::chat::state::{Command, RunState, State};
+use crate::chat::storage::ErrorType;
 use round::{run_conversation, ConversationOutcome, UIActionStrategy};
 
 pub(super) async fn driver_loop<PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'static>(
@@ -76,7 +77,7 @@ pub(super) async fn driver_loop<PM: planned_agent_core::prompt::PromptManager + 
                     "choice": choice,
                     "action_id": action_id
                 });
-                state.history.push_tool(&tool_call_id, &tool_content);
+                state.history.push_tool(&tool_call_id, &tool_content, ErrorType::None);
                 *state.run_state.lock().unwrap() = RunState::Running;
 
                 let bridge = bridge::SubAgentBridge::new(state.clone());

@@ -67,16 +67,11 @@ pub(super) fn close_tool_calls_with_reason<
 ) {
     for tc in tool_calls {
         state.history.push_cancelled_tool(&tc.id, reason);
-        let content = serde_json::json!({
-            "error": true,
-            "cancelled": true,
-            "message": reason
-        });
         state.subscribers.emit(ChatEvent::Chat(CoreChatEvent::ToolExecuted {
             id: tc.id.clone(),
             name: tc.function.name.clone(),
             is_error: true,
-            content,
+            content: serde_json::Value::String(reason.to_string()),
         }));
     }
 }

@@ -26,12 +26,11 @@ impl MigrationTrait for Migration {
                             .integer()
                             .not_null(),
                     )
-                    .col(ColumnDef::new(ChatMessages::MsgType).string().not_null())
                     .col(
-                        ColumnDef::new(ChatMessages::IsError)
-                            .boolean()
+                        ColumnDef::new(ChatMessages::IsErrorType)
+                            .integer()
                             .not_null()
-                            .default(false),
+                            .default(0),
                     )
                     .col(ColumnDef::new(ChatMessages::CreatedAt).string().not_null())
                     .foreign_key(
@@ -81,7 +80,6 @@ enum ChatMessages {
     PlanId,
     MessageJson,
     SequenceOrder,
-    MsgType,
-    IsError,
+    IsErrorType,
     CreatedAt,
 }

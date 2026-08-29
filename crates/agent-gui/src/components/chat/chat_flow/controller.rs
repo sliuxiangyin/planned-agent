@@ -29,17 +29,7 @@ pub fn send_message(
 ) {
     chat.clear_pending();
 
-    let seq_start = chat
-        .messages
-        .read()
-        .iter()
-        .map(|m| m.sequence_order)
-        .max()
-        .unwrap_or(0)
-        + 1;
-    let mut seq = seq_start;
-
-    chat.push_user_turn(text.clone(), &mut seq);
+    chat.push_user_turn(text.clone());
 
     if let Err(e) = svc.send_text(text) {
         chat.stop_streaming();
@@ -64,7 +54,7 @@ pub fn ensure_subscription(chat: &mut ChatSignals, chat_svc: &Arc<ChatService<Fi
 pub fn handle_event(mut chat: ChatSignals, ev: ServiceChatEvent) {
     match ev {
         ServiceChatEvent::Chat(ChatEvent::TextDelta(chunk)) => {
-            chat.append_streaming(&chunk);
+            chat.append_streaming_text(&chunk);
         }
         ServiceChatEvent::Chat(ChatEvent::ReasoningDelta(chunk)) => {
             chat.append_streaming_reasoning(&chunk);
@@ -73,16 +63,7 @@ pub fn handle_event(mut chat: ChatSignals, ev: ServiceChatEvent) {
             let was_streaming = chat.is_streaming();
             tracing::info!(target: "event", event = "RoundStart", was_streaming, "RoundStart");
             if !was_streaming {
-                let seq = chat
-                    .messages
-                    .read()
-                    .iter()
-                    .map(|m| m.sequence_order)
-                    .max()
-                    .unwrap_or(0)
-                    + 1;
-                let mut seq = seq;
-                chat.push_assistant_placeholder(&mut seq);
+                chat.push_assistant_placeholder();
             }
         }
         ServiceChatEvent::Chat(ChatEvent::ToolCallStart { id, name })
@@ -114,7 +95,6 @@ pub fn handle_event(mut chat: ChatSignals, ev: ServiceChatEvent) {
             content,
         }) => {
             tracing::info!(target: "event", event = "ToolExecuted", id = %id, name = %name, is_error, "ToolExecuted");
-            // tool_call_executed 内部已创建 Tool 消息，无需在此 persist
             chat.tool_call_executed(&id, &name, is_error, &content);
         }
         ServiceChatEvent::Chat(ChatEvent::RoundEnd { .. }) => {
@@ -138,19 +118,21 @@ pub fn handle_event(mut chat: ChatSignals, ev: ServiceChatEvent) {
         ServiceChatEvent::Done { cancelled } => {
             tracing::info!(target: "event", event = "Done", cancelled, "Done");
             chat.stop_streaming();
+            chat.finish_turn();
             chat.clear_pending();
             chat.pending_tool_call_id.set(None);
         }
         ServiceChatEvent::Error(e) => {
             tracing::error!(target: "event", event = "Error", error = %e, "聊天事件错误");
-            // 后端已通过流式事件补了 error 消息，前端只做清理
+            // 后端已通过流式事件补了 error 消息，前端只做清理 + 闭合当前 turn
             chat.stop_streaming();
+            chat.finish_turn();
             chat.clear_pending();
         }
         ServiceChatEvent::HistoryUpdated { messages } => {
-            // 用快照校准 GUI messages（reconcile_with_snapshot 保留 streaming 状态）
+            // 用快照校准 GUI 气泡（reconcile 保留 active 中正在 streaming 的气泡）
             tracing::info!(target: "event", event = "HistoryUpdated", count = messages.len(), "HistoryUpdated");
-            // chat.reconcile_with_snapshot(&messages);
+            // 保持注释（与现状一致）；启用时用 `chat.reconcile_with_snapshot(&messages)`。
         }
     }
 }
@@ -165,20 +147,9 @@ pub fn handle_user_action(
     choice: String,
     pending: PendingUI,
 ) {
-    if let Some(asst_idx) = chat.last_assistant_idx() {
-        chat.append_text(asst_idx, &format!("\n\n---\n\n**{choice}**\n\n"));
-    }
+    chat.append_to_last_assistant(&format!("\n\n---\n\n**{choice}**\n\n"));
 
-    let seq = chat
-        .messages
-        .read()
-        .iter()
-        .map(|m| m.sequence_order)
-        .max()
-        .unwrap_or(0)
-        + 1;
-    let mut seq = seq;
-    chat.push_assistant_placeholder(&mut seq);
+    chat.push_assistant_placeholder();
     chat.clear_pending();
     chat.pending_tool_call_id.set(None);
 
