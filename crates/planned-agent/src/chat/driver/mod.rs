@@ -127,10 +127,10 @@ fn finish_send<PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'st
         }
         Err(e) => {
             tracing::info!("[driver] run_conversation 错误: {}", e);
-            state.history.rollback_to_store_id(&_store_id);
-            state.subscribers.emit(ChatEvent::HistoryUpdated {
-                messages: state.history.snapshot(),
-            });
+            // 先闭合可能存在的未闭合 tool_calls
+            round::close::close_unclosed_tool_calls(state);
+            // 补一条 error assistant 消息
+            round::close::close_orphaned_user(state, &format!("Error: {}", e));
             state.subscribers.emit(ChatEvent::Error(e.to_string()));
             let _ = done.send(SendOutcome::Failed(e.to_string()));
         }

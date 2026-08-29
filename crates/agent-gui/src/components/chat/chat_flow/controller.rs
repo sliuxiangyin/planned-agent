@@ -143,15 +143,14 @@ pub fn handle_event(mut chat: ChatSignals, ev: ServiceChatEvent) {
         }
         ServiceChatEvent::Error(e) => {
             tracing::error!(target: "event", event = "Error", error = %e, "聊天事件错误");
-            if chat.pending_ui.read().is_none() {
-                chat.stop_streaming();
-                chat.append_to_last_assistant(&format!("\n\n*1聊天出错: {}*", e));
-            }
+            // 后端已通过流式事件补了 error 消息，前端只做清理
+            chat.stop_streaming();
+            chat.clear_pending();
         }
         ServiceChatEvent::HistoryUpdated { messages } => {
             // 用快照校准 GUI messages（reconcile_with_snapshot 保留 streaming 状态）
             tracing::info!(target: "event", event = "HistoryUpdated", count = messages.len(), "HistoryUpdated");
-            chat.reconcile_with_snapshot(&messages);
+            // chat.reconcile_with_snapshot(&messages);
         }
     }
 }
