@@ -52,4 +52,4 @@ mod tools;
 mod tests;
 
 pub use service::{ChatConfig, ChatEvent, ChatService, SendTicket, SubscriptionGuard, SubscriptionId};
-pub use sub_agent::{ChatSubAgentSession, SubAgentRunner};
+pub use sub_agent::{ChatSubAgentSession, ResultDecision, SubAgentResultCallback, SubAgentRunner};

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use planned_agent::chat::{ChatConfig, SubAgentRunner};
+use planned_agent::chat::{ChatConfig, SubAgentResultCallback, SubAgentRunner};
 use planned_agent_core::mcp::types::Tool;
 
 use super::{AiContext, PromptContext, ToolsContext};
@@ -33,6 +33,7 @@ pub fn register_sub_agent(
     prompt_template: &str,
     depth: u32,
     max_depth: u32,
+    result_callback: Option<Arc<dyn SubAgentResultCallback>>,
 ) {
     let tool = Tool {
         name: tool_name.to_string(),
@@ -50,6 +51,7 @@ pub fn register_sub_agent(
         },
         depth,
         max_depth,
+        result_callback,
     );
 
     tools_ctx

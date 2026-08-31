@@ -27,6 +27,44 @@ use tracing::info;
 
 use crate::chat::service::{ChatConfig, ChatEvent, ChatService, SendOutcome, SendTicket};
 
+// ── Callback ──────────────────────────────────────────────────────────────
+
+/// 子 agent 结果处理决策。
+///
+/// 回调返回此枚举，决定子 agent 最终 tool result 的内容。
+/// 决策结果会流入：父 agent 上下文（history）→ 父 agent 后续 LLM 调用 → GUI `ToolExecuted.content` → 持久化。
+pub enum ResultDecision {
+    /// 接受结果，原样返回。
+    ///
+    /// 父 agent 看到的是子 agent 原始输出（`extract_last_assistant_text` 的文本）。
+    Accept,
+    /// 处理后的结果：用 `new_text` 替换原始 content。
+    ///
+    /// 原始文本被丢弃，父 agent 及所有下游看到的都是你提供的 `new_text`。
+    /// 典型场景：从子 agent 大段 Markdown 中提取 JSON 块、清理格式、摘要等。
+    Transform(String),
+    /// 拒绝结果，发送纠正消息给子 agent，要求重新生成。
+    ///
+    /// - `String` 作为新的 user 消息发送给子 agent（如「输出格式错误，请严格输出 JSON」）
+    /// - 子 agent 重新生成后，回调会被再次触发（最多重试 2 次）
+    /// - 重试耗尽或子 agent 失败时，自动兜底使用原始结果
+    Retry(String),
+}
+
+/// 子 agent 结果回调：完成后可获取最终 tool result（用于外部解析/提取）。
+pub trait SubAgentResultCallback: Send + Sync {
+    /// 子 agent 完成后触发。
+    ///
+    /// - `agent_name`：子 agent 工具名（如 `"flexible_step1"`）
+    /// - `result`：最终 tool result（`content` 即为 `extract_last_assistant_text` 的文本）
+    ///
+    /// 返回 [`ResultDecision`]：
+    /// - `Accept`：接受结果
+    /// - `Transform(text)`：替换 content
+    /// - `Retry(msg)`：发送纠正消息给子 agent，重试后再次回调
+    fn on_result(&self, agent_name: &str, result: &ToolResult) -> ResultDecision;
+}
+
 // ── Runner ─────────────────────────────────────────────────────────────────
 
 /// 子 agent runner：持有 `ChatService` 工厂参数，每次 `start()`
@@ -43,6 +81,8 @@ pub struct SubAgentRunner {
     config: ChatConfig,
     depth: u32,
     max_depth: u32,
+    /// 结果回调：子 agent 完成后通知外部（纯通知，不改变 tool result）
+    result_callback: Option<Arc<dyn SubAgentResultCallback>>,
 }
 
 impl SubAgentRunner {
@@ -53,6 +93,7 @@ impl SubAgentRunner {
         config: ChatConfig,
         depth: u32,
         max_depth: u32,
+        result_callback: Option<Arc<dyn SubAgentResultCallback>>,
     ) -> Self {
         Self {
             ai_manager,
@@ -61,6 +102,7 @@ impl SubAgentRunner {
             config,
             depth,
             max_depth,
+            result_callback,
         }
     }
 }
@@ -122,7 +164,15 @@ impl SubAgentSessionRunner for SubAgentRunner {
         // 收集事件直到完成或挂起
         // - Completed/Failed：service 随函数返回后 drop
         // - Suspended：service clone 移入 ChatSubAgentSession 持有
-        collect_until_outcome(&service, ticket, &stream, self.depth, self.max_depth).await
+        collect_until_outcome(
+            &service,
+            ticket,
+            &stream,
+            self.depth,
+            self.max_depth,
+            self.result_callback.clone(),
+        )
+        .await
     }
 }
 
@@ -136,14 +186,21 @@ pub struct ChatSubAgentSession {
     service: ChatService<FilePromptManager>,
     depth: u32,
     max_depth: u32,
+    result_callback: Option<Arc<dyn SubAgentResultCallback>>,
 }
 
 impl ChatSubAgentSession {
-    pub fn new(service: ChatService<FilePromptManager>, depth: u32, max_depth: u32) -> Self {
+    pub fn new(
+        service: ChatService<FilePromptManager>,
+        depth: u32,
+        max_depth: u32,
+        result_callback: Option<Arc<dyn SubAgentResultCallback>>,
+    ) -> Self {
         Self {
             service,
             depth,
             max_depth,
+            result_callback,
         }
     }
 }
@@ -174,7 +231,15 @@ impl SubAgentSession for ChatSubAgentSession {
             .resume(&choice, &action_id)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        collect_until_outcome(&self.service, ticket, &stream, self.depth, self.max_depth).await
+        collect_until_outcome(
+            &self.service,
+            ticket,
+            &stream,
+            self.depth,
+            self.max_depth,
+            self.result_callback.clone(),
+        )
+        .await
     }
 }
 
@@ -188,6 +253,7 @@ async fn collect_until_outcome(
     stream: &ToolStreamSender,
     depth: u32,
     max_depth: u32,
+    result_callback: Option<Arc<dyn SubAgentResultCallback>>,
 ) -> Result<SubAgentRunOutcome> {
     info!("[子agent] collect_until_outcome 开始，注册事件监听");
 
@@ -239,20 +305,67 @@ async fn collect_until_outcome(
     // 等待子 agent 对话结果（区分完成 / 挂起 / 失败）
     match ticket.wait_outcome().await {
         SendOutcome::Completed => {
-            let history = service.history();
-            let last_text = extract_last_assistant_text(&history);
+            let mut last_text = extract_last_assistant_text(&service.history());
             info!("[子agent] 子 agent 完成，提取结果：{}", last_text);
-            Ok(SubAgentRunOutcome::Done(ToolResult {
+
+            // ── 回调决策 + 重试循环 ──
+            let max_retries = 2;
+            let final_text = if let Some(cb) = &result_callback {
+                let mut attempts = 0u32;
+                loop {
+                    let probe = ToolResult {
+                        call_id: String::new(),
+                        is_error: false,
+                        content: Value::String(last_text.clone()),
+                    };
+                    match cb.on_result(&stream.tool_name(), &probe) {
+                        ResultDecision::Accept => break last_text,
+                        ResultDecision::Transform(new) => break new,
+                        ResultDecision::Retry(msg) if attempts < max_retries => {
+                            attempts += 1;
+                            info!("[子agent] 回调要求重试 ({}/{}), 发送纠正消息", attempts, max_retries);
+                            match service.send_text(msg) {
+                                Ok(retry_ticket) => {
+                                    match retry_ticket.wait_outcome().await {
+                                        SendOutcome::Completed => {
+                                            last_text = extract_last_assistant_text(&service.history());
+                                            info!("[子agent] 重试完成，新结果：{}", last_text);
+                                            continue;
+                                        }
+                                        other => {
+                                            info!("[子agent] 重试未正常完成: {:?}，使用原始结果", other);
+                                            break last_text;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    info!("[子agent] 重试发送失败: {}，使用原始结果", e);
+                                    break last_text;
+                                }
+                            }
+                        }
+                        ResultDecision::Retry(_) => {
+                            info!("[子agent] 重试次数耗尽，使用原始结果");
+                            break last_text;
+                        }
+                    }
+                }
+            } else {
+                last_text
+            };
+
+            let result = ToolResult {
                 call_id: String::new(),
                 is_error: false,
-                content: Value::String(last_text),
-            }))
+                content: Value::String(final_text),
+            };
+            Ok(SubAgentRunOutcome::Done(result))
         }
         SendOutcome::Suspended { .. } => {
             info!("[子agent] 子 agent 挂起，构造 AwaitingUserAction");
             let (message, actions) = ui_request.lock().unwrap().take().unwrap_or_default();
             Ok(SubAgentRunOutcome::AwaitingUserAction {
-                session: Box::new(ChatSubAgentSession::new(service.clone(), depth, max_depth)),
+                session: Box::new(ChatSubAgentSession::new(service.clone(), depth, max_depth, result_callback.clone())),
                 message,
                 actions: serde_json::to_value(actions).unwrap_or_else(|_| Value::Array(vec![])),
             })

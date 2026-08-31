@@ -174,6 +174,7 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
             "flexible/flexible_step1",
             1,  // depth: 子 agent 嵌套深度
             2,  // max_depth: 最大允许嵌套深度
+            None,
         );
     }
 
@@ -202,6 +203,7 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
             "flexible/flexible_step2",
             1,  // depth: 子 agent 嵌套深度
             2,  // max_depth: 最大允许嵌套深度
+            super::step2_callback::create_step2_callback(),
         );
     }
 

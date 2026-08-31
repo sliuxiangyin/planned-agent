@@ -3,5 +3,6 @@
 //! - `page` — `FlexiblePage` 组件（子 agent 注册 + ChatPanel 集成）
 
 pub(crate) mod page;
+pub(crate) mod step2_callback;
 
 pub(crate) use page::FlexiblePage;
