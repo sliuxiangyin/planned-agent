@@ -234,6 +234,28 @@ ChatSignals.bubbles (历史气泡)  +  ChatSignals.active (当前 turn 气泡)
   → AgentView 状态更新为 Completed/Error，停止 streaming
 ```
 
+### 6.4 子 agent 持久化（is_agent_tool）
+
+`StoreMessage.is_agent_tool` 标记 assistant 消息的 tool_calls 是否包含 SubAgent 工具。
+
+**保存链路**：
+```
+History::push_assistant(msg)
+  → 检查 msg.tool_calls 里每个 name 的 ToolSource
+  → 若有 SubAgent → StoreMessage.is_agent_tool = true
+  → store.append → DB: chat_messages.is_agent_tool = true
+```
+
+**加载链路**：
+```
+store.load → StoreMessage.is_agent_tool = true
+  → build_bubbles → ToolViewData.is_sub_agent = true
+  → load_from_history → 为 is_sub_agent 工具创建 AgentViewData
+  → AgentView 回显（折叠面板 + 最终文本）
+```
+
+**数据库字段**：`chat_messages.is_agent_tool: BOOLEAN, default false`（直接在迁移文件定义，无历史兼容负担）。
+
 ---
 
 ## 6. Tool 调用生命周期（完整时序）
