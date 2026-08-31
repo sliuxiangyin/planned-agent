@@ -175,13 +175,19 @@ pub fn handle_user_action(
     choice: String,
     pending: PendingUI,
 ) {
-    chat.append_to_last_assistant(&format!("\n\n---\n\n**{choice}**\n\n"));
-
-    chat.push_assistant_placeholder();
-    chat.clear_pending();
-    chat.pending_tool_call_id.set(None);
-
+    // 子 agent 场景：用户选择追加到 AgentViewData，而非父 agent 气泡
     if let Some(run_id) = pending.run_id.clone() {
+        if chat.agent_views.read().contains_key(&run_id) {
+            chat.push_agent_event(&run_id, AgentEvent::TextDelta(
+                format!("\n\n---\n\n**{}**\n\n", choice)
+            ));
+        } else {
+            // fallback：agent_views 里找不到（历史加载后），写到父 agent 气泡
+            chat.append_to_last_assistant(&format!("\n\n---\n\n**{}**\n\n", choice));
+        }
+        chat.push_assistant_placeholder();
+        chat.clear_pending();
+        chat.pending_tool_call_id.set(None);
         let input = serde_json::json!({ "choice": choice, "action_id": action.id });
         if let Err(e) = svc.resume_sub_agent(&run_id, input) {
             chat.append_to_last_assistant(&format!("\n\n*子 agent 恢复出错: {}*", e));
@@ -189,6 +195,13 @@ pub fn handle_user_action(
         }
         return;
     }
+
+    // 主 agent 场景：写到父 agent 气泡
+    chat.append_to_last_assistant(&format!("\n\n---\n\n**{choice}**\n\n"));
+
+    chat.push_assistant_placeholder();
+    chat.clear_pending();
+    chat.pending_tool_call_id.set(None);
 
     if let Err(e) = svc.confirm_user_action(&pending.tool_call_id, &choice, &action.id) {
         chat.append_to_last_assistant(&format!("\n\n*交互提交失败: {}*", e));

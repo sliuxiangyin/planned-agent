@@ -157,29 +157,45 @@ impl ChatSignals {
     ///
     /// 同时为 `is_sub_agent` 的工具创建 `AgentViewData`（从 ToolResult.content 恢复文本）。
     pub fn load_from_history(&mut self, history: &[StoreMessage]) {
-        let built = build_bubbles(history);
-        // 为子 agent 工具创建 AgentViewData
-        let mut views = HashMap::new();
+        // 先创建 AgentViewData 骨架（从 is_agent_tool 的 assistant 消息的 tool_calls 提取 id/name）
+        let mut views: HashMap<String, AgentViewData> = HashMap::new();
+        for sm in history {
+            if sm.is_agent_tool {
+                if let Some(tcs) = &sm.message.tool_calls {
+                    for tc in tcs {
+                        if tc.function.name != "request_user_action" {
+                            views.entry(tc.id.clone()).or_insert_with(|| AgentViewData {
+                                tool_call_id: tc.id.clone(),
+                                name: tc.function.name.clone(),
+                                phase: ToolCallPhase::Completed,
+                                events: Vec::new(),
+                                is_streaming: false,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        // 重建气泡（子 agent 的 request_user_action 选择会追加到 views 里）
+        let built = build_bubbles(history, Some(&mut views));
+        // 用 ToolViewData.result 填充 AgentViewData 的文本（最终输出）
         for bubble in &built {
             for tc in &bubble.tool_calls {
                 if tc.is_sub_agent {
-                    let text = match &tc.result {
-                        Some(v) => {
-                            // ToolResult.content 可能是 Value::String（子 agent 最终文本）
-                            // 或 Value::Object（structured result）
-                            v.as_str().map(String::from)
-                                .or_else(|| v.get("content").and_then(|c| c.as_str()).map(String::from))
-                                .unwrap_or_else(|| serde_json::to_string_pretty(v).unwrap_or_default())
+                    if let Some(av) = views.get_mut(&tc.tool_call_id) {
+                        let text = match &tc.result {
+                            Some(v) => {
+                                v.as_str().map(String::from)
+                                    .or_else(|| v.get("content").and_then(|c| c.as_str()).map(String::from))
+                                    .unwrap_or_else(|| serde_json::to_string_pretty(v).unwrap_or_default())
+                            }
+                            None => String::new(),
+                        };
+                        if !text.is_empty() && av.events.is_empty() {
+                            av.events.push(AgentEvent::TextDelta(text));
                         }
-                        None => String::new(),
-                    };
-                    views.insert(tc.tool_call_id.clone(), AgentViewData {
-                        tool_call_id: tc.tool_call_id.clone(),
-                        name: tc.name.clone(),
-                        phase: if tc.is_error { ToolCallPhase::Error } else { ToolCallPhase::Completed },
-                        events: if text.is_empty() { vec![] } else { vec![AgentEvent::TextDelta(text)] },
-                        is_streaming: false,
-                    });
+                        av.phase = if tc.is_error { ToolCallPhase::Error } else { ToolCallPhase::Completed };
+                    }
                 }
             }
         }
@@ -196,7 +212,7 @@ impl ChatSignals {
     /// 当前 `HistoryUpdated` 分支在 controller 中保持注释，故标记允许 dead_code。
     #[allow(dead_code)]
     pub fn reconcile_with_snapshot(&mut self, snapshot: &[StoreMessage]) {
-        self.bubbles.set(build_bubbles(snapshot));
+        self.bubbles.set(build_bubbles(snapshot, None));
     }
 }
 
@@ -322,19 +338,22 @@ impl ChatSignals {
 /// - User → 独立 user 气泡
 /// - Assistant → 独立 assistant 气泡（reasoning + text + tool_calls）
 /// - Tool → 正常工具按 `tool_call_id` 回填对应 `ToolViewData.result`；
-///   `request_user_action` 的 Tool 消息**升格为独立 assistant 文本气泡**
-///   （内容为用户选择文本，如 "---\n\n**approved**\n\n"）
+///   `request_user_action` 的 Tool 消息：主 agent → 追加到 assistant 气泡文本；
+///   子 agent → 追加到 `agent_views` 对应条目的 events
 /// - 其他（System 等）→ 忽略
-pub fn build_bubbles(messages: &[StoreMessage]) -> Vec<Bubble> {
+pub fn build_bubbles(messages: &[StoreMessage], mut agent_views: Option<&mut HashMap<String, AgentViewData>>) -> Vec<Bubble> {
     let mut bubbles: Vec<Bubble> = Vec::new();
     let mut tool_index: HashMap<String, (usize, usize)> = HashMap::new();
-    // 记录 request_user_action 的 tool_call_id，其 Tool 消息不回填 ToolViewData，
-    // 而是升格为 assistant 文本气泡
     let mut ui_action_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // 追踪：当前 assistant 消息是否为子 agent，以及子 agent 在父 agent 里的 tool_call_id
+    let mut last_is_agent_tool = false;
+    let mut last_agent_tool_id: Option<String> = None;
 
     for sm in messages {
         match sm.message.role {
             MessageRole::User => {
+                last_is_agent_tool = false;
+                last_agent_tool_id = None;
                 bubbles.push(Bubble {
                     is_assistant: false,
                     text: display_text(&sm.message).to_string(),
@@ -344,6 +363,15 @@ pub fn build_bubbles(messages: &[StoreMessage]) -> Vec<Bubble> {
                 });
             }
             MessageRole::Assistant => {
+                last_is_agent_tool = sm.is_agent_tool;
+                last_agent_tool_id = if sm.is_agent_tool {
+                    sm.message.tool_calls.as_ref().and_then(|tcs| {
+                        tcs.iter().find(|tc| tc.function.name != "request_user_action")
+                            .map(|tc| tc.id.clone())
+                    })
+                } else {
+                    None
+                };
                 let tool_calls: Vec<ToolViewData> = sm
                     .message
                     .tool_calls
@@ -385,14 +413,23 @@ pub fn build_bubbles(messages: &[StoreMessage]) -> Vec<Bubble> {
             MessageRole::Tool => {
                 if let Some(id) = sm.message.tool_call_id.as_deref() {
                     if ui_action_ids.contains(id) {
-                        // request_user_action 的 Tool 消息 → 追加到上一个 assistant 气泡文本
-                        // 与 handle_user_action 实时路径格式一致：
-                        //   "\n\n---\n\n**{choice}**\n\n"
                         if let Some(choice) = extract_choice(&sm.message) {
-                            if let Some(last_asst) = bubbles.iter_mut().rfind(|b| b.is_assistant) {
-                                last_asst.text.push_str(&format!(
-                                    "\n\n---\n\n**{}**\n\n", choice
-                                ));
+                            if last_is_agent_tool {
+                                // 子 agent 的 request_user_action → 追加到 agent_views
+                                if let (Some(views), Some(ref agent_id)) = (agent_views.as_deref_mut(), &last_agent_tool_id) {
+                                    if let Some(av) = views.get_mut(agent_id) {
+                                        av.events.push(AgentEvent::TextDelta(
+                                            format!("\n\n---\n\n**{}**\n\n", choice)
+                                        ));
+                                    }
+                                }
+                            } else {
+                                // 主 agent → 追加到父 assistant 气泡文本
+                                if let Some(last_asst) = bubbles.iter_mut().rfind(|b| b.is_assistant) {
+                                    last_asst.text.push_str(&format!(
+                                        "\n\n---\n\n**{}**\n\n", choice
+                                    ));
+                                }
                             }
                         }
                     } else if let Some(&(b, e)) = tool_index.get(id) {

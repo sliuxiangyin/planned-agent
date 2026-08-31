@@ -200,6 +200,15 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
 // ── 气泡渲染 ──────────────────────────────────────────────────────────────
 
 fn render_assistant_bubble(bubble: &Bubble, agent_views: &std::collections::HashMap<String, AgentViewData>) -> Element {
+    // 空气泡（无文本、无推理、无工具调用、非 streaming）不渲染
+    if bubble.text.is_empty()
+        && bubble.reasoning.is_empty()
+        && bubble.tool_calls.is_empty()
+        && !bubble.is_streaming
+    {
+        return rsx! {};
+    }
+
     let bubble_class = if bubble.is_streaming {
         format!(
             "{} {} {}",

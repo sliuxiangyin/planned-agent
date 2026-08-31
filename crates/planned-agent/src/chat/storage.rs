@@ -75,9 +75,6 @@ impl StoreMessage {
         Self::new(message, ErrorType::None)
     }
 }
-        Self::new(message, ErrorType::None)
-    }
-}
 
 // ── ChatHistoryStore trait ────────────────────────────────────────────────
 

@@ -72,10 +72,10 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let state = std::sync::Arc::new(State {
             ai_client,
-            tool_registry,
+            tool_registry: tool_registry.clone(),
             prompt_manager,
             config: std::sync::Mutex::new(config),
-            history: crate::chat::state::History::new(store, tool_registry.clone()),
+            history: crate::chat::state::History::new(store, tool_registry),
             subscribers: crate::chat::state::Subscribers::new(),
             cmd_tx,
             driver_rx: std::sync::Mutex::new(Some(cmd_rx)),
@@ -97,10 +97,10 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let state = std::sync::Arc::new(State {
             ai_client,
-            tool_registry,
+            tool_registry: tool_registry.clone(),
             prompt_manager,
             config: std::sync::Mutex::new(config),
-            history: crate::chat::state::History::new(store, tool_registry.clone()),
+            history: crate::chat::state::History::new(store, tool_registry),
             subscribers: crate::chat::state::Subscribers::new(),
             cmd_tx,
             driver_rx: std::sync::Mutex::new(Some(cmd_rx)),
