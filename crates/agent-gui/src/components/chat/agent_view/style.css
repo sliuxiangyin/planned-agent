@@ -25,27 +25,11 @@
 /* ── Header ── */
 .agent-view__header {
     padding: 5px 10px;
-    cursor: pointer;
-    user-select: none;
     display: flex;
     align-items: center;
     gap: 6px;
     font-size: 0.8rem;
     color: var(--secondary-color-3);
-}
-
-.agent-view__header:hover {
-    background: rgba(255, 255, 255, 0.03);
-}
-
-/* ── Chevron 箭头 ── */
-.agent-view__chevron {
-    flex-shrink: 0;
-    transition: transform 0.2s ease;
-}
-
-.agent-view[data-open="true"] .agent-view__chevron {
-    transform: rotate(90deg);
 }
 
 /* ── Bot 图标 ── */

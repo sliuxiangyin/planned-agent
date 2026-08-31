@@ -12,9 +12,15 @@ chat/
 ├── mod.rs                    # 模块入口，pub use ChatPanel / AgentView
 ├── chat_flow/                # 消息流转（数据层 + 业务编排）
 │   ├── types.rs              #   纯数据类型：Bubble / ToolViewData / AgentViewData / PendingUI
-│   ├── signals.rs            #   ChatSignals 信号容器（bubbles + active + agent_views）
+│   ├── signals.rs            #   ChatSignals 结构体定义 + build_bubbles 纯函数
+│   ├── signals_status.rs     #   状态查询：is_streaming / has_pending / is_busy
+│   ├── signals_turn.rs       #   Turn 生命周期：push_user_turn / finish_turn
+│   ├── signals_streaming.rs  #   流式更新：append_streaming_text / stop_streaming
+│   ├── signals_pending.rs    #   PendingUI + 子 Agent 事件攒入
+│   ├── signals_history.rs    #   重置 / 历史加载：clear / load_from_history
+│   ├── signals_tool.rs       #   Tool 调用管理：tool_call_start / tool_call_executed
 │   └── controller.rs         #   事件消费 / 发送消息 / 用户操作回调
-├── agent_view/               # 子 agent 输出的嵌入式可折叠卡片
+├── agent_view/               # 子 agent 输出的嵌入式卡片
 │   ├── component.rs          #   AgentView 组件（Bot 图标 + 渐变线 + Markdown 渲染）
 │   └── style.css
 ├── chat_panel/               # 完整聊天面板（消息列表 + 输入区 + composer 工具栏）
@@ -28,6 +34,7 @@ chat/
 | 模块 | 职责 | 关键导出 |
 |---|---|---|
 | `chat_flow` | 气泡状态、事件消费 | `ChatSignals`、`send_message`、`ensure_subscription`、`handle_user_action` |
+| `chat_flow::signals_*` | ChatSignals impl 按职责分离 | 状态查询 / turn / 流式 / pending / 历史 / 工具 |
 | `agent_view` | 子 agent 输出渲染 | `AgentView` |
 | `chat_panel` | 纯 UI 布局，不持有业务逻辑 | `ChatPanel`、`template_label` |
 | `chat_ui_actions_view` | `request_user_action` 交互卡片 | `ChatUIActionsView` |
@@ -251,7 +258,7 @@ History::push_assistant(msg)
 store.load → StoreMessage.is_agent_tool = true
   → build_bubbles → ToolViewData.is_sub_agent = true
   → load_from_history → 为 is_sub_agent 工具创建 AgentViewData
-  → AgentView 回显（折叠面板 + 最终文本）
+  → AgentView 回显（嵌入式卡片 + 最终文本）
 ```
 
 **数据库字段**：`chat_messages.is_agent_tool: BOOLEAN, default false`（直接在迁移文件定义，无历史兼容负担）。
@@ -345,7 +352,7 @@ page.rs:
 LLM 调用 request_user_action
   → 服务端 emit UIActionRequest { message, actions, session_id }
   → handle_event: set_pending(PendingUI { tool_call_id, run_id })
-  → ChatPanel 末尾渲染 ChatUIActionsView
+  → ChatPanel 在输入框上方渲染 ChatUIActionsView
   → 用户操作 on_action((UIAction, choice))
   → handle_user_action:
       1. choice 文本追加到 active 最后一条 assistant 气泡

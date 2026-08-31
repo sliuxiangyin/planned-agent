@@ -69,14 +69,6 @@
     border: none;
 }
 
-/* 交互卡片 */
-.chat-message__interaction {
-    align-self: flex-start;
-    max-width: 92%;
-    background: var(--primary-color-4);
-    border: 1px dashed var(--secondary-color-4);
-}
-
 /* 流式输出光标动画 */
 .chat-message__streaming::after {
     content: "▍";
@@ -212,6 +204,12 @@
 
 .chat-message .markdown em {
     font-style: italic;
+}
+
+/* ── 交互卡片固定区域（输入框上方） ─────────────────────────────── */
+.chat-actions-area {
+    padding: 0 16px 8px;
+    flex-shrink: 0;
 }
 
 /* ── 输入 composer ─────────────────────────────────────────────────── */

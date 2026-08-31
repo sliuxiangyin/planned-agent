@@ -20,7 +20,7 @@ use crate::components::alert_dialog::{
     AlertDialogTitle,
 };
 use crate::components::button::{Button, ButtonSize, ButtonVariant};
-use crate::components::chat::chat_flow::{send_message, AgentViewData, Bubble, ChatSignals, PendingUI};
+use crate::components::chat::chat_flow::{send_message, AgentViewData, Bubble, ChatSignals, PendingUI, ToolCallPhase};
 use crate::components::chat::chat_ui_actions_view::ChatUIActionsView;
 use crate::components::chat::reasoning_view::ReasoningView;
 use crate::components::chat::tool_view::ToolView;
@@ -91,9 +91,7 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
 
     let mut show_clear_dialog = use_signal_sync(|| false);
 
-    let is_streaming = chat.is_streaming();
-    let has_pending = chat.has_pending();
-    let busy = is_streaming || has_pending;
+    let busy = chat.is_busy();
 
     let apply_template = {
         let on_template_change = props.on_template_change.clone();
@@ -138,23 +136,25 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
                                 { render_user_bubble(bubble) }
                             }
                         }
+                    }
+                }
+            }
 
-                        if let Some(pending) = chat.pending_ui.read().as_ref() {
-                            {
-                                let p = pending.clone();
-                                let on_action = props.on_user_action.clone();
-                                let cls = format!("{} {}", Styles::chat_message, Styles::chat_message__interaction);
-                                rsx! {
-                                    div { class: "{cls}",
-                                        ChatUIActionsView {
-                                            message: p.message.clone(),
-                                            actions: p.actions.clone(),
-                                            on_action: move |(action, choice)| {
-                                                on_action.call((action, choice, p.clone()));
-                                            },
-                                        }
-                                    }
-                                }
+            // ═══════════════════════════════════════════════════════
+            // 交互卡片（固定在输入框上方）
+            // ═══════════════════════════════════════════════════════
+            if let Some(pending) = chat.pending_ui.read().as_ref() {
+                {
+                    let p = pending.clone();
+                    let on_action = props.on_user_action.clone();
+                    rsx! {
+                        div { class: Styles::chat_actions_area,
+                            ChatUIActionsView {
+                                message: p.message.clone(),
+                                actions: p.actions.clone(),
+                                on_action: move |(action, choice)| {
+                                    on_action.call((action, choice, p.clone()));
+                                },
                             }
                         }
                     }
@@ -233,9 +233,10 @@ fn render_assistant_bubble(bubble: &Bubble, agent_views: &std::collections::Hash
 
 fn render_assistant_message(msg: &Bubble, agent_views: &std::collections::HashMap<String, AgentViewData>) -> Element {
     let has_reasoning = !msg.reasoning.is_empty();
-    // 有工具调用进行中时用 ToolView 的 Pending/Running 动画代替光标
+    // 有工具调用进行中（Pending/Running）时不显示主 cursor，避免与 ToolView/AgentView 的动画重复
+    let has_active_tool = msg.tool_calls.iter().any(|t| matches!(t.phase, ToolCallPhase::Pending | ToolCallPhase::Running));
     let show_cursor =
-        msg.is_streaming && msg.text.is_empty() && !has_reasoning && msg.tool_calls.is_empty();
+        msg.is_streaming && msg.text.is_empty() && !has_reasoning && !has_active_tool;
 
     rsx! {
         if has_reasoning {

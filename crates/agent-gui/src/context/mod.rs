@@ -16,6 +16,7 @@ pub mod mcp;
 pub mod prompt;
 pub mod rag;
 pub mod storage;
+pub mod sub_agent;
 pub mod tools;
 
 pub use ai::AiContext;
@@ -25,6 +26,7 @@ pub use mcp::{McpChangeNotifier, McpContext};
 pub use prompt::PromptContext;
 pub use rag::RagContext;
 pub use storage::{StorageContext, storage_repo};
+pub use sub_agent::register_sub_agent;
 pub use tools::ToolsContext;
 
 /// 从 Dioxus Context 取出已初始化的 `Resource<Option<Arc<T>>>` 并解包。

@@ -9,11 +9,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dioxus::prelude::*;
-use planned_agent::chat::{ChatConfig, SubAgentRunner};
+use planned_agent::chat::ChatConfig;
 use planned_agent::ChatService;
-use planned_agent_core::mcp::types::Tool;
 use planned_agent_core::prompt::PromptManager;
-use planned_agent_core::tool_registry::ToolCategory;
 use planned_agent_prompt_manager::FilePromptManager;
 
 use crate::components::button::{Button, ButtonSize, ButtonVariant};
@@ -23,7 +21,8 @@ use crate::components::chat::{
 };
 use crate::components::page_header::PageHeader;
 use crate::context::{
-    require_resource, storage_repo, AiContext, PromptContext, StorageContext, ToolsContext,
+    register_sub_agent, require_resource, storage_repo, AiContext, PromptContext, StorageContext,
+    ToolsContext,
 };
 use crate::storage::ChatMessageStore;
 
@@ -148,16 +147,17 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
     });
 
     let current_template = template.read().clone().unwrap_or_default();
-    let is_streaming = chat.is_streaming();
-    let has_pending = chat.has_pending();
-    let busy = is_streaming || has_pending;
+    let busy = chat.is_busy();
 
     // ── 注册子 agent: flexible_step1 ──
     {
-        let step1_tool = Tool {
-            name: "flexible_step1".to_string(),
-            description: "需求澄清子 Agent：将用户自然语言需求澄清为可执行的任务定义。接收用户消息和历史对话摘要，根据预设规则进行需求分析和参数提取。".to_string(),
-            input_schema: serde_json::json!({
+        register_sub_agent(
+            &ai_ctx,
+            &tools_ctx,
+            &prompt_ctx,
+            "flexible_step1",
+            "需求澄清子 Agent：将用户自然语言需求澄清为可执行的任务定义。接收用户消息和历史对话摘要，根据预设规则进行需求分析和参数提取。",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "user_message": {
@@ -171,21 +171,37 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
                 },
                 "required": ["user_message"]
             }),
-        };
-        let runner = SubAgentRunner::new(
-            (*ai_ctx.manager).clone(),
-            tools_ctx.registry.clone(),
-            prompt_ctx.manager.clone(),
-            ChatConfig {
-                system_prompt_template: Some("flexible/flexible_step1".to_string()),
-                ..Default::default()
-            },
+            "flexible/flexible_step1",
             1,  // depth: 子 agent 嵌套深度
             2,  // max_depth: 最大允许嵌套深度
         );
-        tools_ctx.registry.register_sub_agent(
-            step1_tool,
-            Arc::new(runner),
+    }
+
+    // ── 注册子 agent: flexible_step2 ──
+    {
+        register_sub_agent(
+            &ai_ctx,
+            &tools_ctx,
+            &prompt_ctx,
+            "flexible_step2",
+            "灵活模式任务执行 Agent：根据需求澄清结果执行工具调用并记录轨迹。",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_definition": {
+                        "type": "string",
+                        "description": "来自 flexible_step1 的 Markdown 任务定义，包含任务描述和参数"
+                    },
+                    "runtime_context": {
+                        "type": "string",
+                        "description": "可选，来自上一轮执行的 compressed_context；首次执行时为空"
+                    }
+                },
+                "required": ["task_definition"]
+            }),
+            "flexible/flexible_step2",
+            1,  // depth: 子 agent 嵌套深度
+            2,  // max_depth: 最大允许嵌套深度
         );
     }
 

@@ -1,8 +1,9 @@
-//! AgentView 组件：子 agent 输出的嵌入式可折叠卡片。
+//! AgentView 组件：子 agent 输出的嵌入式卡片。
 //!
-//! - 默认折叠；点击头部展开/收起
+//! - 名称 + 状态图标始终展示在左上角
+//! - 内容始终展开，不支持折叠
 //! - 顶部渐变线 + Bot 图标标识「这是子 agent 输出」
-//! - 展开后以 Markdown 渲染子 agent 的流式文本
+//! - 以 Markdown 渲染子 agent 的流式文本
 //! - Pending（脉冲）→ Running（旋转）→ Completed（对勾）→ Error（红色）
 
 use dioxus::prelude::*;
@@ -13,12 +14,9 @@ use crate::components::chat::chat_flow::{AgentEvent, AgentViewData, ToolCallPhas
 #[css_module("/src/components/chat/agent_view/style.css")]
 struct Styles;
 
-/// 子 agent 输出的嵌入式可折叠卡片。
+/// 子 agent 输出的嵌入式卡片。
 #[component]
 pub fn AgentView(data: AgentViewData) -> Element {
-    let mut open = use_signal(|| true);
-    let is_open = *open.read();
-
     let phase = &data.phase;
 
     // 容器 class：基础 + phase 修饰符
@@ -42,29 +40,13 @@ pub fn AgentView(data: AgentViewData) -> Element {
     rsx! {
         div {
             class: "{container_class}",
-            "data-open": if is_open { "true" } else { "false" },
 
             // ── 顶部渐变线 ──
             div { class: Styles::agent_view__accent_line }
 
-            // ── Header ──
+            // ── Header：名称（左）+ 状态图标（右） ──
             div {
                 class: Styles::agent_view__header,
-                onclick: move |_| open.toggle(),
-
-                // Chevron 箭头
-                svg {
-                    class: Styles::agent_view__chevron,
-                    view_box: "0 0 16 16",
-                    width: "12",
-                    height: "12",
-                    fill: "none",
-                    stroke: "currentColor",
-                    stroke_width: "1.75",
-                    stroke_linecap: "round",
-                    stroke_linejoin: "round",
-                    path { d: "M 6 4 L 10 8 L 6 12" }
-                }
 
                 // Bot 图标
                 span { class: Styles::agent_view__bot_icon,
@@ -99,20 +81,18 @@ pub fn AgentView(data: AgentViewData) -> Element {
                 }
             }
 
-            // ── 展开内容 ──
-            if is_open {
-                div { class: Styles::agent_view__body,
-                    if body_text.is_empty() {
-                        if data.is_streaming {
-                            span { class: Styles::agent_view__streaming, "" }
-                        } else {
-                            div { class: Styles::agent_view__empty, "（无输出）" }
-                        }
+            // ── 内容（始终展示） ──
+            div { class: Styles::agent_view__body,
+                if body_text.is_empty() {
+                    if data.is_streaming {
+                        span { class: Styles::agent_view__streaming, "" }
                     } else {
-                        crate::components::markdown::Markdown { text: body_text.clone() }
-                        if data.is_streaming {
-                            span { class: Styles::agent_view__streaming, "" }
-                        }
+                        div { class: Styles::agent_view__empty, "（无输出）" }
+                    }
+                } else {
+                    crate::components::markdown::Markdown { text: body_text.clone() }
+                    if data.is_streaming {
+                        span { class: Styles::agent_view__streaming, "" }
                     }
                 }
             }
