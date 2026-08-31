@@ -14,14 +14,13 @@ pub(crate) trait ToolExecutionBridge: Send + Sync {
     ) -> (ToolStreamSender, tokio::task::JoinHandle<()>);
 }
 
-pub(crate) struct SubAgentBridge<PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'static>
-{
+pub(crate) struct SubAgentBridge<
+    PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'static,
+> {
     state: Arc<State<PM>>,
 }
 
-impl<PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'static>
-    SubAgentBridge<PM>
-{
+impl<PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'static> SubAgentBridge<PM> {
     pub fn new(state: Arc<State<PM>>) -> Self {
         Self { state }
     }

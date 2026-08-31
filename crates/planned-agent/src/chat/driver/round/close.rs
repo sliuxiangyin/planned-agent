@@ -9,6 +9,7 @@ use tracing::info;
 
 use crate::chat::service::ChatEvent;
 use crate::chat::state::State;
+use crate::chat::storage::{ErrorType, StoreMessage};
 
 /// 中断后闭合：确保最后一条 assistant 消息的所有 tool_calls 都有对应的 tool 消息。
 pub(in crate::chat::driver) fn close_unclosed_tool_calls<
@@ -67,23 +68,20 @@ pub(super) fn close_tool_calls_with_reason<
 ) {
     for tc in tool_calls {
         state.history.push_cancelled_tool(&tc.id, reason);
-        state.subscribers.emit(ChatEvent::Chat(CoreChatEvent::ToolExecuted {
-            id: tc.id.clone(),
-            name: tc.function.name.clone(),
-            is_error: true,
-            content: serde_json::Value::String(reason.to_string()),
-        }));
+        state
+            .subscribers
+            .emit(ChatEvent::Chat(CoreChatEvent::ToolExecuted {
+                id: tc.id.clone(),
+                name: tc.function.name.clone(),
+                is_error: true,
+                content: serde_json::Value::String(reason.to_string()),
+            }));
     }
 }
 
 /// 判断 tool 消息是否是 cancelled（由 close_unclosed_tool_calls 生成）。
-fn is_cancelled_tool(msg: &Message) -> bool {
-    if let Some(MessageContent::ToolResult { content, .. }) = &msg.content {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(content) {
-            return json.get("cancelled").and_then(|v| v.as_bool()).unwrap_or(false);
-        }
-    }
-    false
+fn is_cancelled_tool(msg: &StoreMessage) -> bool {
+    msg.is_error_type == ErrorType::Cancelled
 }
 
 /// 补齐孤立消息：若最后一条是 User 或执行成功的 Tool，补一条 assistant 消息并 emit 流式事件。
@@ -103,9 +101,9 @@ pub(in crate::chat::driver) fn close_orphaned_user<
     state: &Arc<State<PM>>,
     text: &str,
 ) {
-    let messages = state.history.snapshot();
+    let messages = state.history.snapshot_store();
     if let Some(last) = messages.last() {
-        let should_close = match last.role {
+        let should_close = match last.message.role {
             // 最后一条是 User → LLM 未及回复，需要补
             MessageRole::User => true,
             // 最后一条是 Tool → 检查是否需要补
@@ -123,7 +121,10 @@ pub(in crate::chat::driver) fn close_orphaned_user<
         };
 
         if should_close {
-            info!("[round] 补齐孤立消息：最后一条是 {:?}，写入 assistant", last.role);
+            info!(
+                "[round] 补齐孤立消息：最后一条是 {:?}，写入 assistant",
+                last.message.role
+            );
             let msg = Message {
                 role: MessageRole::Assistant,
                 content: Some(MessageContent::Text {
@@ -133,9 +134,15 @@ pub(in crate::chat::driver) fn close_orphaned_user<
             };
             state.history.push_assistant(msg.clone());
             // 推送流式事件组合，让 GUI 同步
-            state.subscribers.emit(ChatEvent::Chat(CoreChatEvent::RoundStart { round: 1 }));
-            state.subscribers.emit(ChatEvent::Chat(CoreChatEvent::TextDelta(text.to_string())));
-            state.subscribers.emit(ChatEvent::Chat(CoreChatEvent::RoundEnd { message: msg }));
+            state
+                .subscribers
+                .emit(ChatEvent::Chat(CoreChatEvent::RoundStart { round: 1 }));
+            state
+                .subscribers
+                .emit(ChatEvent::Chat(CoreChatEvent::TextDelta(text.to_string())));
+            state
+                .subscribers
+                .emit(ChatEvent::Chat(CoreChatEvent::RoundEnd { message: msg }));
         }
     }
 }

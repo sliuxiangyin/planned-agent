@@ -8,9 +8,11 @@
 use std::sync::Arc;
 
 use dioxus::prelude::*;
-use planned_agent::chat::ChatConfig;
+use planned_agent::chat::{ChatConfig, SubAgentRunner};
 use planned_agent::ChatService;
+use planned_agent_core::mcp::types::Tool;
 use planned_agent_core::prompt::PromptManager;
+use planned_agent_core::tool_registry::ToolCategory;
 use planned_agent_prompt_manager::FilePromptManager;
 
 use crate::components::button::{Button, ButtonSize, ButtonVariant};
@@ -54,10 +56,10 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
     // ── option 栏状态 ──
     let mut thinking = use_signal_sync(|| true);
     let mut temperature = use_signal_sync(|| "0.7".to_string());
-    let mut template = use_signal_sync(|| Some("flexible/flexible_global_system".to_string()));
+    let mut template = use_signal_sync(|| Some("flexible/flexible_step1".to_string()));
 
     // ── ChatService：Signal 存储，首次构造后跨 re-render 存活 ──
-    // ⚠️ 所有 hook 无条件顶层调用（rules of hooks），只有纯构造逻辑在 if 内
+    //  所有 hook 无条件顶层调用（rules of hooks），只有纯构造逻辑在 if 内
     let mut svc_opt = use_signal_sync(|| None::<Arc<ChatService<FilePromptManager>>>);
     let storage_resource = use_context::<Resource<Option<Arc<StorageContext>>>>();
     let ai_ctx = require_resource::<AiContext>();
@@ -73,6 +75,7 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
                     tools_ctx.registry.clone(),
                     prompt_ctx.manager.clone(),
                     ChatConfig {
+                        system_prompt_template: Some("flexible/flexible_global_system".to_string()),
                         allowed_tools: None,
                         ..Default::default()
                     },
@@ -146,8 +149,45 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
     let has_pending = chat.has_pending();
     let busy = is_streaming || has_pending;
 
-    // ── 事件处理函数 ──
+    // ── 注册子 agent: flexible_step1 ──
+    {
+        let step1_tool = Tool {
+            name: "flexible_step1".to_string(),
+            description: "需求澄清子 Agent：将用户自然语言需求澄清为可执行的任务定义。接收用户消息和历史对话摘要，根据预设规则进行需求分析和参数提取。".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "user_message": {
+                        "type": "string",
+                        "description": "用户本次输入内容"
+                    },
+                    "conversation_summary": {
+                        "type": "string",
+                        "description": "历史对话摘要（若无则传空字符串）"
+                    }
+                },
+                "required": ["user_message"]
+            }),
+        };
+        let runner = SubAgentRunner::new(
+            (*ai_ctx.manager).clone(),
+            tools_ctx.registry.clone(),
+            prompt_ctx.manager.clone(),
+            ChatConfig {
+                system_prompt_template: Some("flexible/flexible_step1".to_string()),
+                ..Default::default()
+            },
+            1,  // depth: 子 agent 嵌套深度
+            2,  // max_depth: 最大允许嵌套深度
+        );
+        tools_ctx.registry.register_sub_agent(
+            step1_tool,
+            vec![ToolCategory::Utility],
+            Arc::new(runner),
+        );
+    }
 
+    // ── 事件处理函数 ──
     let on_trash_click = {
         let svc = chat_service.clone();
         move |_| {

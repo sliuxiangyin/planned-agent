@@ -11,17 +11,18 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;
-use tracing::info;
 
+use planned_agent_core::ai::types::{
+    ChatCompletionRequest, FunctionDefinition, Message, MessageContent, MessageRole,
+    ToolDefinition, ToolType,
+};
 use planned_agent_core::ai::AiClient;
+use planned_agent_core::mcp::types::Tool;
 use planned_agent_core::planner::coarse::CoarseGrainedStep;
 use planned_agent_core::planner::react::Observation;
 use planned_agent_core::tool_registry::ToolCategory;
-use planned_agent_core::ai::types::{ChatCompletionRequest, FunctionDefinition, Message, MessageContent, MessageRole, ToolDefinition, ToolType};
-use planned_agent_core::mcp::types::Tool;
 use planned_agent_tool_manager::ToolRegistry;
 
-use super::agent_context::AgentContext;
 use super::chunk::ChunkStore;
 use super::step_store::StepStore;
 
@@ -71,8 +72,8 @@ pub(crate) fn build_tool_definitions(
     step: &CoarseGrainedStep,
     override_categories: Option<&[ToolCategory]>,
 ) -> Option<Vec<ToolDefinition>> {
-    let categories = override_categories
-        .unwrap_or(step.recommended_tool_categories.as_deref().unwrap_or(&[]));
+    let categories =
+        override_categories.unwrap_or(step.recommended_tool_categories.as_deref().unwrap_or(&[]));
     let tools = resolve_tools(tool_registry, categories);
 
     if tools.is_empty() {
@@ -187,8 +188,8 @@ pub(crate) async fn handle_ai_process(
 
                 let duration_ms = start_time.elapsed().as_millis() as u64;
                 return Ok(Observation {
-                    output:output.clone(),
-                    raw_output:output,
+                    output: output.clone(),
+                    raw_output: output,
                     is_complete: false,
                     error: None,
                     duration_ms,
@@ -246,7 +247,9 @@ pub(crate) async fn handle_generic_tool(
     };
 
     // 通过 ChunkStore 处理输出：大文本自动分片，小文本原样透传
-    let processed_output = chunk_store.handle(outcome.result.content.clone(), tool_name).await?;
+    let processed_output = chunk_store
+        .handle(outcome.result.content.clone(), tool_name)
+        .await?;
 
     let error_msg = if outcome.result.is_error {
         Some(extract_error_content(&processed_output))

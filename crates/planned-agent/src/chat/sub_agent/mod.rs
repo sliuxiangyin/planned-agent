@@ -208,7 +208,13 @@ async fn collect_until_outcome(
                 *ui_request_clone.lock().unwrap() = Some((message.clone(), actions.clone()));
             }
             // 转发流式事件给父 agent 的 stream（含 UIActionRequest，冒泡到前端）
-            stream_clone.emit_event_sync(chat_event.clone());
+            // 过滤子 agent 的轮次生命周期事件，避免父 agent 创建多余气泡
+            if !matches!(
+                chat_event,
+                CoreChatEvent::RoundStart { .. } | CoreChatEvent::RoundEnd { .. }
+            ) {
+                stream_clone.emit_event_sync(chat_event.clone());
+            }
         }
     });
 
