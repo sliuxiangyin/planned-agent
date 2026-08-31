@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use crate::ai::types::Message;
 use crate::events::UIAction;
+use crate::tool_registry::types::ToolSource;
 
 /// 流式聊天事件。
 ///
@@ -43,6 +44,8 @@ pub enum ChatEvent {
         id: String,
         /// 被调用工具的名称。
         name: String,
+        /// 工具来源（SubAgent / Mcp / Custom / Builtin），由服务端查 metadata 填入。
+        source: Option<ToolSource>,
     },
     /// 工具调用参数片段(增量,按 `id` 区分)。
     ///
@@ -84,6 +87,17 @@ pub enum ChatEvent {
         /// 调用方恢复时应携带 `session_id` + 用户选择调用 `resume_sub_agent`；
         /// 主 agent 自身 `request_user_action` 时为 `None`。
         session_id: Option<String>,
+    },
+    /// 子 agent 流式事件（TextDelta / ReasoningDelta / ToolCall* 等）。
+    ///
+    /// GUI 按 `tool_call_id` 路由到对应 `AgentView` 渲染实时流。
+    /// `UIActionRequest` 不走此通道——它仍作为独立 `CoreChatEvent` 变体直接转发，
+    /// 因为主 agent 的 GUI 需要直接处理交互卡片。
+    SubChat {
+        /// 产生该事件的子 agent 的 tool_call_id（父 agent 的 tool_calls 里对应的那个 id）。
+        tool_call_id: String,
+        /// 子 agent 内部事件（TextDelta / ReasoningDelta / ToolCall* 等，递归包装）。
+        event: Box<ChatEvent>,
     },
     /// 一轮 assistant 消息已写入历史。
     RoundEnd {
@@ -139,6 +153,7 @@ mod tests {
         round_trip(&ChatEvent::ToolCallStart {
             id: "call_1".to_string(),
             name: "tool_a".to_string(),
+            source: None,
         });
         round_trip(&ChatEvent::ToolCallArgsDelta {
             id: "call_1".to_string(),
@@ -159,6 +174,10 @@ mod tests {
             message: "请确认".to_string(),
             actions: vec![sample_ui_action()],
             session_id: Some("sid".to_string()),
+        });
+        round_trip(&ChatEvent::SubChat {
+            tool_call_id: "call_sub".to_string(),
+            event: Box::new(ChatEvent::TextDelta("子 agent 输出".to_string())),
         });
         round_trip(&ChatEvent::RoundEnd {
             message: sample_message(),

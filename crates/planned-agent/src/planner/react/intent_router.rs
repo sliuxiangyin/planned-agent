@@ -80,6 +80,7 @@ fn map_category(cat: &ToolCategory) -> StepIntent {
         ToolCategory::Dev => StepIntent::DevFocus,
         ToolCategory::Device => StepIntent::DeviceFocus,
         ToolCategory::Utility => StepIntent::UtilityFocus,
+        ToolCategory::SubAgent => StepIntent::MixedFocus,
     }
 }
 

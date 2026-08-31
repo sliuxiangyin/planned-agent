@@ -198,22 +198,40 @@ async fn collect_until_outcome(
     let ui_request: Arc<Mutex<Option<(String, Vec<UIAction>)>>> = Arc::new(Mutex::new(None));
     let ui_request_clone = ui_request.clone();
 
-    // 注册临时事件监听：转发子 agent 内部事件，并捕获挂起 UI 信息
+    // 注册临时事件监听：转发子 agent 内部事件，并捕获挂起 UI 信息。
+    //
+    // 转发规则：
+    // - `UIActionRequest` → 直接转发为 `Chat(CoreChatEvent)`，主 agent GUI 需要
+    //   直接处理交互卡片（弹出 PendingUI）。
+    // - `RoundStart` / `RoundEnd` → 不转发，避免主 agent 创建多余气泡。
+    // - 其余（TextDelta / ReasoningDelta / ToolCall* / ToolExecuted）→
+    //   包装为 `SubChatEvent`，通过 `SubChat` 通道转发，GUI 按 `tool_call_id`
+    //   路由到对应 `AgentView`。
+    let tool_call_id_for_closure = stream.invocation_id().to_string();
     let _guard = service.on_chat_with_guard(move |event| {
         if let ChatEvent::Chat(chat_event) = &event {
+            // 捕获 UIActionRequest 的 message / actions
             if let CoreChatEvent::UIActionRequest {
                 message, actions, ..
             } = chat_event
             {
                 *ui_request_clone.lock().unwrap() = Some((message.clone(), actions.clone()));
             }
-            // 转发流式事件给父 agent 的 stream（含 UIActionRequest，冒泡到前端）
-            // 过滤子 agent 的轮次生命周期事件，避免父 agent 创建多余气泡
-            if !matches!(
-                chat_event,
-                CoreChatEvent::RoundStart { .. } | CoreChatEvent::RoundEnd { .. }
-            ) {
-                stream_clone.emit_event_sync(chat_event.clone());
+
+            match chat_event {
+                // UIActionRequest → 直接转发（主 agent GUI 处理交互卡片）
+                CoreChatEvent::UIActionRequest { .. } => {
+                    stream_clone.emit_event_sync(chat_event.clone());
+                }
+                // // 轮次生命周期 → 不转发
+                // CoreChatEvent::RoundStart { .. } | CoreChatEvent::RoundEnd { .. } => {}
+                // 其余 → 包装为 SubChat
+                _ => {
+                    stream_clone.emit_event_sync(CoreChatEvent::SubChat {
+                        tool_call_id: tool_call_id_for_closure.clone(),
+                        event: Box::new(chat_event.clone()),
+                    });
+                }
             }
         }
     });

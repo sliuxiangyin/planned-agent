@@ -106,7 +106,6 @@ async fn sub_agent_stream_forwards_events_and_links_call_id() {
     let registry = ToolRegistry::new();
     registry.register_sub_agent(
         sub_agent_tool(),
-        vec![ToolCategory::Utility],
         Arc::new(MockRunner),
     );
 
@@ -148,7 +147,6 @@ async fn sub_agent_call_tool_non_streamed_works() {
     let registry = ToolRegistry::new();
     registry.register_sub_agent(
         sub_agent_tool(),
-        vec![ToolCategory::Utility],
         Arc::new(MockRunner),
     );
 
@@ -198,7 +196,6 @@ async fn sub_agent_unregister_cleans_executor() {
     let registry = ToolRegistry::new();
     registry.register_sub_agent(
         sub_agent_tool(),
-        vec![ToolCategory::Utility],
         Arc::new(MockRunner),
     );
 
@@ -216,7 +213,6 @@ async fn sub_agent_awaiting_user_action_then_resume() {
     let registry = ToolRegistry::new();
     registry.register_sub_agent(
         sub_agent_tool(),
-        vec![ToolCategory::Utility],
         Arc::new(SessionMock),
     );
 
@@ -293,7 +289,6 @@ async fn resume_with_unknown_session_id_errors() {
     let registry = ToolRegistry::new();
     registry.register_sub_agent(
         sub_agent_tool(),
-        vec![ToolCategory::Utility],
         Arc::new(SessionMock),
     );
 
@@ -323,7 +318,6 @@ async fn one_shot_runner_wrapper_works() {
     });
     registry.register_sub_agent(
         sub_agent_tool(),
-        vec![ToolCategory::Utility],
         Arc::new(runner),
     );
 

@@ -236,7 +236,6 @@ impl ToolRegistry {
     pub fn register_sub_agent(
         &self,
         tool: Tool,
-        categories: Vec<ToolCategory>,
         runner: Arc<dyn SubAgentSessionRunner>,
     ) {
         let agent_id = tool.name.clone();
@@ -249,7 +248,7 @@ impl ToolRegistry {
         
         let metadata = ToolMetadata {
             source: ToolSource::SubAgent { agent_id },
-            categories,
+            categories: vec![ToolCategory::SubAgent],
             enabled: true,
             priority: 50,
             tags: vec!["sub_agent".to_string()],

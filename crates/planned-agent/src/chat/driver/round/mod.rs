@@ -28,13 +28,17 @@ use crate::chat::state::{Command, State, ToolCallAccumulator};
 use crate::chat::tools::{build_tool_definitions, UI_TOOL_NAMES};
 
 use close::{close_max_rounds_tool_calls, close_orphaned_user, close_unclosed_tool_calls};
-use handlers::{execute_backend_tool_call, handle_ui_tool_call, BackendToolResult, UIActionOutcome};
-use stream::{emit_tool_call_completes, log_history_summary, process_stream_chunk, process_stream_error};
+use handlers::{
+    execute_backend_tool_call, handle_ui_tool_call, BackendToolResult, UIActionOutcome,
+};
+use stream::{
+    emit_tool_call_completes, log_history_summary, process_stream_chunk, process_stream_error,
+};
 
 /// UI 交互策略。
 pub(super) enum UIActionStrategy {
-    BlockAndConfirm,
-    EmitAndSuspend,
+    BlockAndConfirm, // ← 子 agent 走这条路
+    EmitAndSuspend,  // ← 主 agent 走这条路
 }
 
 /// 对话结果。
@@ -122,6 +126,7 @@ pub(super) async fn run_conversation<
                     consecutive_stream_errors = 0;
                     process_stream_chunk(
                         &state.subscribers,
+                        &state.tool_registry,
                         c,
                         &mut text,
                         &mut reasoning,

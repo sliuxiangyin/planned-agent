@@ -1,0 +1,234 @@
+/* ── AgentView 组件样式 ──────────────────────────────────────────────
+ * 子 agent 输出的嵌入式卡片：视觉上融入 assistant 气泡，
+ * 通过顶部渐变线 + Bot 图标体现「这是子 agent 输出」。
+ * ────────────────────────────────────────────────────────────────── */
+
+.agent-view {
+    margin: 6px 0;
+    border-radius: 8px;
+    background: var(--primary-color-5);
+    overflow: hidden;
+    transition: background 0.3s ease;
+}
+
+.agent-view:hover {
+    background: var(--primary-color-6);
+}
+
+/* ── 顶部渐变线 ── */
+.agent-view__accent-line {
+    height: 2px;
+    background: linear-gradient(90deg, var(--focused-border-color), transparent);
+    border-radius: 1px;
+}
+
+/* ── Header ── */
+.agent-view__header {
+    padding: 5px 10px;
+    cursor: pointer;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.8rem;
+    color: var(--secondary-color-3);
+}
+
+.agent-view__header:hover {
+    background: rgba(255, 255, 255, 0.03);
+}
+
+/* ── Chevron 箭头 ── */
+.agent-view__chevron {
+    flex-shrink: 0;
+    transition: transform 0.2s ease;
+}
+
+.agent-view[data-open="true"] .agent-view__chevron {
+    transform: rotate(90deg);
+}
+
+/* ── Bot 图标 ── */
+.agent-view__bot-icon {
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--focused-border-color);
+}
+
+/* ── Agent 名称 ── */
+.agent-view__name {
+    font-weight: 500;
+    color: var(--text-primary, var(--secondary-color-2));
+}
+
+/* ── 状态图标 ── */
+.agent-view__status-icon {
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: auto;
+}
+
+.agent-view__status-pending {
+    color: var(--secondary-warning-color);
+}
+
+.agent-view__status-running {
+    color: var(--focused-border-color);
+    animation: agent-icon-spin 1s linear infinite;
+}
+
+.agent-view__status-completed {
+    color: var(--secondary-success-color);
+}
+
+.agent-view__status-error {
+    color: var(--secondary-error-color);
+}
+
+@keyframes agent-icon-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+/* ── 展开内容 ── */
+.agent-view__body {
+    padding: 6px 12px 10px;
+    border-top: 1px dashed rgba(255, 255, 255, 0.08);
+    font-size: 0.85em;
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+/* ── 流式光标 ── */
+.agent-view__streaming::after {
+    content: "▍";
+    margin-left: 1px;
+    animation: agent-cursor-blink 1s steps(2) infinite;
+    color: var(--secondary-color-4);
+}
+
+@keyframes agent-cursor-blink {
+    50% { opacity: 0; }
+}
+
+/* ── 空内容占位 ── */
+.agent-view__empty {
+    color: var(--secondary-color-5);
+    font-style: italic;
+    padding: 4px 0;
+}
+
+/* ── Pending 脉冲动画 ── */
+.agent-view--pending {
+    animation: agent-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes agent-pulse {
+    0%, 100% {
+        background: var(--primary-color-5);
+    }
+    50% {
+        background: var(--primary-color-6);
+    }
+}
+
+/* ── Error 状态 ── */
+.agent-view--error {
+    border-left: 2px solid var(--secondary-error-color);
+    background: rgba(220, 38, 38, 0.06);
+}
+
+/* ── Running 状态 ── */
+.agent-view--running {
+    border-left: 2px solid var(--focused-border-color);
+}
+
+/* ── Markdown 内容（复用 chat-message 样式） ── */
+.agent-view__body .markdown > :first-child {
+    margin-top: 0;
+}
+
+.agent-view__body .markdown > :last-child {
+    margin-bottom: 0;
+}
+
+.agent-view__body .markdown p {
+    margin: 4px 0;
+    line-height: 1.5;
+}
+
+.agent-view__body .markdown code {
+    background: rgba(0, 0, 0, 0.18);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: ui-monospace, "SF Mono", "Consolas", "Monaco", monospace;
+    font-size: 0.85em;
+}
+
+.agent-view__body .markdown pre {
+    background: rgba(0, 0, 0, 0.28);
+    padding: 8px 10px;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 6px 0;
+    line-height: 1.4;
+}
+
+.agent-view__body .markdown pre code {
+    background: none;
+    padding: 0;
+    font-size: 0.85em;
+}
+
+.agent-view__body .markdown ul,
+.agent-view__body .markdown ol {
+    margin: 4px 0;
+    padding-left: 22px;
+}
+
+.agent-view__body .markdown li {
+    margin: 2px 0;
+}
+
+.agent-view__body .markdown h1,
+.agent-view__body .markdown h2,
+.agent-view__body .markdown h3,
+.agent-view__body .markdown h4,
+.agent-view__body .markdown h5,
+.agent-view__body .markdown h6 {
+    margin: 8px 0 4px;
+    font-weight: 600;
+    line-height: 1.3;
+}
+
+.agent-view__body .markdown h1 { font-size: 1.1em; }
+.agent-view__body .markdown h2 { font-size: 1.0em; }
+.agent-view__body .markdown h3 { font-size: 0.95em; }
+
+.agent-view__body .markdown blockquote {
+    border-left: 3px solid var(--secondary-color-5);
+    margin: 4px 0;
+    padding-left: 12px;
+    opacity: 0.85;
+}
+
+.agent-view__body .markdown strong {
+    font-weight: 600;
+}
+
+.agent-view__body .markdown em {
+    font-style: italic;
+}
+
+.agent-view__body .markdown a {
+    color: #6cb6ff;
+    text-decoration: underline;
+}

@@ -182,7 +182,6 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
         );
         tools_ctx.registry.register_sub_agent(
             step1_tool,
-            vec![ToolCategory::Utility],
             Arc::new(runner),
         );
     }

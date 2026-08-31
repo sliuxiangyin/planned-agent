@@ -32,6 +32,8 @@ pub enum ToolCategory {
     Dev,
     /// 工具类：工具、自定义、内置
     Utility,
+    /// 子 Agent：由 `register_sub_agent` 注册的子 agent 工具
+    SubAgent,
 }
 
 impl ToolCategory {
@@ -46,6 +48,7 @@ impl ToolCategory {
             ToolCategory::Device,
             ToolCategory::Dev,
             ToolCategory::Utility,
+            ToolCategory::SubAgent,
         ]
     }
 
@@ -60,6 +63,7 @@ impl ToolCategory {
             ToolCategory::Device => "设备",
             ToolCategory::Dev => "开发",
             ToolCategory::Utility => "工具",
+            ToolCategory::SubAgent => "子Agent",
         }
     }
 }

@@ -66,12 +66,12 @@ pub fn handle_event(mut chat: ChatSignals, ev: ServiceChatEvent) {
                 chat.push_assistant_placeholder();
             }
         }
-        ServiceChatEvent::Chat(ChatEvent::ToolCallStart { id, name })
+        ServiceChatEvent::Chat(ChatEvent::ToolCallStart { id, name, .. })
             if name == "request_user_action" =>
         {
             chat.pending_tool_call_id.set(Some(id));
         }
-        ServiceChatEvent::Chat(ChatEvent::ToolCallStart { id, name }) => {
+        ServiceChatEvent::Chat(ChatEvent::ToolCallStart { id, name, .. }) => {
             tracing::info!(target: "event", event = "ToolCallStart", id = %id, name = %name, "ToolCallStart");
             chat.tool_call_start(&id, &name);
         }
@@ -114,6 +114,16 @@ pub fn handle_event(mut chat: ChatSignals, ev: ServiceChatEvent) {
                 tool_call_id,
                 run_id: session_id,
             });
+        }
+        ServiceChatEvent::Chat(ChatEvent::SubChat { tool_call_id, event }) => {
+            // 子 agent 流式事件：暂存 log，后续路由到 AgentView 数据存储
+            tracing::debug!(
+                target: "event",
+                event = "SubChat",
+                tool_call_id = %tool_call_id,
+                inner = ?event,
+                "子 agent 流式事件"
+            );
         }
         ServiceChatEvent::Done { cancelled } => {
             tracing::info!(target: "event", event = "Done", cancelled, "Done");
