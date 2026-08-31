@@ -54,6 +54,8 @@ pub struct ToolViewData {
     pub result: Option<serde_json::Value>,
     /// 是否出错
     pub is_error: bool,
+    /// 是否为子 agent 工具（由 `ToolCallStart.source == SubAgent` 标记）
+    pub is_sub_agent: bool,
 }
 
 /// 手动实现 PartialEq：跳过 Value 字段（不支持 PartialEq），比较其余字段。
@@ -64,7 +66,34 @@ impl PartialEq for ToolViewData {
             && self.arguments == other.arguments
             && self.phase == other.phase
             && self.is_error == other.is_error
+            && self.is_sub_agent == other.is_sub_agent
     }
+}
+
+// ── 子 Agent ────────────────────────────────────────────────────────────
+
+/// 子 agent 流式事件（从 `SubChat` 事件攒入，供 AgentView 渲染）。
+#[derive(Clone, Debug, PartialEq)]
+pub enum AgentEvent {
+    /// 文本增量
+    TextDelta(String),
+    /// 推理内容增量
+    ReasoningDelta(String),
+}
+
+/// 子 agent 的流式输出状态（事件攒入 + 当前 phase）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentViewData {
+    /// 子 agent 的 tool_call_id（父 agent tool_calls 里的 id）
+    pub tool_call_id: String,
+    /// 子 agent 名称（如 "flexible_step1"）
+    pub name: String,
+    /// 当前执行阶段
+    pub phase: ToolCallPhase,
+    /// 攒入的流式事件
+    pub events: Vec<AgentEvent>,
+    /// 子 agent 是否还在输出
+    pub is_streaming: bool,
 }
 
 // ── 气泡 ─────────────────────────────────────────────────────────────────

@@ -54,6 +54,11 @@ impl ErrorType {
 pub struct StoreMessage {
     pub message: Message,
     pub is_error_type: ErrorType,
+    /// 该 assistant 消息的 tool_calls 中是否包含 SubAgent 工具。
+    ///
+    /// 由 `History::push_assistant` 根据 `ToolRegistry` metadata 自动设置。
+    /// `build_bubbles` 读取此字段为对应 `ToolViewData` 设置 `is_sub_agent`。
+    pub is_agent_tool: bool,
 }
 
 impl StoreMessage {
@@ -61,11 +66,15 @@ impl StoreMessage {
         Self {
             message,
             is_error_type,
+            is_agent_tool: false,
         }
     }
 
     /// 无错误的便捷构造。
     pub fn normal(message: Message) -> Self {
+        Self::new(message, ErrorType::None)
+    }
+}
         Self::new(message, ErrorType::None)
     }
 }

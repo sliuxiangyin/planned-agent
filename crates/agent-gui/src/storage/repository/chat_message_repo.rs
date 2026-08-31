@@ -24,6 +24,7 @@ impl ChatMessageRepo {
         message_json: &str,
         sequence_order: i32,
         is_error_type: i32,
+        is_agent_tool: bool,
     ) -> StorageResult<chat_message::Model> {
         let now = Utc::now().to_rfc3339();
         let id = Uuid::new_v4().to_string();
@@ -33,6 +34,7 @@ impl ChatMessageRepo {
             message_json: Set(message_json.to_string()),
             sequence_order: Set(sequence_order),
             is_error_type: Set(is_error_type),
+            is_agent_tool: Set(is_agent_tool),
             created_at: Set(now),
         };
         let res = model.insert(&self.db).await?;

@@ -5,6 +5,7 @@
 //! - 模板切换与可用模板列表
 //! - 历史加载
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use dioxus::prelude::*;
@@ -40,6 +41,7 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
     // ── 纯内存聊天状态（展示缓冲，持久化由服务端 store 处理）──
     let bubbles = use_signal_sync(Vec::<Bubble>::new);
     let active = use_signal_sync(Vec::<Bubble>::new);
+    let agent_views = use_signal_sync(|| HashMap::new());
     let pending_ui = use_signal_sync(|| None::<PendingUI>);
     let input_text = use_signal_sync(String::new);
     let pending_tool_call_id = use_signal_sync(|| None::<String>);
@@ -47,6 +49,7 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
     let mut chat = ChatSignals {
         bubbles,
         active,
+        agent_views,
         pending_ui,
         input_text,
         pending_tool_call_id,

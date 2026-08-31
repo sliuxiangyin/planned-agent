@@ -56,6 +56,11 @@
     color: var(--secondary-color-2);
 }
 
+/* 包含 AgentView 的 assistant 气泡更宽（子 agent 输出通常较长） */
+.chat-message__assistant:has(.agent-view) {
+    max-width: 95%;
+}
+
 /* 用户消息 */
 .chat-message__user {
     align-self: flex-end;

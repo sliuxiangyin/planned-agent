@@ -75,11 +75,12 @@ pub(crate) fn resolve_ai_client(
 pub struct History {
     inner: Mutex<Vec<(String, StoreMessage)>>,
     store: Arc<dyn ChatHistoryStore>,
+    tool_registry: Arc<ToolRegistry>,
 }
 
 impl History {
     /// 创建历史，从 store 恢复已有消息填入内存。
-    pub fn new(store: Arc<dyn ChatHistoryStore>) -> Self {
+    pub fn new(store: Arc<dyn ChatHistoryStore>, tool_registry: Arc<ToolRegistry>) -> Self {
         let loaded = store.load();
         let inner: Vec<(String, StoreMessage)> = loaded
             .into_iter()
@@ -88,6 +89,7 @@ impl History {
         Self {
             inner: Mutex::new(inner),
             store,
+            tool_registry,
         }
     }
 
@@ -152,8 +154,19 @@ impl History {
     }
 
     /// 写入一条 assistant 消息，返回 store_id。
+    ///
+    /// 自动检查 tool_calls 中是否包含 SubAgent 工具，设置 `is_agent_tool`。
     pub fn push_assistant(&self, msg: Message) -> String {
-        let sm = StoreMessage::normal(msg);
+        let is_agent_tool = msg.tool_calls.as_ref().map(|tcs| {
+            tcs.iter().any(|tc| {
+                self.tool_registry
+                    .get_metadata(&tc.function.name)
+                    .map(|m| matches!(m.source, planned_agent_core::tool_registry::types::ToolSource::SubAgent { .. }))
+                    .unwrap_or(false)
+            })
+        }).unwrap_or(false);
+        let mut sm = StoreMessage::normal(msg);
+        sm.is_agent_tool = is_agent_tool;
         let store_id = self.store.append(&sm);
         self.inner.lock().unwrap().push((store_id.clone(), sm));
         store_id

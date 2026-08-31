@@ -20,7 +20,7 @@ use crate::components::alert_dialog::{
     AlertDialogTitle,
 };
 use crate::components::button::{Button, ButtonSize, ButtonVariant};
-use crate::components::chat::chat_flow::{send_message, Bubble, ChatSignals, PendingUI};
+use crate::components::chat::chat_flow::{send_message, AgentViewData, Bubble, ChatSignals, PendingUI};
 use crate::components::chat::chat_ui_actions_view::ChatUIActionsView;
 use crate::components::chat::reasoning_view::ReasoningView;
 use crate::components::chat::tool_view::ToolView;
@@ -118,6 +118,7 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
 
     let bubbles = chat.bubbles.read();
     let active = chat.active.read();
+    let agent_views = chat.agent_views.read();
 
     rsx! {
         div { class: Styles::flexible_page,
@@ -132,7 +133,7 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
 
                         for bubble in bubbles.iter().chain(active.iter()) {
                             if bubble.is_assistant {
-                                { render_assistant_bubble(bubble) }
+                                { render_assistant_bubble(bubble, &agent_views) }
                             } else {
                                 { render_user_bubble(bubble) }
                             }
@@ -198,7 +199,7 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
 
 // ── 气泡渲染 ──────────────────────────────────────────────────────────────
 
-fn render_assistant_bubble(bubble: &Bubble) -> Element {
+fn render_assistant_bubble(bubble: &Bubble, agent_views: &std::collections::HashMap<String, AgentViewData>) -> Element {
     let bubble_class = if bubble.is_streaming {
         format!(
             "{} {} {}",
@@ -216,12 +217,12 @@ fn render_assistant_bubble(bubble: &Bubble) -> Element {
 
     rsx! {
         div { class: "{bubble_class}",
-            { render_assistant_message(bubble) }
+            { render_assistant_message(bubble, agent_views) }
         }
     }
 }
 
-fn render_assistant_message(msg: &Bubble) -> Element {
+fn render_assistant_message(msg: &Bubble, agent_views: &std::collections::HashMap<String, AgentViewData>) -> Element {
     let has_reasoning = !msg.reasoning.is_empty();
     // 有工具调用进行中时用 ToolView 的 Pending/Running 动画代替光标
     let show_cursor =
@@ -239,7 +240,13 @@ fn render_assistant_message(msg: &Bubble) -> Element {
             crate::components::markdown::Markdown { text: msg.text.clone() }
         }
         for entry in msg.tool_calls.iter() {
-            ToolView { entry: entry.clone() }
+            if entry.is_sub_agent {
+                if let Some(av) = agent_views.get(&entry.tool_call_id) {
+                    crate::components::chat::agent_view::AgentView { data: av.clone() }
+                }
+            } else {
+                ToolView { entry: entry.clone() }
+            }
         }
     }
 }

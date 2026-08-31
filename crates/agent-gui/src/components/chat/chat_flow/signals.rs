@@ -13,7 +13,7 @@ use planned_agent::chat::storage::{ErrorType, StoreMessage};
 use planned_agent::chat::SubscriptionGuard;
 use planned_agent_core::ai::types::{Message, MessageContent, MessageRole};
 
-use super::types::{Bubble, PendingUI, ToolCallPhase, ToolViewData};
+use super::types::{AgentEvent, AgentViewData, Bubble, PendingUI, ToolCallPhase, ToolViewData};
 
 /// 消息状态（纯内存，Signal 均为 `Copy` 可直接进闭包/异步块）。
 #[derive(Clone, Copy, PartialEq)]
@@ -22,6 +22,8 @@ pub struct ChatSignals {
     pub bubbles: Signal<Vec<Bubble>, SyncStorage>,
     /// 当前 turn 气泡组（`send_message` → `Done`，流式增量更新的活跃区）。
     pub active: Signal<Vec<Bubble>, SyncStorage>,
+    /// 子 agent 流式数据存储（key = tool_call_id）。
+    pub agent_views: Signal<HashMap<String, AgentViewData>, SyncStorage>,
     pub pending_ui: Signal<Option<PendingUI>, SyncStorage>,
     pub input_text: Signal<String, SyncStorage>,
     pub pending_tool_call_id: Signal<Option<String>, SyncStorage>,
@@ -121,6 +123,23 @@ impl ChatSignals {
     pub fn clear_pending(&mut self) {
         self.pending_ui.set(None);
     }
+
+    // ── 子 Agent 事件攒入 ──────────────────────────────────────────────────
+
+    /// 攒入子 agent 流式事件。
+    pub fn push_agent_event(&mut self, tool_call_id: &str, event: AgentEvent) {
+        if let Some(av) = self.agent_views.write().get_mut(tool_call_id) {
+            av.events.push(event);
+        }
+    }
+
+    /// 子 agent 完成/出错：更新 phase，停止 streaming。
+    pub fn finish_agent_view(&mut self, tool_call_id: &str, phase: ToolCallPhase) {
+        if let Some(av) = self.agent_views.write().get_mut(tool_call_id) {
+            av.phase = phase;
+            av.is_streaming = false;
+        }
+    }
 }
 
 // ── 重置 / 历史 ───────────────────────────────────────────────────────────
@@ -129,14 +148,44 @@ impl ChatSignals {
     pub fn clear(&mut self) {
         self.bubbles.set(vec![]);
         self.active.set(vec![]);
+        self.agent_views.set(HashMap::new());
         self.pending_ui.set(None);
         self.pending_tool_call_id.set(None);
     }
 
     /// 从服务端 `ChatService::history_store()` 恢复气泡。
+    ///
+    /// 同时为 `is_sub_agent` 的工具创建 `AgentViewData`（从 ToolResult.content 恢复文本）。
     pub fn load_from_history(&mut self, history: &[StoreMessage]) {
-        self.bubbles.set(build_bubbles(history));
+        let built = build_bubbles(history);
+        // 为子 agent 工具创建 AgentViewData
+        let mut views = HashMap::new();
+        for bubble in &built {
+            for tc in &bubble.tool_calls {
+                if tc.is_sub_agent {
+                    let text = match &tc.result {
+                        Some(v) => {
+                            // ToolResult.content 可能是 Value::String（子 agent 最终文本）
+                            // 或 Value::Object（structured result）
+                            v.as_str().map(String::from)
+                                .or_else(|| v.get("content").and_then(|c| c.as_str()).map(String::from))
+                                .unwrap_or_else(|| serde_json::to_string_pretty(v).unwrap_or_default())
+                        }
+                        None => String::new(),
+                    };
+                    views.insert(tc.tool_call_id.clone(), AgentViewData {
+                        tool_call_id: tc.tool_call_id.clone(),
+                        name: tc.name.clone(),
+                        phase: if tc.is_error { ToolCallPhase::Error } else { ToolCallPhase::Completed },
+                        events: if text.is_empty() { vec![] } else { vec![AgentEvent::TextDelta(text)] },
+                        is_streaming: false,
+                    });
+                }
+            }
+        }
+        self.bubbles.set(built);
         self.active.set(vec![]);
+        self.agent_views.set(views);
     }
 
     /// 用服务端快照校准历史气泡（`HistoryUpdated` 事件处理）。
@@ -155,7 +204,9 @@ impl ChatSignals {
 
 impl ChatSignals {
     /// ToolCallStart：在最后 streaming 气泡上创建 `ToolViewData`（Pending）。
-    pub fn tool_call_start(&mut self, id: &str, name: &str) {
+    ///
+    /// `is_sub_agent` 为 true 时同时初始化对应的 `AgentViewData`。
+    pub fn tool_call_start(&mut self, id: &str, name: &str, is_sub_agent: bool) {
         if let Some(b) = self.active.write().iter_mut().rfind(|b| b.is_streaming) {
             b.tool_calls.push(ToolViewData {
                 tool_call_id: id.to_string(),
@@ -164,7 +215,20 @@ impl ChatSignals {
                 phase: ToolCallPhase::Pending,
                 result: None,
                 is_error: false,
+                is_sub_agent,
             });
+        }
+        if is_sub_agent {
+            self.agent_views.write().insert(
+                id.to_string(),
+                AgentViewData {
+                    tool_call_id: id.to_string(),
+                    name: name.to_string(),
+                    phase: ToolCallPhase::Running,
+                    events: Vec::new(),
+                    is_streaming: true,
+                },
+            );
         }
     }
 
@@ -201,6 +265,7 @@ impl ChatSignals {
                     phase: ToolCallPhase::Running,
                     result: None,
                     is_error: false,
+                    is_sub_agent: false,
                 });
             }
         }
@@ -242,6 +307,7 @@ impl ChatSignals {
                     phase,
                     result: Some(content.clone()),
                     is_error,
+                    is_sub_agent: false,
                 });
             }
         }
@@ -299,6 +365,7 @@ pub fn build_bubbles(messages: &[StoreMessage]) -> Vec<Bubble> {
                                 phase: ToolCallPhase::Completed,
                                 result: None,
                                 is_error: false,
+                                is_sub_agent: sm.is_agent_tool,
                             })
                             .collect()
                     })

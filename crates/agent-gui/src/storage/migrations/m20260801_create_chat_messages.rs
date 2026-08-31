@@ -32,6 +32,12 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .default(0),
                     )
+                    .col(
+                        ColumnDef::new(ChatMessages::IsAgentTool)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
                     .col(ColumnDef::new(ChatMessages::CreatedAt).string().not_null())
                     .foreign_key(
                         ForeignKey::create()
@@ -81,5 +87,6 @@ enum ChatMessages {
     MessageJson,
     SequenceOrder,
     IsErrorType,
+    IsAgentTool,
     CreatedAt,
 }

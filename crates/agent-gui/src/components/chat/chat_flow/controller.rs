@@ -14,7 +14,7 @@ use planned_agent_core::events::{ChatEvent, UIAction};
 use planned_agent_prompt_manager::FilePromptManager;
 
 use super::signals::ChatSignals;
-use super::types::PendingUI;
+use super::types::{AgentEvent, PendingUI};
 
 // ── 发送消息 ──────────────────────────────────────────────────────────────
 
@@ -71,9 +71,16 @@ pub fn handle_event(mut chat: ChatSignals, ev: ServiceChatEvent) {
         {
             chat.pending_tool_call_id.set(Some(id));
         }
-        ServiceChatEvent::Chat(ChatEvent::ToolCallStart { id, name, .. }) => {
-            tracing::info!(target: "event", event = "ToolCallStart", id = %id, name = %name, "ToolCallStart");
-            chat.tool_call_start(&id, &name);
+        ServiceChatEvent::Chat(ChatEvent::ToolCallStart { id, name, source }) => {
+            let is_sub_agent = matches!(
+                source,
+                Some(planned_agent_core::tool_registry::types::ToolSource::SubAgent { .. })
+            );
+            tracing::info!(
+                target: "event", event = "ToolCallStart",
+                id = %id, name = %name, is_sub_agent, "ToolCallStart"
+            );
+            chat.tool_call_start(&id, &name, is_sub_agent);
         }
         ServiceChatEvent::Chat(ChatEvent::ToolCallArgsDelta { id, delta }) => {
             chat.tool_call_append_args(&id, &delta);
@@ -96,6 +103,15 @@ pub fn handle_event(mut chat: ChatSignals, ev: ServiceChatEvent) {
         }) => {
             tracing::info!(target: "event", event = "ToolExecuted", id = %id, name = %name, is_error, "ToolExecuted");
             chat.tool_call_executed(&id, &name, is_error, &content);
+            // 子 agent 完成：更新 AgentView phase
+            if chat.agent_views.read().contains_key(&id) {
+                let phase = if is_error {
+                    super::types::ToolCallPhase::Error
+                } else {
+                    super::types::ToolCallPhase::Completed
+                };
+                chat.finish_agent_view(&id, phase);
+            }
         }
         ServiceChatEvent::Chat(ChatEvent::RoundEnd { .. }) => {
             tracing::info!(target: "event", event = "RoundEnd", "RoundEnd");
@@ -116,14 +132,16 @@ pub fn handle_event(mut chat: ChatSignals, ev: ServiceChatEvent) {
             });
         }
         ServiceChatEvent::Chat(ChatEvent::SubChat { tool_call_id, event }) => {
-            // 子 agent 流式事件：暂存 log，后续路由到 AgentView 数据存储
-            tracing::debug!(
-                target: "event",
-                event = "SubChat",
-                tool_call_id = %tool_call_id,
-                inner = ?event,
-                "子 agent 流式事件"
-            );
+            // 子 agent 流式事件：攒入对应 AgentViewData
+            match *event {
+                ChatEvent::TextDelta(ref text) => {
+                    chat.push_agent_event(&tool_call_id, AgentEvent::TextDelta(text.clone()));
+                }
+                ChatEvent::ReasoningDelta(ref text) => {
+                    chat.push_agent_event(&tool_call_id, AgentEvent::ReasoningDelta(text.clone()));
+                }
+                _ => {}
+            }
         }
         ServiceChatEvent::Done { cancelled } => {
             tracing::info!(target: "event", event = "Done", cancelled, "Done");

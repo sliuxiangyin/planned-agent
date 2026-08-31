@@ -9,13 +9,16 @@
 
 ```
 chat/
-├── mod.rs                    # 模块入口，pub use ChatPanel
+├── mod.rs                    # 模块入口，pub use ChatPanel / AgentView
 ├── chat_flow/                # 消息流转（数据层 + 业务编排）
-│   ├── types.rs              #   纯数据类型：Bubble / ToolViewData / PendingUI
-│   ├── signals.rs            #   ChatSignals 信号容器（全部状态变更方法 + build_bubbles）
+│   ├── types.rs              #   纯数据类型：Bubble / ToolViewData / AgentViewData / PendingUI
+│   ├── signals.rs            #   ChatSignals 信号容器（bubbles + active + agent_views）
 │   └── controller.rs         #   事件消费 / 发送消息 / 用户操作回调
+├── agent_view/               # 子 agent 输出的嵌入式可折叠卡片
+│   ├── component.rs          #   AgentView 组件（Bot 图标 + 渐变线 + Markdown 渲染）
+│   └── style.css
 ├── chat_panel/               # 完整聊天面板（消息列表 + 输入区 + composer 工具栏）
-│   ├── component.rs          #   ChatPanel 组件（只读渲染，不构建气泡）
+│   ├── component.rs          #   ChatPanel 组件（只读渲染，ToolView/AgentView 分流）
 │   └── style.css
 ├── chat_ui_actions_view/     # Agent 交互卡片（Confirm / Select / Input / MultiSelect）
 ├── reasoning_view/           # Assistant「深度思考」折叠面板
@@ -25,6 +28,7 @@ chat/
 | 模块 | 职责 | 关键导出 |
 |---|---|---|
 | `chat_flow` | 气泡状态、事件消费 | `ChatSignals`、`send_message`、`ensure_subscription`、`handle_user_action` |
+| `agent_view` | 子 agent 输出渲染 | `AgentView` |
 | `chat_panel` | 纯 UI 布局，不持有业务逻辑 | `ChatPanel`、`template_label` |
 | `chat_ui_actions_view` | `request_user_action` 交互卡片 | `ChatUIActionsView` |
 | `reasoning_view` | 推理内容折叠面板 | `ReasoningView` |
@@ -38,12 +42,13 @@ chat/
 
 ### 2.1 `ChatSignals`（signals.rs）
 
-单一气泡源，拆成「历史 + 活跃」两个 Signal：
+单一气泡源，拆成「历史 + 活跃 + 子 agent」三个 Signal：
 
 ```rust
 pub struct ChatSignals {
     pub bubbles: Signal<Vec<Bubble>, SyncStorage>,   // 历史气泡（已完成的 turn）
     pub active:  Signal<Vec<Bubble>, SyncStorage>,   // 当前 turn 气泡组（流式增量更新）
+    pub agent_views: Signal<HashMap<String, AgentViewData>, SyncStorage>, // 子 agent 流式数据
     pub pending_ui: Signal<Option<PendingUI>, SyncStorage>, // 交互卡片
     pub input_text: Signal<String, SyncStorage>,            // composer 输入框
     pub pending_tool_call_id: Signal<Option<String>, SyncStorage>, // request_user_action 的 tool_call_id
@@ -136,10 +141,11 @@ pub struct PendingUI {
 | `Chat(TextDelta)` | `append_streaming_text` | 追加到 `active` 最后一条 streaming 气泡 |
 | `Chat(ReasoningDelta)` | `append_streaming_reasoning` | 同上，追加 reasoning |
 | `Chat(RoundStart)` | 若未 streaming 则 `push_assistant_placeholder` | 防御性（send_message 已预建占位） |
-| `Chat(ToolCallStart)` | `tool_call_start` | 建 `ToolViewData{Pending}` |
+| `Chat(ToolCallStart)` | `tool_call_start(id, name, is_sub_agent)` | 建 `ToolViewData`；`is_sub_agent` 时同时建 `AgentViewData` |
 | `Chat(ToolCallArgsDelta)` | `tool_call_append_args` | 追加 `arguments` |
 | `Chat(ToolCallComplete)` | `tool_call_complete` | `arguments` 覆写 + `phase=Running` |
-| `Chat(ToolExecuted)` | `tool_call_executed` | `phase=Completed/Error` + `result` |
+| `Chat(ToolExecuted)` | `tool_call_executed` + `finish_agent_view` | `phase=Completed/Error` + `result`；若为子 agent 则同步更新 `AgentView` |
+| `Chat(SubChat)` | `push_agent_event` | 子 agent 流式事件（TextDelta/ReasoningDelta）攒入 `agent_views` |
 | `Chat(RoundEnd)` | `stop_streaming` | 轮次结束 |
 | `Chat(UIActionRequest)` | `set_pending` | 弹出交互卡片 |
 | `Done` | `stop_streaming` + **`finish_turn`** + `clear_pending` | turn 收尾并入历史 |
@@ -162,17 +168,21 @@ ChatSignals.bubbles (历史气泡)  +  ChatSignals.active (当前 turn 气泡)
                                               render_assistant_bubble / render_user_bubble
                                                                   │
                                                                   ▼
-                                    ReasoningView + Markdown(text) + ToolView × N + 光标
+                                    ┌─ ToolViewData.is_sub_agent ─┼─ false → ToolView
+                                    └─ true → AgentView（读 agent_views[tool_call_id]）
+                                    + ReasoningView + Markdown(text) + 光标
 ```
 
-组件只读两个 Signal，不做任何构建。`Bubble` 已是一次成型的渲染数据。
+组件只读三个 Signal（bubbles + active + agent_views），不做任何构建。
 
 ### 5.2 单条 assistant 气泡渲染顺序（与 ChatGPT/Claude 一致）
 
 ```
 1. ReasoningView（如有推理内容，流式时脉冲动画）
 2. Markdown(text)（工具调用前说的话，显示在工具面板之前）
-3. ToolView × N（工具面板紧随其说明文本）
+3. tool_calls 分流：
+   - is_sub_agent == false → ToolView（折叠面板：Input/Output）
+   - is_sub_agent == true  → AgentView（嵌入式卡片：Bot 图标 + 渐变线 + Markdown）
 4. 光标 "▍"（仅当 streaming 且 text/reasoning/tool_calls 全空）
 ```
 
@@ -181,6 +191,48 @@ ChatSignals.bubbles (历史气泡)  +  ChatSignals.active (当前 turn 气泡)
 - `Textarea`：Enter 发送（Shift+Enter 换行），busy 时禁用
 - 工具栏：模板选择、思考模式、温度选择
 - 发送/停止按钮：busy → 停止（`svc.stop()`）；空闲 → 发送
+
+---
+
+## 6. 子 Agent 事件流（SubChat）
+
+### 6.1 事件转发规则（`sub_agent/mod.rs::collect_until_outcome`）
+
+| 子 agent 事件 | 转发方式 | 说明 |
+|---|---|---|
+| `UIActionRequest` | `Chat(CoreChatEvent::UIActionRequest)` | 主 agent GUI 直接处理交互卡片 |
+| `RoundStart` / `RoundEnd` | 不转发 | 避免主 agent 创建多余气泡 |
+| `TextDelta` / `ReasoningDelta` | `Chat(CoreChatEvent::SubChat { tool_call_id, event })` | 路由到 `agent_views[tool_call_id]` |
+| `ToolCall*` / `ToolExecuted` | `Chat(CoreChatEvent::SubChat { tool_call_id, event })` | 子 agent 内部工具调用 |
+
+### 6.2 数据流
+
+```
+子 agent 内部事件
+  │
+  ├─ UIActionRequest → Chat(UIActionRequest) → 主 agent GUI 弹交互卡片
+  ├─ RoundStart/End  → 不转发
+  └─ 其余           → Chat(SubChat { tool_call_id, event })
+                          │
+                          ▼
+                    controller.rs: push_agent_event(tool_call_id, AgentEvent)
+                          │
+                          ▼
+                    agent_views[tool_call_id].events += AgentEvent::TextDelta/ReasoningDelta
+                          │
+                          ▼
+                    AgentView 组件读取并渲染 Markdown
+```
+
+### 6.3 子 agent 完成信号
+
+```
+子 agent 完成 → collect_until_outcome 返回 Done
+  → SubAgentToolExecutor 返回 ToolResult
+  → 父 agent run_conversation emit Chat(ToolExecuted { id, is_error })
+  → controller.rs: finish_agent_view(id, Completed/Error)
+  → AgentView 状态更新为 Completed/Error，停止 streaming
+```
 
 ---
 

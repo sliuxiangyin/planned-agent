@@ -17,6 +17,9 @@ pub struct Model {
     /// 错误类型：0=无错误，1=工具执行错误，2=中断错误
     #[sea_orm(default_value = 0)]
     pub is_error_type: i32,
+    /// 是否为子 agent 工具调用
+    #[sea_orm(default_value = false)]
+    pub is_agent_tool: bool,
     pub created_at: String,
 }
 

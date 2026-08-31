@@ -38,7 +38,9 @@ impl ChatHistoryStore for ChatMessageStore {
             match serde_json::from_str::<Message>(&row.message_json) {
                 Ok(msg) => {
                     let error_type = ErrorType::from_i32(row.is_error_type);
-                    result.push(StoreMessage::new(msg, error_type));
+                    let mut sm = StoreMessage::new(msg, error_type);
+                    sm.is_agent_tool = row.is_agent_tool;
+                    result.push(sm);
                 }
                 Err(e) => {
                     tracing::warn!("反序列化消息失败 (id={}): {}", row.id, e);
@@ -60,6 +62,7 @@ impl ChatHistoryStore for ChatMessageStore {
         let plan_id = self.plan_id.clone();
         let repo = self.repo.clone();
         let is_error_type = msg.is_error_type as i32;
+        let is_agent_tool = msg.is_agent_tool;
 
         let msg_json = match serde_json::to_string(&msg.message) {
             Ok(j) => j,
@@ -76,7 +79,7 @@ impl ChatHistoryStore for ChatMessageStore {
                     Err(_) => 1,
                 };
                 let row = repo
-                    .create(&plan_id, &msg_json, next_seq, is_error_type)
+                    .create(&plan_id, &msg_json, next_seq, is_error_type, is_agent_tool)
                     .await?;
                 Ok::<_, anyhow::Error>(row)
             })
