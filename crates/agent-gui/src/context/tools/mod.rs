@@ -6,15 +6,17 @@
 //! - ToolRegistry 内部已用 `RwLock<Option<...>>`，天然支持延后设置与将来替换
 //! - **不新增任何占位/扩展 API**——按需再设计
 
+pub mod plans_flexible_tool;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use anyhow::Result;
+use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use planned_agent_core::tool_registry::{ToolCategory, ToolExecutor};
 use planned_agent_core::mcp::types::{Tool, ToolResult};
+use planned_agent_core::tool_registry::{ToolCategory, ToolExecutor};
 use planned_agent_mcp_rmcp::McpManager;
 use planned_agent_tool_manager::builtin::{
     ai_tools::AiToolsProvider, data_tools::DataToolsProvider, doc_tools::DocToolsProvider,
@@ -151,27 +153,22 @@ fn request_user_action_tool() -> Tool {
     Tool {
         name: "request_user_action".into(),
         description:
-            "当需要用户确认、选择或补充信息时调用。用于引导用户完善需求、确认计划生成等交互场景。\
-             调用后等待用户操作，不要自行假设用户选择。\
+            "请求用户进行确认、选择或补充信息。调用后必须等待用户响应，不得自行假设用户选择。\n\
              \n\
-             动作类型硬规则：\
+             动作类型：\n\
+             - select：单选列表，可并列多个，自动附带「自定义输入」入口（若选项已穷尽，可设 allow_custom=false 禁用）。\n\
+             - multi_select：多选复选框，需搭配一个 confirm 按钮提交；同样自带自定义输入入口（可用 allow_custom=false 禁用）。\n\
+             - confirm：确认/批准/跳过类决定；禁止单独用作追问（追问必须提供 select 选项）。\n\
+             - input：自由文本输入，通常配 confirm 提交；不要与 select 混搭（前端会丢弃 select，只保留 input）。\n\
              \n\
-             - 提供选项让用户选择（追问场景）一律用 select：每个选项一个 select action，可并列多个；\
-               单选列表自动附带「自定义输入」入口，用户可输入选项之外的内容。\
-             \n\
-             - confirm 仅用于确认/批准/跳过类决定（如「确认」「暂不设置」）；禁止用单个 confirm 充当追问选项，\
-               那会让用户没有可选项。\
-             \n\
-             - 不要为追问额外构造 input：select 自带自定义输入入口；input 与 select 混搭时前端会丢弃 select、只保留 input，追问失效。\
-             \n\
-             正例（追问输出格式）：actions = [\
-               {id:\"opt_json\", type:\"select\", label:\"JSON\"},\
-               {id:\"opt_text\", type:\"select\", label:\"纯文本摘要\"},\
-               {id:\"opt_bool\", type:\"select\", label:\"布尔判断\"}]\
-             \n\
-             反例（违规）：actions = [{id:\"ok\", type:\"confirm\", label:\"确认\"}] —— 追问必须有 select 选项。"
+             组合规则：\n\
+             - 追问（让用户选一项）→ 并列多个 select。\n\
+             - 多选（让用户勾选多项）→ 一个 multi_select + 一个 confirm 提交。\n\
+             - 确认/批准/跳过 → 单个 confirm。\n\
+             - 自由输入 → 一个 input（通常配 confirm 提交）。\n\
+             - 禁止 select 与 input 混搭。"
                 .into(),
-        input_schema: json!({
+            input_schema: json!({
             "type": "object",
             "properties": {
                 "message": {
@@ -200,6 +197,10 @@ fn request_user_action_tool() -> Tool {
                             "description": {
                                 "type": "string",
                                 "description": "补充说明，可选"
+                            },
+                            "allow_custom": {
+                                "type": "boolean",
+                                "description": "是否附带「补充输入」入口（仅 select / multi_select 有效，默认 true）。选项已穷尽、无需用户补充时可置 false 隐藏补充输入框"
                             },
                             "options": {
                                 "type": "array",

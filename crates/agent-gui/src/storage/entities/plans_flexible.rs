@@ -1,4 +1,6 @@
 //! plans_flexible 表 entity — 灵活模式计划的版本快照。
+//! 存储 flexible_step5 生成的混合模板（input_schema / output / steps / execution_plan），
+//! 其中 metadata 拆为 version + created_at 两列。
 
 use sea_orm::entity::prelude::*;
 
@@ -10,22 +12,21 @@ pub struct Model {
     pub id: String,
     /// FK → plans.id
     pub plan_id: String,
-    /// 版本号：1, 2, 3...
+    /// 版本号：1, 2, 3...（对应 step5 输出 metadata.version）
     pub version: i32,
-    /// AI 自然语言总结原文
-    pub previous_summary: String,
-    /// CoarseGrainedPlan JSON
-    #[sea_orm(default_value = "[]")]
-    pub todos: String,
-    /// 计划参数 JSON（ParamDef 数组，来自清晰度检查固化勾选）
-    #[sea_orm(default_value = "[]")]
-    pub params: String,
-    /// 输出格式描述（占位预留：多计划关联执行时描述本计划产出格式，当前未实现读写逻辑）
-    #[sea_orm(default_value = "")]
-    pub output_schema: String,
-    /// 输入参数定义 JSON（计划执行所需的外部输入参数，保存后供下次执行动态替换参数）
-    #[sea_orm(default_value = "")]
+    /// 输入参数定义 JSON（来自 step5 输出 input_schema）
+    #[sea_orm(default_value = "{}")]
     pub input_schema: String,
+    /// 输出定义 JSON（来自 step5 输出 output：format + fields）
+    #[sea_orm(default_value = "{}")]
+    pub output: String,
+    /// 硬编码执行脚本 JSON 数组（来自 step5 输出 steps）
+    #[sea_orm(default_value = "[]")]
+    pub steps: String,
+    /// 动态修复说明书 JSON 数组（来自 step5 输出 execution_plan）
+    #[sea_orm(default_value = "[]")]
+    pub execution_plan: String,
+    /// 创建时间（对应 step5 输出 metadata.created_at）
     pub created_at: String,
 }
 

@@ -1,4 +1,4 @@
-//! plans_flexible 表迁移（含 output_schema、input_schema）。
+//! plans_flexible 表迁移（存储 flexible_step5 生成的混合模板）。
 
 use sea_orm_migration::prelude::*;
 
@@ -22,33 +22,28 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(PlansFlexible::PlanId).string().not_null())
                     .col(ColumnDef::new(PlansFlexible::Version).integer().not_null())
                     .col(
-                        ColumnDef::new(PlansFlexible::PreviousSummary)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(PlansFlexible::Todos)
-                            .string()
-                            .not_null()
-                            .default("[]"),
-                    )
-                    .col(
-                        ColumnDef::new(PlansFlexible::Params)
-                            .string()
-                            .not_null()
-                            .default("[]"),
-                    )
-                    .col(
-                        ColumnDef::new(PlansFlexible::OutputSchema)
-                            .string()
-                            .not_null()
-                            .default(""),
-                    )
-                    .col(
                         ColumnDef::new(PlansFlexible::InputSchema)
                             .string()
                             .not_null()
-                            .default(""),
+                            .default("{}"),
+                    )
+                    .col(
+                        ColumnDef::new(PlansFlexible::Output)
+                            .string()
+                            .not_null()
+                            .default("{}"),
+                    )
+                    .col(
+                        ColumnDef::new(PlansFlexible::Steps)
+                            .string()
+                            .not_null()
+                            .default("[]"),
+                    )
+                    .col(
+                        ColumnDef::new(PlansFlexible::ExecutionPlan)
+                            .string()
+                            .not_null()
+                            .default("[]"),
                     )
                     .col(ColumnDef::new(PlansFlexible::CreatedAt).string().not_null())
                     .foreign_key(
@@ -96,10 +91,9 @@ enum PlansFlexible {
     Id,
     PlanId,
     Version,
-    PreviousSummary,
-    Todos,
-    Params,
-    OutputSchema,
     InputSchema,
+    Output,
+    Steps,
+    ExecutionPlan,
     CreatedAt,
 }

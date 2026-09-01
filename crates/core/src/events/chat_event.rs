@@ -120,6 +120,7 @@ mod tests {
             label: "确认".to_string(),
             description: None,
             options: vec![],
+            allow_custom: true,
         }
     }
 

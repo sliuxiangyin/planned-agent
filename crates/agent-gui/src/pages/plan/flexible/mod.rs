@@ -5,5 +5,6 @@
 pub(crate) mod json_extract;
 pub(crate) mod page;
 pub(crate) mod step2_callback;
+pub(crate) mod step5_callback;
 
 pub(crate) use page::FlexiblePage;

@@ -55,6 +55,7 @@ pub(crate) fn parse_ui_actions(raw: &Value) -> Vec<UIAction> {
                 label: FALLBACK_CONFIRM_LABEL.to_string(),
                 description: None,
                 options: vec![],
+                allow_custom: true,
             },
         );
     }

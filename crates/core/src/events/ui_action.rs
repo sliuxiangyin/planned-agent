@@ -31,6 +31,10 @@ pub struct UIAction {
     /// MultiSelect 复选框选项列表（仅 action_type = multi_select 时有效）
     #[serde(default)]
     pub options: Vec<MultiSelectOption>,
+    /// 是否附带「补充输入」入口（仅 select / multi_select 有效，默认 true）。
+    /// 当选项已穷尽、无需用户补充时，可置 false 隐藏补充输入框，避免冗余 UI。
+    #[serde(default = "default_true")]
+    pub allow_custom: bool,
 }
 
 /// MultiSelect 复选框选项。
@@ -46,6 +50,11 @@ pub struct MultiSelectOption {
     /// 是否默认勾选
     #[serde(default)]
     pub default: bool,
+}
+
+/// serde 默认值：allow_custom 默认开启（补充输入作为兜底能力，能力不退化）。
+fn default_true() -> bool {
+    true
 }
 
 /// UI 交互动作类型。

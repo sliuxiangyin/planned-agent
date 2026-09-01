@@ -42,6 +42,8 @@ pub fn ChatUIActionsView(
     let mut input_text = use_signal(String::new);
     // Select 单选组「自定义输入」（D）的文本状态（独立于 Input 的 input_text）
     let mut select_custom_text = use_signal(String::new);
+    // MultiSelect 自定义字段输入文本（确认时与勾选状态合并提交）
+    let mut multi_custom_text = use_signal(String::new);
 
     // ── MultiSelect 复选框状态 ──
     let multi_select_actions: Vec<&UIAction> = actions
@@ -102,7 +104,8 @@ pub fn ChatUIActionsView(
     let build_multi_choice = move || {
         let state = checkbox_state.read();
         let values = option_value_map.read();
-        let ids: Vec<String> = state
+        let custom = multi_custom_text.read().trim().to_string();
+        let mut parts: Vec<String> = state
             .iter()
             .filter(|(_, &v)| v)
             .filter_map(|(k, _)| {
@@ -114,10 +117,14 @@ pub fn ChatUIActionsView(
                     .or_else(|| Some(k.clone()))
             })
             .collect();
-        if ids.is_empty() {
+        // 自定义字段输入非空 → 追加 custom=<文本>，与勾选状态合并提交
+        if !custom.is_empty() {
+            parts.push(format!("custom={}", custom));
+        }
+        if parts.is_empty() {
             "none".to_string()
         } else {
-            ids.join(",")
+            parts.join(",")
         }
     };
 
@@ -137,7 +144,14 @@ pub fn ChatUIActionsView(
         label: FALLBACK_CONFIRM_LABEL.to_string(),
         description: None,
         options: vec![],
+        allow_custom: true,
     };
+    // 多选确认提交用的 action：优先 LLM 提供的 confirm，否则用兜底「确定」
+    let confirm_action: UIAction = actions
+        .iter()
+        .find(|a| matches!(a.action_type, UIActionType::Confirm))
+        .cloned()
+        .unwrap_or_else(|| fallback_action.clone());
 
     rsx! {
         div { class: Styles::chat_ui_actions,
@@ -160,6 +174,37 @@ pub fn ChatUIActionsView(
                                     },
                                 }
                                 "{opt.label}"
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── MultiSelect 自定义字段输入（确认时与勾选状态合并提交）──
+            if has_multi_select
+                && multi_select_actions
+                    .first()
+                    .map(|a| a.allow_custom)
+                    .unwrap_or(true)
+            {
+                div { class: Styles::select_custom_row,
+                    {
+                        let build = build_multi_choice.clone();
+                        let confirm = confirm_action.clone();
+                        rsx! {
+                            Input {
+                                placeholder: "请输入自定义字段",
+                                value: "{multi_custom_text}",
+                                oninput: move |e: FormEvent| multi_custom_text.set(e.value()),
+                                onkeydown: move |e: KeyboardEvent| {
+                                    if e.data.key() == keyboard_types::Key::Enter {
+                                        let choice = build();
+                                        if choice != "none" {
+                                            on_action.call((confirm.clone(), choice));
+                                            multi_custom_text.set(String::new());
+                                        }
+                                    }
+                                },
                             }
                         }
                     }
@@ -217,7 +262,9 @@ pub fn ChatUIActionsView(
                                 variant: ButtonVariant::Secondary,
                                 size: ButtonSize::Sm,
                                 onclick: move |_| {
-                                    on_action.call((fallback_action.clone(), build()));
+                                    let choice = build();
+                                    multi_custom_text.set(String::new());
+                                    on_action.call((fallback_action.clone(), choice));
                                 },
                                 "{FALLBACK_CONFIRM_LABEL}"
                             }
@@ -250,6 +297,9 @@ pub fn ChatUIActionsView(
                                                 } else {
                                                     label.clone()
                                                 };
+                                                if has_ms {
+                                                    multi_custom_text.set(String::new());
+                                                }
                                                 on_action.call((action.clone(), choice));
                                             },
                                             "{display_label}"
@@ -283,7 +333,13 @@ pub fn ChatUIActionsView(
             }
 
             // ── Select 单选组「自定义输入」入口（D）──
-            if show_button_group && has_select {
+            if show_button_group
+                && has_select
+                && select_custom_target
+                    .as_ref()
+                    .map(|a| a.allow_custom)
+                    .unwrap_or(true)
+            {
                 for action in select_custom_target.iter() {
                     {
                         let enter_action = action.clone();

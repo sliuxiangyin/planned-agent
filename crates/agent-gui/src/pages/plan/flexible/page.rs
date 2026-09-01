@@ -24,6 +24,7 @@ use crate::context::{
     register_sub_agent, require_resource, storage_repo, AiContext, PromptContext, StorageContext,
     ToolsContext,
 };
+use crate::services::plans_flexible_service::PlansFlexibleService;
 use crate::storage::ChatMessageStore;
 
 use dioxus_icons::lucide::Trash2;
@@ -171,7 +172,11 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
                 },
                 "required": ["user_message"]
             }),
-            "flexible/flexible_step1",
+            ChatConfig {
+                system_prompt_template: Some("flexible/flexible_step1".into()),
+                allowed_tools: Some(vec!["request_user_action".to_string()]),
+                ..Default::default()
+            },
             1,  // depth: 子 agent 嵌套深度
             2,  // max_depth: 最大允许嵌套深度
             None,
@@ -200,10 +205,131 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
                 },
                 "required": ["task_definition"]
             }),
-            "flexible/flexible_step2",
+            ChatConfig {
+                system_prompt_template: Some("flexible/flexible_step2".into()),
+                ..Default::default()
+            },
+            1, // depth: 子 agent 嵌套深度
+            2, // max_depth: 最大允许嵌套深度
+            super::step2_callback::create_step2_callback(),
+        );
+    }
+
+    // ── 注册子 agent: flexible_step3 ──
+    {
+        register_sub_agent(
+            &ai_ctx,
+            &tools_ctx,
+            &prompt_ctx,
+            "flexible_step3",
+            "灵活模式字段选择 Agent：从 step2 执行结果中提取可用字段，通过交互让用户选择最终输出的字段。",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "execution_trace_summary": {
+                        "type": "string",
+                        "description": "来自 flexible_step2 的执行轨迹摘要（compressed_context），包含工具调用记录和输出数据"
+                    },
+                    "output_format": {
+                        "type": "string",
+                        "description": "来自 flexible_step1 的输出格式，已由用户确认（如 Excel、CSV、JSON、文本等）"
+                    }
+                },
+                "required": ["execution_trace_summary"]
+            }),
+            ChatConfig {
+                system_prompt_template: Some("flexible/flexible_step3".into()),
+                  allowed_tools: Some(vec!["request_user_action".to_string()]),
+                ..Default::default()
+            },
             1,  // depth: 子 agent 嵌套深度
             2,  // max_depth: 最大允许嵌套深度
-            super::step2_callback::create_step2_callback(),
+            None,
+        );
+    }
+
+    // ── 注册子 agent: flexible_step4 ──
+    {
+        register_sub_agent(
+            &ai_ctx,
+            &tools_ctx,
+            &prompt_ctx,
+            "flexible_step4",
+            "灵活模式参数确认 Agent：分析 step2 执行轨迹中的具体参数值，识别可参数化候选，与用户确认后生成最终的模板输入定义。",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "execution_trace": {
+                        "type": "string",
+                        "description": "来自 flexible_step2 的完整执行轨迹，包含每次工具调用的输入参数"
+                    },
+                    "output_format": {
+                        "type": "string",
+                        "description": "来自 flexible_step1 的输出格式，已由用户确认（如 Excel、CSV、JSON、文本等）"
+                    },
+                    "field_selection_result": {
+                        "type": "string",
+                        "description": "来自 flexible_step3 的纯文本输出，包含可用字段和用户选中的字段"
+                    }
+                },
+                "required": ["execution_trace", "output_format", "field_selection_result"]
+            }),
+            ChatConfig {
+                system_prompt_template: Some("flexible/flexible_step4".into()),
+                  allowed_tools: Some(vec!["request_user_action".to_string()]),
+                ..Default::default()
+            },
+            1,  // depth: 子 agent 嵌套深度
+            2,  // max_depth: 最大允许嵌套深度
+            None,
+        );
+
+    // ── 注册子 agent: flexible_step5 ──
+    {
+        // plans_flexible 持久化服务（storage 就绪时可用；否则回调为 None，仅记日志跳过）
+        let plans_flexible_service =
+            storage_repo(storage_resource, |ctx| ctx.plans_flexible_repo())
+                .map(|repo| Arc::new(PlansFlexibleService::new(repo)));
+        let step5_callback = plans_flexible_service
+            .map(|svc| super::step5_callback::create_step5_callback(plan_id.clone(), svc))
+            .flatten();
+
+        register_sub_agent(
+            &ai_ctx,
+            &tools_ctx,
+            &prompt_ctx,
+            "flexible_step5",
+            "灵活模式模板序列化 Agent：将需求澄清、执行轨迹、字段选择、参数化确认的结果编译为可复用的混合模板（steps 硬脚本 + execution_plan 智能说明书）。",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_definition": {
+                        "type": "string",
+                        "description": "来自 flexible_step1 的 Markdown 任务描述（含任务名称、参数列表）"
+                    },
+                    "execution_trace": {
+                        "type": "string",
+                        "description": "来自 flexible_step2 的完整执行轨迹（按顺序的工具调用及输入参数）"
+                    },
+                    "field_selection_result": {
+                        "type": "string",
+                        "description": "来自 flexible_step3 的纯文本输出，包含可用字段和用户选中的字段"
+                    },
+                    "parameter_confirmation_result": {
+                        "type": "string",
+                        "description": "来自 flexible_step4 的纯文本输出，包含参数候选、选中参数和模板输入定义"
+                    }
+                },
+                "required": ["task_definition", "execution_trace", "field_selection_result", "parameter_confirmation_result"]
+            }),
+            ChatConfig {
+                system_prompt_template: Some("flexible/flexible_step5".into()),
+                allowed_tools: Some(vec!["request_user_action".to_string()]),
+                ..Default::default()
+            },
+            1,  // depth: 子 agent 嵌套深度
+            2,  // max_depth: 最大允许嵌套深度
+            step5_callback,
         );
     }
 

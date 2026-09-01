@@ -20,7 +20,7 @@ use super::{AiContext, PromptContext, ToolsContext};
 /// - `tool_name` — 工具名（如 `"flexible_step1"`）
 /// - `description` — 工具描述
 /// - `input_schema` — JSON Schema
-/// - `prompt_template` — prompt 文件路径（如 `"flexible/flexible_step1"`）
+/// - `config` — 子 agent 的 `ChatConfig`（含 `system_prompt_template` 等）
 /// - `depth` — 当前嵌套深度（通常为 1）
 /// - `max_depth` — 最大允许嵌套深度（通常为 2）
 pub fn register_sub_agent(
@@ -30,7 +30,7 @@ pub fn register_sub_agent(
     tool_name: &str,
     description: &str,
     input_schema: Value,
-    prompt_template: &str,
+    config: ChatConfig,
     depth: u32,
     max_depth: u32,
     result_callback: Option<Arc<dyn SubAgentResultCallback>>,
@@ -45,10 +45,7 @@ pub fn register_sub_agent(
         (*ai_ctx.manager).clone(),
         tools_ctx.registry.clone(),
         prompt_ctx.manager.clone(),
-        ChatConfig {
-            system_prompt_template: Some(prompt_template.to_string()),
-            ..Default::default()
-        },
+        config,
         depth,
         max_depth,
         result_callback,
@@ -58,5 +55,5 @@ pub fn register_sub_agent(
         .registry
         .register_sub_agent(tool, Arc::new(runner));
 
-    tracing::info!("已注册子 Agent: {} (prompt={})", tool_name, prompt_template);
+    tracing::info!("已注册子 Agent: {} ", tool_name);
 }
