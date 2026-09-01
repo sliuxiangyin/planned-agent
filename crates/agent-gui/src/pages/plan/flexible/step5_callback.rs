@@ -91,12 +91,9 @@ impl SubAgentResultCallback for FlexibleStep5Callback {
         let steps_arr = json["steps"].as_array().unwrap();
         let plan_arr = json["execution_plan"].as_array().unwrap();
         let mismatched = steps_arr.len() != plan_arr.len()
-            || steps_arr
-                .iter()
-                .zip(plan_arr.iter())
-                .any(|(s, p)| {
-                    s.get("id").and_then(Value::as_str) != p.get("step_id").and_then(Value::as_str)
-                });
+            || steps_arr.iter().zip(plan_arr.iter()).any(|(s, p)| {
+                s.get("id").and_then(Value::as_str) != p.get("step_id").and_then(Value::as_str)
+            });
         if mismatched {
             tracing::warn!(
                 "[flexible_step5] 子 agent '{}' 的 steps 与 execution_plan 不一一对应，请求重试",
@@ -115,7 +112,7 @@ impl SubAgentResultCallback for FlexibleStep5Callback {
 
         let plan_id2 = plan_id.clone();
         let service2 = service.clone();
-        dioxus::prelude::spawn(async move {
+        tokio::spawn(async move {
             match service2
                 .write(&plan_id2, &input_schema, &output, &steps, &execution_plan)
                 .await
@@ -126,10 +123,7 @@ impl SubAgentResultCallback for FlexibleStep5Callback {
                     model.plan_id,
                     model.version
                 ),
-                Err(e) => tracing::error!(
-                    "[flexible_step5] 写入 plans_flexible 失败: {}",
-                    e
-                ),
+                Err(e) => tracing::error!("[flexible_step5] 写入 plans_flexible 失败: {}", e),
             }
         });
 

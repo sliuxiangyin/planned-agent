@@ -150,9 +150,12 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
     let current_template = template.read().clone().unwrap_or_default();
     let busy = chat.is_busy();
 
-    // ── 注册子 agent: flexible_step1 ──
-    {
-        register_sub_agent(
+    // ── 注册子 agent：use_hook 一次性挂载 + use_drop 卸载注销（生命周期方案，避免重复注册与孤儿工具）──
+    let registry = tools_ctx.registry.clone();
+    use_hook(move || {
+        // ── 注册子 agent: flexible_step1 ──
+        {
+            register_sub_agent(
             &ai_ctx,
             &tools_ctx,
             &prompt_ctx,
@@ -181,43 +184,43 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
             2,  // max_depth: 最大允许嵌套深度
             None,
         );
-    }
+        }
 
-    // ── 注册子 agent: flexible_step2 ──
-    {
-        register_sub_agent(
-            &ai_ctx,
-            &tools_ctx,
-            &prompt_ctx,
-            "flexible_step2",
-            "灵活模式任务执行 Agent：根据需求澄清结果执行工具调用并记录轨迹。",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task_definition": {
-                        "type": "string",
-                        "description": "来自 flexible_step1 的 Markdown 任务定义，包含任务描述和参数"
+        // ── 注册子 agent: flexible_step2 ──
+        {
+            register_sub_agent(
+                &ai_ctx,
+                &tools_ctx,
+                &prompt_ctx,
+                "flexible_step2",
+                "灵活模式任务执行 Agent：根据需求澄清结果执行工具调用并记录轨迹。",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "task_definition": {
+                            "type": "string",
+                            "description": "来自 flexible_step1 的 Markdown 任务定义，包含任务描述和参数"
+                        },
+                        "runtime_context": {
+                            "type": "string",
+                            "description": "可选，来自上一轮执行的 compressed_context；首次执行时为空"
+                        }
                     },
-                    "runtime_context": {
-                        "type": "string",
-                        "description": "可选，来自上一轮执行的 compressed_context；首次执行时为空"
-                    }
+                    "required": ["task_definition"]
+                }),
+                ChatConfig {
+                    system_prompt_template: Some("flexible/flexible_step2".into()),
+                    ..Default::default()
                 },
-                "required": ["task_definition"]
-            }),
-            ChatConfig {
-                system_prompt_template: Some("flexible/flexible_step2".into()),
-                ..Default::default()
-            },
-            1, // depth: 子 agent 嵌套深度
-            2, // max_depth: 最大允许嵌套深度
-            super::step2_callback::create_step2_callback(),
-        );
-    }
+                1, // depth: 子 agent 嵌套深度
+                2, // max_depth: 最大允许嵌套深度
+                super::step2_callback::create_step2_callback(),
+            );
+        }
 
-    // ── 注册子 agent: flexible_step3 ──
-    {
-        register_sub_agent(
+        // ── 注册子 agent: flexible_step3 ──
+        {
+            register_sub_agent(
             &ai_ctx,
             &tools_ctx,
             &prompt_ctx,
@@ -246,11 +249,11 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
             2,  // max_depth: 最大允许嵌套深度
             None,
         );
-    }
+        }
 
-    // ── 注册子 agent: flexible_step4 ──
-    {
-        register_sub_agent(
+        // ── 注册子 agent: flexible_step4 ──
+        {
+            register_sub_agent(
             &ai_ctx,
             &tools_ctx,
             &prompt_ctx,
@@ -283,19 +286,19 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
             2,  // max_depth: 最大允许嵌套深度
             None,
         );
-    }
+        }
 
-    // ── 注册子 agent: flexible_step5 ──
-    {
-        // plans_flexible 持久化服务（storage 就绪时可用；否则回调为 None，仅记日志跳过）
-        let plans_flexible_service =
-            storage_repo(storage_resource, |ctx| ctx.plans_flexible_repo())
-                .map(|repo| Arc::new(PlansFlexibleService::new(repo)));
-        let step5_callback = plans_flexible_service
-            .map(|svc| super::step5_callback::create_step5_callback(plan_id.clone(), svc))
-            .flatten();
+        // ── 注册子 agent: flexible_step5 ──
+        {
+            // plans_flexible 持久化服务（storage 就绪时可用；否则回调为 None，仅记日志跳过）
+            let plans_flexible_service =
+                storage_repo(storage_resource, |ctx| ctx.plans_flexible_repo())
+                    .map(|repo| Arc::new(PlansFlexibleService::new(repo)));
+            let step5_callback = plans_flexible_service
+                .map(|svc| super::step5_callback::create_step5_callback(plan_id.clone(), svc))
+                .flatten();
 
-        register_sub_agent(
+            register_sub_agent(
             &ai_ctx,
             &tools_ctx,
             &prompt_ctx,
@@ -332,7 +335,19 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
             2,  // max_depth: 最大允许嵌套深度
             step5_callback,
         );
-    }
+        }
+    });
+    use_drop(move || {
+        for name in [
+            "flexible_step1",
+            "flexible_step2",
+            "flexible_step3",
+            "flexible_step4",
+            "flexible_step5",
+        ] {
+            let _ = registry.unregister_tool(name);
+        }
+    });
 
     // ── 事件处理函数 ──
     let on_trash_click = {

@@ -63,7 +63,7 @@ text = """
    - `field_selection_result`：来自 step3 的纯文本输出（可用字段 + 选中字段）。
    - `parameter_confirmation_result`：来自 step4 的纯文本输出（参数候选 + 选中参数 + 模板输入定义）。
 9. 根据 `flexible_step5` 返回的纯 JSON 内容进行路由：
-   - 返回混合模板 JSON（含 `steps` 和 `execution_plan` 字段）：输出该模板，流程结束。
+   - 返回混合模板 JSON（含 `steps` 和 `execution_plan` 字段）：**不要输出该 JSON 模板**，只输出"灵活模式创建成功"，流程结束。
    - 返回 `{ "status": "error", ... }`：告知用户模板序列化失败，可重试或取消。
 
 10. 你自身不进行需求澄清，不调用业务工具。
