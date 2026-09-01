@@ -283,6 +283,7 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
             2,  // max_depth: 最大允许嵌套深度
             None,
         );
+    }
 
     // ── 注册子 agent: flexible_step5 ──
     {

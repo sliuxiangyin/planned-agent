@@ -49,6 +49,8 @@ struct CompatChatResponseChoice {
 #[serde(rename_all = "snake_case")]
 struct CompatChatResponseMessage {
     content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
     tool_calls: Option<Vec<CompatChatResponseToolCall>>,
 }
 
@@ -94,6 +96,8 @@ struct CompatChatStreamChoice {
 struct CompatChatStreamDelta {
     role: Option<async_openai::types::chat::Role>,
     content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
     tool_calls: Option<Vec<CompatChatStreamToolCall>>,
 }
 
@@ -349,11 +353,27 @@ impl OpenAiClient {
     /// 转换响应
     fn convert_response(&self, response: CompatChatResponse) -> Result<ChatCompletionResponse> {
         let choices = response.choices.iter().map(|choice| {
+            // 原生 reasoning_content 字段优先；缺失时从 content 中的 <think> 标签提取
+            let native_reasoning = choice.message.reasoning_content.clone().unwrap_or_default();
+            let raw_content = choice.message.content.as_deref().unwrap_or("");
+            let (think_reasoning, clean) = if native_reasoning.is_empty() {
+                split_think_content(raw_content, &mut false)
+            } else {
+                (String::new(), raw_content.to_string())
+            };
+            let reasoning = if native_reasoning.is_empty() {
+                think_reasoning
+            } else {
+                native_reasoning
+            };
+            let content = if clean.is_empty() {
+                None
+            } else {
+                Some(MessageContent::Text { text: clean })
+            };
             let message = Message {
                 role: MessageRole::Assistant,
-                content: choice.message.content.as_ref().map(|c| MessageContent::Text {
-                    text: c.clone()
-                }),
+                content,
                 tool_calls: choice.message.tool_calls.as_ref().map(|calls| {
                     calls.iter().map(|call| ToolCall {
                         id: call.id.clone(),
@@ -366,7 +386,7 @@ impl OpenAiClient {
                 }),
                 tool_call_id: None,
                 name: None,
-                reasoning_content: None, // async-openai 库不支持此字段
+                reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
             };
             
             Choice {
@@ -399,8 +419,21 @@ impl OpenAiClient {
     }
     
     /// 转换流式响应块
-    fn convert_chunk(&self, chunk: CompatChatStreamChunk) -> Result<ChatCompletionChunk> {
+    fn convert_chunk(&self, chunk: CompatChatStreamChunk, in_think: &mut bool) -> Result<ChatCompletionChunk> {
         let choices = chunk.choices.iter().map(|choice| {
+            // 原生 reasoning_content 优先；缺失时从 content 中的 <think> 标签提取
+            let native_reasoning = choice.delta.reasoning_content.clone().unwrap_or_default();
+            let raw_content = choice.delta.content.as_deref().unwrap_or("");
+            let (think_reasoning, clean) = if native_reasoning.is_empty() {
+                split_think_content(raw_content, in_think)
+            } else {
+                (String::new(), raw_content.to_string())
+            };
+            let reasoning = if native_reasoning.is_empty() {
+                think_reasoning
+            } else {
+                native_reasoning
+            };
             let delta = DeltaMessage {
                 role: choice.delta.role.as_ref().map(|r| match r {
                     async_openai::types::chat::Role::System => MessageRole::System,
@@ -409,7 +442,7 @@ impl OpenAiClient {
                     async_openai::types::chat::Role::Tool => MessageRole::Tool,
                     async_openai::types::chat::Role::Function => MessageRole::Assistant,
                 }),
-                content: choice.delta.content.clone(),
+                content: (!clean.is_empty()).then_some(clean),
                 tool_calls: choice.delta.tool_calls.as_ref().map(|calls| {
                     calls.iter().map(|call| DeltaToolCall {
                         index: call.index as u32,
@@ -423,7 +456,7 @@ impl OpenAiClient {
                         }),
                     }).collect()
                 }),
-                reasoning_content: None, // async-openai 库不支持此字段，需要从 extra 字段中提取
+                reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
             };
             
             ChunkChoice {
@@ -501,10 +534,12 @@ impl AiClient for OpenAiClient {
         
         let client = std::sync::Arc::new(self.clone());
         
+        // 流级 <think> 块状态：跨 chunk 记录是否已进入 think 且未闭合
+        let mut in_think = false;
         let mapped_stream = stream.map(move |chunk| {
             match chunk {
                 Ok(chunk) => {
-                    client.convert_chunk(chunk)
+                    client.convert_chunk(chunk, &mut in_think)
                 }
                 Err(e) => {
                     // 用 `{:?}` 保留 OpenAIError 变体信息（如 StreamError("...")），
@@ -558,6 +593,45 @@ impl Clone for OpenAiClient {
     }
 }
 
+/// 把一段内容拆分为 `(reasoning, content)`。
+///
+/// 兼容部分兼容提供商把思考内容以 `<think>...</think>` 标签写在 `content`
+/// （而非独立的 `reasoning_content` 字段）里的情况：标签内部内容提取为
+/// `reasoning`（去掉标签），标签之外的内容作为 `content`。`in_think` 记录
+/// 流式跨 chunk 的「已进入 think 块且未闭合」状态；非流式一次传入 `&mut false`。
+fn split_think_content(seg: &str, in_think: &mut bool) -> (String, String) {
+    const THINK_OPEN: &str = "<think>";
+    const THINK_CLOSE: &str = "</think>";
+    let mut reasoning = String::new();
+    let mut content = String::new();
+    if *in_think {
+        // 已在 think 块内：等待闭合标签
+        if let Some(pos) = seg.find(THINK_CLOSE) {
+            let end = pos + THINK_CLOSE.len();
+            reasoning.push_str(&seg[..pos]);
+            content.push_str(&seg[end..]);
+            *in_think = false;
+        } else {
+            reasoning.push_str(seg);
+        }
+    } else if let Some(start) = seg.find(THINK_OPEN) {
+        content.push_str(&seg[..start]);
+        let rest = &seg[start + THINK_OPEN.len()..];
+        if let Some(pos) = rest.find(THINK_CLOSE) {
+            let end = pos + THINK_CLOSE.len();
+            reasoning.push_str(&rest[..pos]);
+            content.push_str(&rest[end..]);
+        } else {
+            // think 未闭合，本 chunk 全部视为思考内容，等下一个 chunk
+            reasoning.push_str(rest);
+            *in_think = true;
+        }
+    } else {
+        content.push_str(seg);
+    }
+    (reasoning, content)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -605,9 +679,9 @@ mod tests {
     }
 
     /// DeepSeek 等推理模型在非流式 message 中携带 `reasoning_content`，
-    /// content 可能为 null。自定义类型未声明该字段，serde 应忽略而非报错。
+    /// content 可能为 null。现在该字段会被反序列化并透传给 Message。
     #[test]
-    fn deepseek_response_ignores_reasoning_content() {
+    fn deepseek_response_parses_reasoning_content() {
         let json = r#"{
             "id":"chatcmpl-456",
             "object":"chat.completion",
@@ -628,13 +702,17 @@ mod tests {
         assert_eq!(resp.model, "deepseek-chat");
         // content 为 null → None
         assert_eq!(resp.choices[0].message.content, None);
-        // reasoning_content 被忽略，不影响反序列化
+        // reasoning_content 被反序列化
+        assert_eq!(
+            resp.choices[0].message.reasoning_content.as_deref(),
+            Some("先拆解问题，再给出结论……")
+        );
         assert_eq!(resp.choices[0].finish_reason, Some(async_openai::types::chat::FinishReason::Stop));
     }
 
-    /// DeepSeek 流式 delta 同样带 `reasoning_content`，content 可为 null。
+    /// DeepSeek 流式 delta 同样带 `reasoning_content`，现在会被反序列化。
     #[test]
-    fn deepseek_stream_chunk_ignores_reasoning_content() {
+    fn deepseek_stream_chunk_parses_reasoning_content() {
         let json = r#"{
             "id":"chatcmpl-456",
             "object":"chat.completion.chunk",
@@ -649,7 +727,60 @@ mod tests {
         let chunk: CompatChatStreamChunk = serde_json::from_str(json).unwrap();
         assert_eq!(chunk.model, "deepseek-chat");
         assert_eq!(chunk.choices[0].delta.content, None);
+        assert_eq!(chunk.choices[0].delta.reasoning_content.as_deref(), Some("思考中……"));
         assert_eq!(chunk.choices[0].delta.role, Some(async_openai::types::chat::Role::Assistant));
+    }
+
+    /// <think> 标签拆分：去标签、单段、跨 chunk、无标签透传。
+    #[test]
+    fn split_think_content_handles_think_tags() {
+        // 无标签：整段 content
+        let (r, c) = split_think_content("纯文本", &mut false);
+        assert_eq!(r, "");
+        assert_eq!(c, "纯文本");
+
+        // 单段内含完整 think 块 + 尾部 JSON
+        let (r, c) = split_think_content("<think>先分析</think>{\"a\":1}", &mut false);
+        assert_eq!(r, "先分析");
+        assert_eq!(c, "{\"a\":1}");
+
+        // 跨 chunk：<think> 未闭合 → 进入 think；下一 chunk 闭合
+        let mut in_think = false;
+        let (r1, c1) = split_think_content("<think>正在思考步骤一，", &mut in_think);
+        assert!(in_think);
+        assert_eq!(r1, "正在思考步骤一，");
+        assert_eq!(c1, "");
+        let (r2, c2) = split_think_content("继续想</think>  {\"b\":2}", &mut in_think);
+        assert!(!in_think);
+        assert_eq!(r2, "继续想");
+        assert_eq!(c2, "  {\"b\":2}");
+    }
+
+    /// convert_response：content 含 <think> 标签时，clean 进 content、思考进 reasoning_content。
+    #[test]
+    fn convert_response_strips_think_tag() {
+        let client = OpenAiClient::new(OpenAiClientConfig {
+            api_key: "test-key".into(),
+            model: "test-model".into(),
+            base_url: None,
+            default_temperature: None,
+            default_max_tokens: None,
+            organization: None,
+            thinking_config: None,
+        });
+        let json = r#"{
+            "id":"cmpl-t","object":"chat.completion","created":0,"model":"m",
+            "choices":[{"index":0,"message":{"role":"assistant","content":"<think>分析中</think>  {\"keyword\":\"x\"}"},"finish_reason":"stop"}],
+            "usage":null
+        }"#;
+        let resp: CompatChatResponse = serde_json::from_str(json).unwrap();
+        let out = client.convert_response(resp).unwrap();
+        let msg = &out.choices[0].message;
+        match &msg.content {
+            Some(MessageContent::Text { text }) => assert_eq!(text, "  {\"keyword\":\"x\"}"),
+            other => panic!("unexpected content: {:?}", other),
+        }
+        assert_eq!(msg.reasoning_content.as_deref(), Some("分析中"));
     }
 }
 
