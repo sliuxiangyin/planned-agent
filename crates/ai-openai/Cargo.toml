@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 planned-agent-core = { path = "../core" }
-async-openai = "0.28"
+async-openai = { version = "0.41", features = ["chat-completion", "byot"] }
 tokio.workspace = true
 futures = "0.3"
 serde.workspace = true

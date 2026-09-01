@@ -48,3 +48,6 @@ sea-orm-migration = { version = "2.0", default-features = false, features = [
 
 # 嵌入式 KV 缓存（sled 0.34，纯同步 API；open 走 spawn_blocking）
 sled = "0.34"
+
+[dev-dependencies]
+dioxus-ssr = "0.7"

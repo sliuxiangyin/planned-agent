@@ -60,6 +60,7 @@ pub(super) async fn run_conversation<
     inject_system_prompt(state).await?;
 
     let mut round = 1usize;
+    let mut stream_error_text: Option<String> = None;
 
     loop {
         info!("[round] === 第 {} 轮开始 ===", round);
@@ -106,7 +107,7 @@ pub(super) async fn run_conversation<
             .ai_client
             .chat_completion_stream(req)
             .await
-            .map_err(|e| anyhow!("chat_completion_stream 失败: {}", e))?;
+            .map_err(|e| anyhow!("chat_completion_stream 失败: {:?}", e))?;
         let mut inner = response_stream.stream;
         let mut text = String::new();
         let mut reasoning = String::new();
@@ -162,7 +163,8 @@ pub(super) async fn run_conversation<
             .collect();
 
         if consecutive_stream_errors > 0 && !has_content && tool_calls_vec.is_empty() {
-            state.subscribers.emit(ChatEvent::Error(last_stream_error));
+            state.subscribers.emit(ChatEvent::Error(last_stream_error.clone()));
+            stream_error_text = Some(format!("Error: {}", last_stream_error));
         }
 
         emit_tool_call_completes(&state.subscribers, &accumulators);
@@ -260,7 +262,8 @@ pub(super) async fn run_conversation<
     // ── 中断后闭合：确保最后一条 assistant 消息的所有 tool_calls 都有对应的 tool 消息 ──
     close_unclosed_tool_calls(state);
     // ── 中断后补齐：若最后一条不是 Assistant，补一条占位消息 ──
-    close_orphaned_user(state, "Output interrupt");
+    let close_text = stream_error_text.as_deref().unwrap_or("Output interrupt");
+    close_orphaned_user(state, close_text);
 
     Ok(ConversationOutcome::Completed)
 }

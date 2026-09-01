@@ -2,6 +2,7 @@
 //!
 //! - `page` — `FlexiblePage` 组件（子 agent 注册 + ChatPanel 集成）
 
+pub(crate) mod json_extract;
 pub(crate) mod page;
 pub(crate) mod step2_callback;
 

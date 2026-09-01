@@ -153,6 +153,12 @@ pub(super) fn process_stream_error(
         consecutive_errors, max_errors, error
     );
     warn!("{}", msg);
+    // `{:?}` 打印完整 anyhow 错误链（所有 context 层 + source），便于定位根因。
+    // 若设置了 RUST_BACKTRACE=1，还会附带 backtrace。
+    warn!(
+        "Stream chunk error 详细链 ({}/{}):\n{:?}",
+        consecutive_errors, max_errors, error
+    );
     *last_error = msg;
     if *consecutive_errors >= max_errors {
         warn!("chat: 连续 {} 次流式 chunk 错误，终止消费", max_errors);

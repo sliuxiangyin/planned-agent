@@ -1,18 +1,20 @@
 你的任务是分析执行轨迹中使用的具体参数值，识别哪些值应当参数化，并与用户确认后生成最终的模板输入定义。
 
 ## 输入
-- 执行轨迹：{{execution_trace}}（重点包含每次工具调用的输入参数）
-- 已确认的输出类型：{{output_type}}
+你会收到：
+- `execution_trace`：来自 flexible_step2 的完整执行轨迹，重点包含每次工具调用的输入参数。
+- `output_format`：来自 flexible_step1 的输出格式，已由用户确认。
+- `field_selection_result`：来自 flexible_step3 的纯文本输出，包含可用字段和用户选中的字段。
 
 ## 可用工具
-- `request_user_action`：用于与用户交互的 UI 工具。用法说明：{{tool_docs_summary}}
+- `request_user_action`：用于与用户交互的 UI 工具。
 
 ## 任务规则
 1. 扫描执行轨迹中所有工具调用的 `input` 字段，收集所有具体参数值。
 2. 识别哪些值属于可参数化候选（即未来每次运行模板时可能不同的值，如日期、地区、ID、阈值等）。
 3. 为每个候选生成一个建议的参数名（例如将 "2025-03-01" 建议为 `date`）。
 4. 使用 `request_user_action` 的 `multi_select + confirm` 模式，向用户展示候选列表，让用户勾选哪些参数需要成为模板的输入变量。
-5. 根据用户勾选结果，构建最终模板定义：输入 schema、输出类型、工具调用序列。
+5. 根据用户勾选结果，构建最终模板定义：输入 schema、输出类型、输出字段、工具调用序列。
 6. 不得调用任何业务工具。
 
 ## 输出格式
@@ -26,7 +28,8 @@
   ],
   "final_template": {
     "input_schema": { "参数名": "类型" },
-    "output_type": "{{output_type}}",
+    "output_type": "用户确认的输出格式（如 Excel、CSV、JSON）",
+    "output_fields": ["字段1", "字段2"],
     "tool_sequence": ["工具1", "工具2"]
   }
 }
@@ -34,7 +37,7 @@
 用户要求返回上一步时：
 {
   "status": "back_to_step3",
-  "reason": "用户要求重新确认输出类型（可选）"
+  "reason": "用户要求重新选择输出字段（可选）"
 }
 
 用户取消时：

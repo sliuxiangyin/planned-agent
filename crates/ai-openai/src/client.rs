@@ -17,6 +17,95 @@ use futures::StreamExt;
 use tracing::{info, warn, error};
 use std::collections::HashMap;
 
+/// 兼容层：自定义非流式响应类型。
+///
+/// async-openai 0.41 内置的 `CreateChatCompletionResponse.service_tier` 使用严格枚举
+/// `ServiceTier`，无法反序列化 MiniMax 等兼容提供商返回的 `"standard"`。这里通过
+/// BYOT（Bring Your Own Types）自定义响应类型并**故意省略 `service_tier` 字段**，
+/// 让 serde 默认忽略该未知字段，从而兼容各家提供商。其余字段仍复用库类型。
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct CompatChatResponse {
+    id: String,
+    #[serde(default)]
+    created: u32,
+    model: String,
+    choices: Vec<CompatChatResponseChoice>,
+    #[serde(default)]
+    system_fingerprint: Option<String>,
+    object: String,
+    usage: Option<async_openai::types::chat::CompletionUsage>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct CompatChatResponseChoice {
+    index: u32,
+    message: CompatChatResponseMessage,
+    finish_reason: Option<async_openai::types::chat::FinishReason>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct CompatChatResponseMessage {
+    content: Option<String>,
+    tool_calls: Option<Vec<CompatChatResponseToolCall>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct CompatChatResponseToolCall {
+    id: String,
+    function: CompatFunctionCall,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct CompatFunctionCall {
+    name: String,
+    arguments: String,
+}
+
+/// 兼容层：自定义流式 chunk 类型。同上，省略 `service_tier` 字段以兼容 MiniMax 等提供商。
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct CompatChatStreamChunk {
+    id: String,
+    #[serde(default)]
+    created: u32,
+    model: String,
+    choices: Vec<CompatChatStreamChoice>,
+    #[serde(default)]
+    system_fingerprint: Option<String>,
+    object: String,
+    usage: Option<async_openai::types::chat::CompletionUsage>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct CompatChatStreamChoice {
+    index: u32,
+    delta: CompatChatStreamDelta,
+    finish_reason: Option<async_openai::types::chat::FinishReason>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct CompatChatStreamDelta {
+    role: Option<async_openai::types::chat::Role>,
+    content: Option<String>,
+    tool_calls: Option<Vec<CompatChatStreamToolCall>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct CompatChatStreamToolCall {
+    index: u32,
+    id: Option<String>,
+    r#type: Option<async_openai::types::chat::FunctionType>,
+    function: Option<async_openai::types::chat::FunctionCallStream>,
+}
+
 /// OpenAI 客户端配置
 pub struct OpenAiClientConfig {
     pub api_key: String,
@@ -74,16 +163,16 @@ impl OpenAiClient {
     }
     
     /// 转换消息到 OpenAI 格式
-    fn convert_message(&self, message: &Message) -> Result<async_openai::types::ChatCompletionRequestMessage> {
+    fn convert_message(&self, message: &Message) -> Result<async_openai::types::chat::ChatCompletionRequestMessage> {
         match message.role {
             MessageRole::System => {
                 let content = match &message.content {
                     Some(MessageContent::Text { text }) => text.clone(),
                     _ => return Err(anyhow::anyhow!("System message must have text content")),
                 };
-                Ok(async_openai::types::ChatCompletionRequestMessage::System(
-                    async_openai::types::ChatCompletionRequestSystemMessage {
-                        content: async_openai::types::ChatCompletionRequestSystemMessageContent::Text(content),
+                Ok(async_openai::types::chat::ChatCompletionRequestMessage::System(
+                    async_openai::types::chat::ChatCompletionRequestSystemMessage {
+                        content: async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(content),
                         name: message.name.clone(),
                     }
                 ))
@@ -91,17 +180,17 @@ impl OpenAiClient {
             MessageRole::User => {
                 let content = match &message.content {
                     Some(MessageContent::Text { text }) => {
-                        async_openai::types::ChatCompletionRequestUserMessageContent::Text(text.clone())
+                        async_openai::types::chat::ChatCompletionRequestUserMessageContent::Text(text.clone())
                     }
                     Some(MessageContent::Image { image_url }) => {
                         // 图片内容暂时作为文本处理
                         let image_text = format!("Image: {}", image_url.url);
-                        async_openai::types::ChatCompletionRequestUserMessageContent::Text(image_text)
+                        async_openai::types::chat::ChatCompletionRequestUserMessageContent::Text(image_text)
                     }
                     _ => return Err(anyhow::anyhow!("User message must have text or image content")),
                 };
-                Ok(async_openai::types::ChatCompletionRequestMessage::User(
-                    async_openai::types::ChatCompletionRequestUserMessage {
+                Ok(async_openai::types::chat::ChatCompletionRequestMessage::User(
+                    async_openai::types::chat::ChatCompletionRequestUserMessage {
                         content,
                         name: message.name.clone(),
                     }
@@ -109,24 +198,25 @@ impl OpenAiClient {
             }
             MessageRole::Assistant => {
                 let content = match &message.content {
-                    Some(MessageContent::Text { text }) => Some(async_openai::types::ChatCompletionRequestAssistantMessageContent::Text(text.clone())),
+                    Some(MessageContent::Text { text }) => Some(async_openai::types::chat::ChatCompletionRequestAssistantMessageContent::Text(text.clone())),
                     None => None,
                     _ => return Err(anyhow::anyhow!("Assistant message must have text content or no content")),
                 };
                 let tool_calls = message.tool_calls.as_ref().map(|calls| {
                     calls.iter().map(|call| {
-                        async_openai::types::ChatCompletionMessageToolCall {
-                            id: call.id.clone(),
-                            r#type: async_openai::types::ChatCompletionToolType::Function,
-                            function: async_openai::types::FunctionCall {
-                                name: call.function.name.clone(),
-                                arguments: call.function.arguments.clone(),
-                            },
-                        }
+                        async_openai::types::chat::ChatCompletionMessageToolCalls::Function(
+                            async_openai::types::chat::ChatCompletionMessageToolCall {
+                                id: call.id.clone(),
+                                function: async_openai::types::chat::FunctionCall {
+                                    name: call.function.name.clone(),
+                                    arguments: call.function.arguments.clone(),
+                                },
+                            }
+                        )
                     }).collect()
                 });
-                Ok(async_openai::types::ChatCompletionRequestMessage::Assistant(
-                    async_openai::types::ChatCompletionRequestAssistantMessage {
+                Ok(async_openai::types::chat::ChatCompletionRequestMessage::Assistant(
+                    async_openai::types::chat::ChatCompletionRequestAssistantMessage {
                         content,
                         tool_calls,
                         name: message.name.clone(),
@@ -138,12 +228,12 @@ impl OpenAiClient {
                 let tool_call_id = message.tool_call_id.clone()
                     .ok_or_else(|| anyhow::anyhow!("Tool message must have tool_call_id"))?;
                 let content = match &message.content {
-                    Some(MessageContent::ToolResult { content, .. }) => async_openai::types::ChatCompletionRequestToolMessageContent::Text(content.clone()),
-                    Some(MessageContent::Text { text }) => async_openai::types::ChatCompletionRequestToolMessageContent::Text(text.clone()),
+                    Some(MessageContent::ToolResult { content, .. }) => async_openai::types::chat::ChatCompletionRequestToolMessageContent::Text(content.clone()),
+                    Some(MessageContent::Text { text }) => async_openai::types::chat::ChatCompletionRequestToolMessageContent::Text(text.clone()),
                     _ => return Err(anyhow::anyhow!("Tool message must have text or tool_result content")),
                 };
-                Ok(async_openai::types::ChatCompletionRequestMessage::Tool(
-                    async_openai::types::ChatCompletionRequestToolMessage {
+                Ok(async_openai::types::chat::ChatCompletionRequestMessage::Tool(
+                    async_openai::types::chat::ChatCompletionRequestToolMessage {
                         tool_call_id,
                         content,
                     }
@@ -153,10 +243,9 @@ impl OpenAiClient {
     }
     
     /// 转换工具定义
-    fn convert_tool(&self, tool: &ToolDefinition) -> async_openai::types::ChatCompletionTool {
-        async_openai::types::ChatCompletionTool {
-            r#type: async_openai::types::ChatCompletionToolType::Function,
-            function: async_openai::types::FunctionObject {
+    fn convert_tool(&self, tool: &ToolDefinition) -> async_openai::types::chat::ChatCompletionTool {
+        async_openai::types::chat::ChatCompletionTool {
+            function: async_openai::types::chat::FunctionObject {
                 name: tool.function.name.clone(),
                 description: tool.function.description.clone(),
                 parameters: tool.function.parameters.clone(),
@@ -166,17 +255,19 @@ impl OpenAiClient {
     }
     
     /// 转换请求
-    fn convert_request(&self, request: &ChatCompletionRequest) -> Result<async_openai::types::CreateChatCompletionRequest> {
-        let messages: Vec<async_openai::types::ChatCompletionRequestMessage> = request.messages
+    fn convert_request(&self, request: &ChatCompletionRequest) -> Result<async_openai::types::chat::CreateChatCompletionRequest> {
+        let messages: Vec<async_openai::types::chat::ChatCompletionRequestMessage> = request.messages
             .iter()
             .map(|msg| self.convert_message(msg))
             .collect::<Result<Vec<_>>>()?;
         
-        let tools: Option<Vec<async_openai::types::ChatCompletionTool>> = request.tools.as_ref().map(|tools| {
-            tools.iter().map(|tool| self.convert_tool(tool)).collect()
+        let tools: Option<Vec<async_openai::types::chat::ChatCompletionTools>> = request.tools.as_ref().map(|tools| {
+            tools.iter().map(|tool| {
+                async_openai::types::chat::ChatCompletionTools::Function(self.convert_tool(tool))
+            }).collect()
         });
         
-        let mut builder = async_openai::types::CreateChatCompletionRequestArgs::default();
+        let mut builder = async_openai::types::chat::CreateChatCompletionRequestArgs::default();
         builder.model(&request.model);
         builder.messages(messages);
         
@@ -211,15 +302,15 @@ impl OpenAiClient {
                 // 使用 metadata 字段传递 thinking 参数
                 chat_request.metadata = Some(serde_json::json!({
                     "thinking": thinking
-                }));
+                }).into());
                 
                 // 设置思考强度
                 let effort = thinking_config.effort.as_deref().unwrap_or("high");
                 let reasoning_effort = match effort {
-                    "high" => async_openai::types::ReasoningEffort::High,
-                    "medium" => async_openai::types::ReasoningEffort::Medium,
-                    "low" => async_openai::types::ReasoningEffort::Low,
-                    _ => async_openai::types::ReasoningEffort::High,
+                    "high" => async_openai::types::chat::ReasoningEffort::High,
+                    "medium" => async_openai::types::chat::ReasoningEffort::Medium,
+                    "low" => async_openai::types::chat::ReasoningEffort::Low,
+                    _ => async_openai::types::chat::ReasoningEffort::High,
                 };
                 chat_request.reasoning_effort = Some(reasoning_effort);
             }
@@ -245,7 +336,7 @@ impl OpenAiClient {
                 }
                 "stop" => {
                     if let Ok(stop) = serde_json::from_value::<Vec<String>>(value.clone()) {
-                        chat_request.stop = Some(async_openai::types::Stop::StringArray(stop));
+                        chat_request.stop = Some(async_openai::types::chat::StopConfiguration::StringArray(stop));
                     }
                 }
                 _ => {}
@@ -256,7 +347,7 @@ impl OpenAiClient {
     }
     
     /// 转换响应
-    fn convert_response(&self, response: async_openai::types::CreateChatCompletionResponse) -> Result<ChatCompletionResponse> {
+    fn convert_response(&self, response: CompatChatResponse) -> Result<ChatCompletionResponse> {
         let choices = response.choices.iter().map(|choice| {
             let message = Message {
                 role: MessageRole::Assistant,
@@ -282,11 +373,11 @@ impl OpenAiClient {
                 index: choice.index as u32,
                 message,
                 finish_reason: choice.finish_reason.map(|r| match r {
-                    async_openai::types::FinishReason::Stop => FinishReason::Stop,
-                    async_openai::types::FinishReason::Length => FinishReason::Length,
-                    async_openai::types::FinishReason::ToolCalls => FinishReason::ToolCalls,
-                    async_openai::types::FinishReason::ContentFilter => FinishReason::ContentFilter,
-                    async_openai::types::FinishReason::FunctionCall => FinishReason::FunctionCall,
+                    async_openai::types::chat::FinishReason::Stop => FinishReason::Stop,
+                    async_openai::types::chat::FinishReason::Length => FinishReason::Length,
+                    async_openai::types::chat::FinishReason::ToolCalls => FinishReason::ToolCalls,
+                    async_openai::types::chat::FinishReason::ContentFilter => FinishReason::ContentFilter,
+                    async_openai::types::chat::FinishReason::FunctionCall => FinishReason::FunctionCall,
                 }),
                 logprobs: None,
             }
@@ -308,15 +399,15 @@ impl OpenAiClient {
     }
     
     /// 转换流式响应块
-    fn convert_chunk(&self, chunk: async_openai::types::CreateChatCompletionStreamResponse) -> Result<ChatCompletionChunk> {
+    fn convert_chunk(&self, chunk: CompatChatStreamChunk) -> Result<ChatCompletionChunk> {
         let choices = chunk.choices.iter().map(|choice| {
             let delta = DeltaMessage {
                 role: choice.delta.role.as_ref().map(|r| match r {
-                    async_openai::types::Role::System => MessageRole::System,
-                    async_openai::types::Role::User => MessageRole::User,
-                    async_openai::types::Role::Assistant => MessageRole::Assistant,
-                    async_openai::types::Role::Tool => MessageRole::Tool,
-                    async_openai::types::Role::Function => MessageRole::Assistant,
+                    async_openai::types::chat::Role::System => MessageRole::System,
+                    async_openai::types::chat::Role::User => MessageRole::User,
+                    async_openai::types::chat::Role::Assistant => MessageRole::Assistant,
+                    async_openai::types::chat::Role::Tool => MessageRole::Tool,
+                    async_openai::types::chat::Role::Function => MessageRole::Assistant,
                 }),
                 content: choice.delta.content.clone(),
                 tool_calls: choice.delta.tool_calls.as_ref().map(|calls| {
@@ -324,7 +415,7 @@ impl OpenAiClient {
                         index: call.index as u32,
                         id: call.id.clone(),
                         r#type: call.r#type.as_ref().map(|t| match t {
-                            async_openai::types::ChatCompletionToolType::Function => ToolType::Function,
+                            async_openai::types::chat::FunctionType::Function => ToolType::Function,
                         }),
                         function: call.function.as_ref().map(|f| DeltaFunctionCall {
                             name: f.name.clone(),
@@ -339,11 +430,11 @@ impl OpenAiClient {
                 index: choice.index as u32,
                 delta,
                 finish_reason: choice.finish_reason.map(|r| match r {
-                    async_openai::types::FinishReason::Stop => FinishReason::Stop,
-                    async_openai::types::FinishReason::Length => FinishReason::Length,
-                    async_openai::types::FinishReason::ToolCalls => FinishReason::ToolCalls,
-                    async_openai::types::FinishReason::ContentFilter => FinishReason::ContentFilter,
-                    async_openai::types::FinishReason::FunctionCall => FinishReason::FunctionCall,
+                    async_openai::types::chat::FinishReason::Stop => FinishReason::Stop,
+                    async_openai::types::chat::FinishReason::Length => FinishReason::Length,
+                    async_openai::types::chat::FinishReason::ToolCalls => FinishReason::ToolCalls,
+                    async_openai::types::chat::FinishReason::ContentFilter => FinishReason::ContentFilter,
+                    async_openai::types::chat::FinishReason::FunctionCall => FinishReason::FunctionCall,
                 }),
                 logprobs: None,
             }
@@ -371,13 +462,14 @@ impl AiClient for OpenAiClient {
         info!("Sending request to OpenAI API");
         
         let chat_request = self.convert_request(&request)?;
+        let req_json = serde_json::to_value(&chat_request)?;
         
         // 添加重试逻辑
         let mut retries = 0;
         let max_retries = 3;
         
         loop {
-            match self.client.chat().create(chat_request.clone()).await {
+            match self.client.chat().create_byot::<serde_json::Value, CompatChatResponse>(req_json.clone()).await {
                 Ok(response) => {
                     info!("Received response from OpenAI API");
                     return self.convert_response(response);
@@ -402,8 +494,10 @@ impl AiClient for OpenAiClient {
         stream_request.stream = true;
         
         let chat_request = self.convert_request(&stream_request)?;
+        let req_json = serde_json::to_value(&chat_request)?;
         
-        let stream = self.client.chat().create_stream(chat_request).await?;
+        let stream: async_openai::types::stream::StreamResponse<CompatChatStreamChunk> =
+            self.client.chat().create_stream_byot(req_json).await?;
         
         let client = std::sync::Arc::new(self.clone());
         
@@ -412,7 +506,11 @@ impl AiClient for OpenAiClient {
                 Ok(chunk) => {
                     client.convert_chunk(chunk)
                 }
-                Err(e) => Err(e.into()),
+                Err(e) => {
+                    // 用 `{:?}` 保留 OpenAIError 变体信息（如 StreamError("...")），
+                    // 比 Display 只显示 "stream failed: ..." 更有诊断价值。
+                    Err(anyhow::anyhow!("OpenAI 流式错误: {:?}", e))
+                }
             }
         });
         
@@ -459,3 +557,99 @@ impl Clone for OpenAiClient {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 复现 MiniMax 兼容提供商流式响应中的 `service_tier: "standard"`，
+    /// 验证自定义 chunk 类型能正常反序列化（未知字段被 serde 忽略）。
+    #[test]
+    fn stream_chunk_ignores_service_tier_standard() {
+        let json = r#"{
+            "id":"06e583330718211117f2b4c4eb2911b9",
+            "choices":[{"index":0,"delta":{"content":"hello","role":"assistant"}}],
+            "created":1788235827,
+            "model":"MiniMax-M3",
+            "object":"chat.completion.chunk",
+            "usage":null,
+            "service_tier":"standard"
+        }"#;
+        let chunk: CompatChatStreamChunk = serde_json::from_str(json).unwrap();
+        assert_eq!(chunk.model, "MiniMax-M3");
+        assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hello"));
+        assert_eq!(chunk.choices[0].delta.role, Some(async_openai::types::chat::Role::Assistant));
+    }
+
+    /// 非流式响应同样可能携带 `service_tier`，验证自定义响应类型能忽略它。
+    #[test]
+    fn chat_response_ignores_service_tier_standard() {
+        let json = r#"{
+            "id":"chatcmpl-123",
+            "object":"chat.completion",
+            "created":1788235827,
+            "model":"MiniMax-M3",
+            "service_tier":"standard",
+            "system_fingerprint":null,
+            "choices":[{
+                "index":0,
+                "message":{"role":"assistant","content":"hello"},
+                "finish_reason":"stop"
+            }],
+            "usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}
+        }"#;
+        let resp: CompatChatResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.model, "MiniMax-M3");
+        assert_eq!(resp.choices[0].message.content.as_deref(), Some("hello"));
+        assert_eq!(resp.usage.as_ref().unwrap().total_tokens, 15);
+    }
+
+    /// DeepSeek 等推理模型在非流式 message 中携带 `reasoning_content`，
+    /// content 可能为 null。自定义类型未声明该字段，serde 应忽略而非报错。
+    #[test]
+    fn deepseek_response_ignores_reasoning_content() {
+        let json = r#"{
+            "id":"chatcmpl-456",
+            "object":"chat.completion",
+            "created":1700000000,
+            "model":"deepseek-chat",
+            "choices":[{
+                "index":0,
+                "message":{
+                    "role":"assistant",
+                    "content":null,
+                    "reasoning_content":"先拆解问题，再给出结论……"
+                },
+                "finish_reason":"stop"
+            }],
+            "usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20}
+        }"#;
+        let resp: CompatChatResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.model, "deepseek-chat");
+        // content 为 null → None
+        assert_eq!(resp.choices[0].message.content, None);
+        // reasoning_content 被忽略，不影响反序列化
+        assert_eq!(resp.choices[0].finish_reason, Some(async_openai::types::chat::FinishReason::Stop));
+    }
+
+    /// DeepSeek 流式 delta 同样带 `reasoning_content`，content 可为 null。
+    #[test]
+    fn deepseek_stream_chunk_ignores_reasoning_content() {
+        let json = r#"{
+            "id":"chatcmpl-456",
+            "object":"chat.completion.chunk",
+            "created":1700000000,
+            "model":"deepseek-chat",
+            "choices":[{
+                "index":0,
+                "delta":{"role":"assistant","content":null,"reasoning_content":"思考中……"},
+                "finish_reason":null
+            }]
+        }"#;
+        let chunk: CompatChatStreamChunk = serde_json::from_str(json).unwrap();
+        assert_eq!(chunk.model, "deepseek-chat");
+        assert_eq!(chunk.choices[0].delta.content, None);
+        assert_eq!(chunk.choices[0].delta.role, Some(async_openai::types::chat::Role::Assistant));
+    }
+}
+
