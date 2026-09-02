@@ -23,7 +23,7 @@
 //! - 保存按钮文字变为 "保存中..."
 
 use dioxus::prelude::*;
-use planned_agent_mcp_rmcp::McpConfigManager;
+use planned_agent_mcp_rmcp::McpManager;
 use planned_agent_mcp_rmcp::config::McpServerEntry;
 use planned_agent_mcp_rmcp::storage::ServerStatus;
 use std::sync::Arc;
@@ -31,7 +31,7 @@ use std::sync::Arc;
 use crate::components::page_header::PageHeader;
 use crate::context::{McpChangeNotifier, McpContext, ToolsContext};
 
-/// 合法分类列表（与 `context::mcp::parse_categories` 中的映射保持一致）
+/// 合法分类列表（字符串→ToolCategory 映射统一在 tool-manager 内，见其 `map_categories`）
 const VALID_CATEGORIES: &[&str] = &[
     "Browser", "File", "Text", "Data", "System", "Device", "Dev", "Utility",
 ];
@@ -40,7 +40,7 @@ const VALID_CATEGORIES: &[&str] = &[
 /// 找不到 / 解析失败时返回 `default`。该函数仅在 `use_signal` 初始化闭包里调用一次。
 fn lookup_initial<T, F>(
     editing_name: &Option<String>,
-    cfg_mgr: &McpConfigManager,
+    cfg_mgr: &McpManager,
     default: T,
     extract: F,
 ) -> T
@@ -65,12 +65,12 @@ pub fn McpEditorPage(
     on_back: EventHandler<()>,
     on_saved: EventHandler<()>,
 ) -> Element {
-    // 从 McpContext.bundle 取出 config_manager（同一实例 / 同一后端）
-    let config_mgr: Option<McpConfigManager> = use_context::<Resource<Option<std::sync::Arc<McpContext>>>>()
+    // 从 McpContext.manager 取单门面（同一实例 / 同一后端）
+    let config_mgr: Option<Arc<McpManager>> = use_context::<Resource<Option<std::sync::Arc<McpContext>>>>()
         .read()
         .as_ref()
         .and_then(|x| x.as_ref())
-        .map(|c| c.bundle.config_manager().clone());
+        .map(|c| c.manager.clone());
 
     // 完整 McpContext Arc（用于保存后自动刷新工具）
     let mcp_ctx_arc: Option<Arc<McpContext>> = use_context::<Resource<Option<std::sync::Arc<McpContext>>>>()
@@ -97,7 +97,7 @@ pub fn McpEditorPage(
         move || {
             cfg_mgr
                 .as_ref()
-                .map(|m| lookup_initial(&editing_name, m, String::new(), |s| s.name.clone()))
+                .map(|m| lookup_initial(&editing_name, m.as_ref(), String::new(), |s| s.name.clone()))
                 .unwrap_or_default()
         }
     });
@@ -107,7 +107,7 @@ pub fn McpEditorPage(
         move || {
             cfg_mgr
                 .as_ref()
-                .map(|m| lookup_initial(&editing_name, m, String::new(), |s| {
+                .map(|m| lookup_initial(&editing_name, m.as_ref(), String::new(), |s| {
                     s.server_command.clone()
                 }))
                 .unwrap_or_default()
@@ -119,7 +119,7 @@ pub fn McpEditorPage(
         move || {
             cfg_mgr
                 .as_ref()
-                .map(|m| lookup_initial(&editing_name, m, String::new(), |s| s.server_args.join(" ")))
+                .map(|m| lookup_initial(&editing_name, m.as_ref(), String::new(), |s| s.server_args.join(" ")))
                 .unwrap_or_default()
         }
     });
@@ -129,7 +129,7 @@ pub fn McpEditorPage(
         move || {
             cfg_mgr
                 .as_ref()
-                .map(|m| lookup_initial(&editing_name, m, 30u64, |s| s.timeout_secs.unwrap_or(30)))
+                .map(|m| lookup_initial(&editing_name, m.as_ref(), 30u64, |s| s.timeout_secs.unwrap_or(30)))
                 .unwrap_or_default()
         }
     });
@@ -140,7 +140,7 @@ pub fn McpEditorPage(
             cfg_mgr
                 .as_ref()
                 .map(|m| {
-                    lookup_initial(&editing_name, m, 30u64, |s| {
+                    lookup_initial(&editing_name, m.as_ref(), 30u64, |s| {
                         s.handshake_timeout_secs.unwrap_or(30)
                     })
                 })
@@ -153,7 +153,7 @@ pub fn McpEditorPage(
         move || {
             cfg_mgr
                 .as_ref()
-                .map(|m| lookup_initial(&editing_name, m, 3u32, |s| s.max_retries.unwrap_or(3)))
+                .map(|m| lookup_initial(&editing_name, m.as_ref(), 3u32, |s| s.max_retries.unwrap_or(3)))
                 .unwrap_or_default()
         }
     });
@@ -166,7 +166,7 @@ pub fn McpEditorPage(
                 .as_ref()
                 .map(|m| {
                     // 读出存储的 Vec<String>（有些老 config 里没有分类字段，取空 Vec）
-                    lookup_initial(&editing_name, m, Vec::<String>::new(), |s| {
+                    lookup_initial(&editing_name, m.as_ref(), Vec::<String>::new(), |s| {
                         s.categories.clone().unwrap_or_default()
                     })
                 })
@@ -399,17 +399,16 @@ pub fn McpEditorPage(
                             let new_name = entry.name.clone();
 
                             // 5. 同步保存到 config（add 或 update）
-                            let cfg_mgr = mcp.bundle.config_manager();
                             let save_result = if let Some(ref old_name) = editing_name {
-                                cfg_mgr.update_server(old_name, entry)
+                                mcp.manager.update_server(old_name, entry)
                             } else {
-                                cfg_mgr.add_server(entry)
+                                mcp.manager.add_server(entry)
                             };
 
                             match save_result {
                                 Ok(_) => {
                                     // 6. 标记为 Pending（等待连接，默认初始状态）
-                                    let _ = mcp.bundle.record_status(
+                                    let _ = mcp.manager.record_status(
                                         &new_name,
                                         ServerStatus::pending(ServerStatus::now()),
                                     );

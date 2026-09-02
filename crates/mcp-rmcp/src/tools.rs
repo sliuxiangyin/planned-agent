@@ -95,7 +95,7 @@ impl ToolManager {
             if let Some(required_fields) = required.as_array() {
                 for field in required_fields {
                     if let Some(field_name) = field.as_str() {
-                        if !arguments.get(field_name).is_some() {
+                        if arguments.get(field_name).is_none() {
                             return Err(anyhow::anyhow!("Missing required field: {}", field_name));
                         }
                     }
@@ -113,5 +113,11 @@ impl ToolManager {
             stats.insert(server_name.clone(), tools.len());
         }
         stats
+    }
+}
+
+impl Default for ToolManager {
+    fn default() -> Self {
+        Self::new()
     }
 }

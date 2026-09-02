@@ -2,16 +2,61 @@
 
 实现 `McpClient` trait，封装 rmcp 库。
 
+> 下文含部分早期设计构想。**现行真实架构见本节**。
+
+## 实际架构（现行 · `McpManager` 单门面）
+
+对外只暴露一个门面 `McpManager`，同时承担两类职责：
+
+- **持久化**：server 配置 / 工具缓存 / 连接状态（内部聚合 config + status 两个 storage，后端可插拔：GUI 用 KV、CLI 用 File）
+- **运行时**：连接 / 断开 / 懒连接 / 工具调用与路由（`tool→server` 映射）
+
+公开类型已收口：`McpManager` + 数据模型（`McpServerView` / `McpServerEntry` / `McpConfigFile` / `ServerStatus` / `Tool` …）+ `storage` traits/实现 + `McpClientImpl`。`McpConfigManager` / `McpBundle` 已降为 crate 内部实现（`pub(crate)`），**不再导出**。
+
+### 门面方法分组（见 `docs/mcp-unify-refactor.md` A.0）
+
+| 组 | 方法 |
+|---|---|
+| 构造 | `new()`(File 默认) / `with_backends(config_storage, status_storage)` |
+| 服务 CRUD | `list_servers()` / `get_server()` / `load_config()` / `add_server` / `update_server` / `delete_server` |
+| 刷新 / 预载 | `preload_cached_tools()`(缓存→路由表，不连接) / `refresh_server_tools()`(连→拉→缓存→路由+自动记状态) |
+| 状态 | `record_status` / `get_status` / `list_status` / `delete_status` / `has_status` / `record_failure` |
+| 连接 | `connect_server/all` / `disconnect_server/all` / `is_server_connected` / `call_tool` / `call_tool_auto`(懒连) |
+| 工具 | `get_server_tools`(登记表) / `get_all_tools` / `server_tools`(读登记表，不触发连接) |
+
+### 读路径 / 写路径
+
+- 读路径（`list_servers` / `get_server` / `server_tools` / 状态）**无副作用、不触发连接**。
+- 连接/拉取只发生在写路径：`refresh_server_tools` / 显式 `connect_server` / `call_tool_auto` 懒连。
+
+### 冷启动与装配（GUI）
+
+1. `McpManager::with_backends(kv)` 构造 → `preload_cached_tools()` 把缓存工具喂进运行时路由表（不连任何 server）。
+2. `ToolRegistry::set_mcp_manager(manager)` 从 manager 拉取并**统一注册** MCP 工具（唯一入口，避免重复注册）。
+3. 首次调用某 server 工具 → `call_tool_auto` 懒连接。
+
+### 运行期刷新单 server（GUI）
+
+`manager.refresh_server_tools(name)`（拉新工具并更新路由+状态）→ `registry.sync_mcp_server(name)`（卸旧+按登记表重注册；分类映射统一在 tool-manager 的 `map_categories`）。
+
 ## 目录结构
 
 ```
-crates/mcp-rmcp/
-├── Cargo.toml
-└── src/
-    ├── lib.rs
-    ├── client.rs      # MCP 客户端实现
-    ├── manager.rs     # MCP 管理器（多服务器支持）
-    └── tools.rs       # 工具管理（多服务器支持）
+crates/mcp-rmcp/src/
+├── lib.rs            # 对外导出：McpManager + 数据模型 + storage
+├── client.rs         # McpClientImpl（单 server 真实连接：spawn/握手/list_tools/call_tool）
+├── command_resolver.rs
+├── tools.rs          # ToolManager（server→tools 运行时路由表，内部）
+├── manager/
+│   ├── mod.rs        # struct + 内部状态 + 构造(new/with_backends)
+│   ├── routing.rs    # 运行时：连接/断开/懒连/工具注入/调用/查询 + McpManagerTrait
+│   ├── config.rs     # ① 服务 CRUD（持久化 config/tools cache）
+│   ├── status.rs     # ③ 连接状态读写
+│   ├── views.rs      # load_servers / get_server（config+status join 视图）
+│   └── refresh.rs    # 预载缓存工具 / 刷新某 server 工具
+├── bundle.rs         # McpBundle（内部实现，被 manager 聚合）
+├── config.rs         # McpConfigManager + 数据模型（内部）
+└── storage/          # McpConfigStorage / McpStatusStorage traits + File/InMemory
 ```
 
 ## 关键功能

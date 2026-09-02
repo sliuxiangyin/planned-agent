@@ -41,6 +41,10 @@ impl McpManagerTrait for McpManagerAdapter {
         self.inner.find_server_for_tool(tool_name)
     }
 
+    fn get_server_tools(&self, server_name: &str) -> Vec<Tool> {
+        self.inner.get_server_tools(server_name)
+    }
+
     fn get_server_names(&self) -> Vec<String> {
         self.inner.get_server_names()
     }

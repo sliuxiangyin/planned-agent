@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+
 pub mod bundle;
 pub mod client;
 pub mod command_resolver;
@@ -6,10 +8,9 @@ pub mod manager;
 pub mod storage;
 pub mod tools;
 
-pub use bundle::{McpBundle, McpServerView};
+pub use bundle::McpServerView;
 pub use client::McpClientImpl;
 pub use command_resolver::resolve_command;
-pub use config::McpConfigManager;
 pub use manager::McpManager;
 pub use storage::{
     FileMcpConfigStorage, FileMcpStatusStorage, InMemoryMcpConfigStorage,

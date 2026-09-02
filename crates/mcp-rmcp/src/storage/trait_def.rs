@@ -1,4 +1,4 @@
-//! MCP 配置存储 trait —— 调用方按场景实现后注入 [`McpConfigManager`]
+//! MCP 配置存储 trait —— 调用方按场景实现后注入 `McpConfigManager`（McpManager 内部）
 //!
 //! 设计要点：
 //! - **同步 API**：文件、sled 等当前所有后端都是同步 I/O；trait 不引入 `async_trait`
@@ -33,7 +33,7 @@ use crate::config::{McpConfigFile, McpServerEntry};
 /// - **GUI 场景**：调用方自实现（如基于 sled KV）
 /// - **测试场景**：[`crate::storage::InMemoryMcpConfigStorage`]（mcp-rmcp 内置）
 ///
-/// 所有方法语义对齐原 [`crate::config::McpConfigManager`] 中的同名方法，
+/// 所有方法语义对齐原 `crate::config::McpConfigManager` 中的同名方法，
 /// 实现方需保证：
 /// - `load_config` 在底层不存在时返回默认配置（参考 [`McpConfigFile::default`]）
 /// - `save_config` 是原子或事务语义（避免半写入状态被读到）

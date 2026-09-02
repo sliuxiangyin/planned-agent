@@ -1,8 +1,8 @@
-//! MCP 连接状态存储 trait —— 调用方按场景实现后注入 [`McpStatusManager`]
+//! MCP 连接状态存储 trait —— 调用方按场景实现后注入 `McpStatusManager`
 //!
 //! ## 设计要点
 //!
-//! - **与 [`McpConfigStorage`] 对称**：同样的 sync API + `Send + Sync` + 不引入 `async_trait`
+//! - **与 `McpConfigStorage` 对称**：同样的 sync API + `Send + Sync` + 不引入 `async_trait`
 //! - **per-server 粒度**：key 用 `server:<name>` 形式（KV 友好），不存单 blob，
 //!   避免每次状态更新重写所有 server 的 tools schema
 //! - **仅保留最近一次**：不存历史事件流，需要历史时另起 `mcp_events` tree
@@ -146,7 +146,7 @@ impl ServerStatus {
 ///
 /// 所有方法语义对齐"最近一次状态"模型：
 /// - `record` 是**覆盖式**，仅保留最近一次
-/// - `delete` 用于与 [`McpConfigStorage::delete_server`] 联动，避免残留
+/// - `delete` 用于与 `McpConfigStorage::delete_server` 联动，避免残留
 /// - `load_all` / `get` 在底层不存在时返回空，不抛错（让 GUI 冷启动优雅降级）
 pub trait McpStatusStorage: Send + Sync {
     /// 加载所有 server 的最近状态（启动时给 GUI 灌红/绿/灰）
@@ -161,7 +161,7 @@ pub trait McpStatusStorage: Send + Sync {
     /// 记录一次连接尝试的结果（覆盖式）
     fn record(&self, name: &str, status: ServerStatus) -> Result<()>;
 
-    /// 删除指定 server 的状态（与 [`McpConfigStorage::delete_server`] 联动）
+    /// 删除指定 server 的状态（与 `McpConfigStorage::delete_server` 联动）
     fn delete(&self, name: &str) -> Result<()>;
 
     /// 检查指定 server 是否有状态记录

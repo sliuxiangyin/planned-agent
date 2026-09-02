@@ -56,6 +56,9 @@ pub trait McpManagerTrait: Send + Sync {
     /// 获取所有已注册工具
     fn get_all_tools(&self) -> Vec<Tool>;
 
+    /// 获取指定服务器已登记的工具列表（运行时登记表，不触发连接）
+    fn get_server_tools(&self, server_name: &str) -> Vec<Tool>;
+
     /// 查找工具所在的服务器
     fn find_server_for_tool(&self, tool_name: &str) -> Option<String>;
 

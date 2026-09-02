@@ -1,60 +1,23 @@
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+//! `McpManager` 运行时侧 impl：连接 / 断开 / 懒连 / 工具注入 / 工具调用与查询，
+//! 以及 `McpManagerTrait`（供 tool-manager 以 `Arc<dyn McpManagerTrait>` 注入）。
+//!
+//! 字段 `inner`（运行时可变状态）定义在父模块 `super::mod`，此处为子模块可访问。
+
+use std::sync::Arc;
+
 use anyhow::Result;
-use planned_agent_core::mcp::McpClient;
-use planned_agent_core::mcp::types::{Tool, ToolResult, McpServerConfig};
-use serde_json::Value;
-use tracing::{info, error};
 use async_trait::async_trait;
-use crate::client::McpClientImpl;
-use crate::tools::ToolManager;
-// McpManagerTrait 已下沉到 core，避免 mcp-rmcp 反向依赖 tool-manager
+use planned_agent_core::mcp::McpClient;
+use planned_agent_core::mcp::types::{McpServerConfig, Tool, ToolResult};
 use planned_agent_core::tool_registry::traits::McpManagerTrait;
+use serde_json::Value;
+use tracing::{error, info};
 
-// ═══════════════════════════════════════════════════════════════════════
-// 内部可变状态（std::sync::RwLock 支持多读单写）
-// ═══════════════════════════════════════════════════════════════════════
+use crate::client::McpClientImpl;
 
-struct McpManagerInner {
-    /// 已连接的客户端（Arc 允许跨 await 持有引用）
-    clients: HashMap<String, Arc<McpClientImpl>>,
-    /// 内部工具映射（server → tools），用于 call_tool_auto 路由
-    tool_manager: ToolManager,
-    /// 服务器配置缓存（用于懒连接）
-    server_configs: HashMap<String, McpServerConfig>,
-}
-
-impl McpManagerInner {
-    fn new() -> Self {
-        Self {
-            clients: HashMap::new(),
-            tool_manager: ToolManager::new(),
-            server_configs: HashMap::new(),
-        }
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// McpManager（线程安全 + 懒连接）
-// ═══════════════════════════════════════════════════════════════════════
-
-/// MCP 管理器
-///
-/// 使用 `Arc<RwLock<McpManagerInner>>` 实现内部可变性：
-/// - `connect_server` / `disconnect_server` 获取 write lock
-/// - `call_tool` 获取 read lock 后 clone Arc，释放锁再 await
-/// - 支持懒连接：`call_tool_auto` 自动连接未连接的 server
-pub struct McpManager {
-    inner: Arc<RwLock<McpManagerInner>>,
-}
+use super::McpManager;
 
 impl McpManager {
-    pub fn new() -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(McpManagerInner::new())),
-        }
-    }
-
     // ── 连接管理 ─────────────────────────────────────────────────────
 
     /// 完整连接：connect → list_tools → 注册内部 ToolManager
@@ -67,7 +30,10 @@ impl McpManager {
         let tools = client.list_tools().await?;
 
         let filtered = if let Some(filter) = &config.tools_filter {
-            tools.into_iter().filter(|t| filter.contains(&t.name)).collect()
+            tools
+                .into_iter()
+                .filter(|t| filter.contains(&t.name))
+                .collect()
         } else {
             tools
         };
@@ -98,7 +64,7 @@ impl McpManager {
         Ok(())
     }
 
-    /// 批量连接
+    /// 批量连接（单个失败仅告警，不中断其余）
     pub async fn connect_all(&self, configs: Vec<McpServerConfig>) -> Result<()> {
         for config in configs {
             if let Err(e) = self.connect_server(config).await {
@@ -108,7 +74,7 @@ impl McpManager {
         Ok(())
     }
 
-    /// 断开单个服务器
+    /// 断开单个服务器（同时清空其路由表 / 懒连接 config）
     pub async fn disconnect_server(&self, name: &str) -> Result<()> {
         let removed = {
             let mut inner = self.inner.write().unwrap();
@@ -144,9 +110,9 @@ impl McpManager {
 
     /// 将工具注入内部 ToolManager（不连接服务器）
     ///
-    /// 与 `ToolRegistry` 注册配合使用：外部（agent-gui）从缓存注册工具到
-    /// ToolRegistry 后，调用此方法同步 McpManager 的内部路由表，
-    /// 确保后续 `call_tool_auto` 能找到工具所属服务器并懒连接。
+    /// 与 `ToolRegistry` 注册配合使用：外部从缓存注册工具到 ToolRegistry 后，
+    /// 调用此方法同步 McpManager 的内部路由表，确保后续 `call_tool_auto`
+    /// 能找到工具所属服务器并懒连接。
     pub fn set_server_tools(&self, server_name: &str, tools: Vec<Tool>) {
         let mut inner = self.inner.write().unwrap();
         inner.tool_manager.add_tools(server_name, tools);
@@ -186,7 +152,9 @@ impl McpManager {
         // read lock → clone Arc → release lock → await
         let client = {
             let inner = self.inner.read().unwrap();
-            inner.clients.get(server_name)
+            inner
+                .clients
+                .get(server_name)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("MCP server not connected: {}", server_name))?
         };
@@ -200,7 +168,9 @@ impl McpManager {
         // 1. 查找 server
         let server_name = {
             let inner = self.inner.read().unwrap();
-            inner.tool_manager.find_server_for_tool(tool_name)
+            inner
+                .tool_manager
+                .find_server_for_tool(tool_name)
                 .ok_or_else(|| anyhow::anyhow!("No server found for tool: {}", tool_name))?
         };
 
@@ -228,14 +198,18 @@ impl McpManager {
         self.call_tool(&server_name, tool_name, arguments).await
     }
 
-    // ── 查询 ─────────────────────────────────────────────────────────
+    // ── 工具列表 / 查询 ──────────────────────────────────────────────
 
     pub fn get_all_tools(&self) -> Vec<Tool> {
         self.inner.read().unwrap().tool_manager.get_all_tools()
     }
 
     pub fn get_server_tools(&self, server_name: &str) -> Vec<Tool> {
-        self.inner.read().unwrap().tool_manager.get_server_tools(server_name)
+        self.inner
+            .read()
+            .unwrap()
+            .tool_manager
+            .get_server_tools(server_name)
     }
 
     pub fn get_server_names(&self) -> Vec<String> {
@@ -243,7 +217,26 @@ impl McpManager {
     }
 
     pub fn is_server_connected(&self, server_name: &str) -> bool {
-        self.inner.read().unwrap().clients.contains_key(server_name)
+        self.inner
+            .read()
+            .unwrap()
+            .clients
+            .contains_key(server_name)
+    }
+
+    /// 某 server 的登记工具列表（读运行时登记表；无副作用、不触发连接）。
+    /// 数据由预载 / 刷新 / 连接等写路径填好；未登记返回空（甲语义）。
+    pub fn server_tools(&self, server_name: &str) -> Vec<Tool> {
+        self.get_server_tools(server_name)
+    }
+
+    /// 清空某 server 的运行时状态（路由表 / 懒连接 config / 客户端引用）。
+    /// 供删除配置等联动场景调用；真正的进程断开由上层 `disconnect_server` 负责。
+    pub(crate) fn clear_server_state(&self, name: &str) {
+        let mut inner = self.inner.write().unwrap();
+        inner.tool_manager.remove_server_tools(name);
+        inner.server_configs.remove(name);
+        inner.clients.remove(name);
     }
 }
 
@@ -262,7 +255,15 @@ impl McpManagerTrait for McpManager {
     }
 
     fn find_server_for_tool(&self, tool_name: &str) -> Option<String> {
-        self.inner.read().unwrap().tool_manager.find_server_for_tool(tool_name)
+        self.inner
+            .read()
+            .unwrap()
+            .tool_manager
+            .find_server_for_tool(tool_name)
+    }
+
+    fn get_server_tools(&self, server_name: &str) -> Vec<Tool> {
+        self.get_server_tools(server_name)
     }
 
     fn get_server_names(&self) -> Vec<String> {
@@ -271,6 +272,9 @@ impl McpManagerTrait for McpManager {
 
     fn get_server_categories(&self, server_name: &str) -> Option<Vec<String>> {
         let inner = self.inner.read().unwrap();
-        inner.server_configs.get(server_name).and_then(|c| c.categories.clone())
+        inner
+            .server_configs
+            .get(server_name)
+            .and_then(|c| c.categories.clone())
     }
 }

@@ -101,9 +101,9 @@ impl McpClientImpl {
                 // 根据内容类型转换
                 if let Some(text) = c.as_text() {
                     Value::String(text.text.clone())
-                } else if let Some(_) = c.as_image() {
+                } else if c.as_image().is_some() {
                     Value::String("[Image]".to_string())
-                } else if let Some(_) = c.as_resource() {
+                } else if c.as_resource().is_some() {
                     Value::String("[Resource]".to_string())
                 } else {
                     Value::String("[Unknown content type]".to_string())
@@ -335,7 +335,7 @@ impl McpClient for McpClientImpl {
         
         let tools = client.list_all_tools().await?;
         
-        Ok(tools.iter().map(|t| Self::convert_tool(t)).collect())
+        Ok(tools.iter().map(Self::convert_tool).collect())
     }
     
     async fn call_tool(&self, name: &str, arguments: Value) -> Result<ToolResult> {

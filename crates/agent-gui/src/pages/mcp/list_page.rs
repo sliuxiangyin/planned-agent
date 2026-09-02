@@ -17,8 +17,8 @@
 
 use dioxus::prelude::*;
 use dioxus_primitives::alert_dialog::{
-    AlertDialogRoot, AlertDialogContent, AlertDialogTitle,
-    AlertDialogDescription, AlertDialogActions, AlertDialogAction, AlertDialogCancel,
+    AlertDialogAction, AlertDialogActions, AlertDialogCancel, AlertDialogContent,
+    AlertDialogDescription, AlertDialogRoot, AlertDialogTitle,
 };
 use planned_agent_mcp_rmcp::storage::{LastStatus, ServerStatus};
 
@@ -67,7 +67,10 @@ fn to_card_status(s: &ServerStatus) -> Option<CardStatus> {
                     s.error_kind.as_deref().unwrap_or("unknown")
                 )
             });
-            let kind = s.error_kind.clone().unwrap_or_else(|| "unknown".to_string());
+            let kind = s
+                .error_kind
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
             Some(CardStatus::Failed { kind, message })
         }
     }
@@ -79,10 +82,7 @@ fn view_to_card_status(view: &planned_agent_mcp_rmcp::McpServerView) -> Option<C
 }
 
 #[component]
-pub fn McpListPage(
-    on_edit: EventHandler<String>,
-    on_add: EventHandler<()>,
-) -> Element {
+pub fn McpListPage(on_edit: EventHandler<String>, on_add: EventHandler<()>) -> Element {
     // ── 获取 contexts（先取 ctx，以便 use_signal 闭包捕获） ──
     let mcp_resource = use_context::<Resource<Option<std::sync::Arc<McpContext>>>>();
     let tools_resource = use_context::<Resource<Option<std::sync::Arc<ToolsContext>>>>();
@@ -94,7 +94,12 @@ pub fn McpListPage(
     // 冷启动即从 KV / 文件中加载历史状态，无需手动按 name 配对
     let mut views = use_signal({
         let mcp_ctx = mcp_ctx.clone();
-        move || mcp_ctx.as_ref().map(|c| c.load_servers()).unwrap_or_default()
+        move || {
+            mcp_ctx
+                .as_ref()
+                .map(|c| c.load_servers())
+                .unwrap_or_default()
+        }
     });
 
     // ── 变更监听：McpChangeNotifier 触发时重新加载视图 ──
@@ -107,7 +112,7 @@ pub fn McpListPage(
             // 订阅 version 变化（每次 bump 触发这里）
             let _ = notifier.version();
             if let Some(c) = mcp_ctx.as_ref() {
-               
+
                 // views.set(c.load_servers());
             }
         });
@@ -279,13 +284,11 @@ pub fn McpListPage(
                                         class: "settings-mcp-action-btn settings-mcp-action-btn--danger",
                                         disabled: mcp_ctx.is_none(),
                                         onclick: {
-                                             tracing::info!("删除1");
                                             let server_name = server_name.clone();
                                             let mcp_ctx = mcp_ctx.clone();
                                             let notifier = notifier;
                                             move |_| {
                                                 if let Some(c) = mcp_ctx.as_ref() {
-                                                    tracing::info!("删除");
                                                     // 走 McpContext::delete_server 包装，自动联动清理 status
                                                     if c.delete_server(&server_name).is_ok() {
                                                         // 通知所有监听者重新加载

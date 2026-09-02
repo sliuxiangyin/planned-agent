@@ -13,7 +13,7 @@
 //! }
 //! ```
 //!
-//! - 单文件 + dict 结构，与 [`FileMcpConfigStorage`] 的"整 blob 写"风格对齐
+//! - 单文件 + dict 结构，与 `FileMcpConfigStorage` 的"整 blob 写"风格对齐
 //! - 文件不存在时返回空 map，**不**自动落盘（避免 KV / 文件污染）
 //! - 写入用 `tmp + rename` 原子语义
 

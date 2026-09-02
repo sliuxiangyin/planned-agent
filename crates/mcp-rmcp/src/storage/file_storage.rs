@@ -1,6 +1,6 @@
 //! 文件存储实现：[`McpConfigStorage`] 的默认后端
 //!
-//! 行为完全对齐重构前的 [`crate::config::McpConfigManager`]：
+//! 行为完全对齐重构前的 `crate::config::McpConfigManager`：
 //! - JSON 格式 + 原子写入（tmp + rename）
 //! - 文件不存在时自动创建默认配置
 //! - 全部 server CRUD 与工具缓存 API 1:1 保留

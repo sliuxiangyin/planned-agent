@@ -1,4 +1,5 @@
-//! MCP 统一门面 [`McpBundle`] —— 把 list（config + tools cache）和 status 聚合暴露
+//! MCP 内部持久化门面 `McpBundle` —— 把 list（config + tools cache）和 status 聚合暴露。
+//! crate 内部实现（`pub(crate)`），被 `McpManager` 持有，**不对外导出**。
 //!
 //! ## 设计动机
 //!
@@ -6,7 +7,7 @@
 //! 是两个**独立**的存储 trait，调用方可以分别为它们选择后端（File / KV / DB / 内存）。
 //!
 //! 但每次让外部使用方手动 "load config → load status → 按 name 配对" 极易出错。
-//! [`McpBundle`] 把这两个存储捏在一起：
+//! `McpBundle` 把这两个存储捏在一起：
 //!
 //! - **统一视图读取**：`load_servers()` 一次返回 `Vec<McpServerView>`（已 join）
 //! - **联动写操作**：`delete_server()` / `fetch_and_cache_tools()` 内部消化状态联动
@@ -111,7 +112,7 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
 ///     Arc::new(KvMcpStatusStorage::new(store)),
 /// );
 /// ```
-pub struct McpBundle {
+pub(crate) struct McpBundle {
     config_manager: McpConfigManager,
     status_storage: Arc<dyn McpStatusStorage>,
 }
@@ -145,11 +146,6 @@ impl McpBundle {
     /// 访问 config 侧 manager
     pub fn config_manager(&self) -> &McpConfigManager {
         &self.config_manager
-    }
-
-    /// 访问 status 侧 storage
-    pub fn status_storage(&self) -> &Arc<dyn McpStatusStorage> {
-        &self.status_storage
     }
 
     // ═════════════════════════════════════════════════════════════════

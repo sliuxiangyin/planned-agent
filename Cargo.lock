@@ -5759,8 +5759,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "clap",
- "config 0.13.4",
  "crw-core",
  "crw-extract",
  "futures",
@@ -5776,7 +5774,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
- "tracing-appender",
  "tracing-subscriber",
  "uuid",
 ]

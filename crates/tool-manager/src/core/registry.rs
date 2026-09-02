@@ -16,6 +16,31 @@ use crate::core::validator::ToolValidator;
 // （保持向后兼容，未来可以直接 `use planned_agent_core::tool_registry::traits::McpManagerTrait`）
 use crate::adapter::mcp::McpManagerTrait;
 
+/// MCP 字符串分类 → ToolCategory 映射（MCP 工具分类的唯一来源，供全量/单 server 同步共用）
+fn map_categories(raw: Option<Vec<String>>) -> Vec<ToolCategory> {
+    let mut out = Vec::new();
+    for cat in raw.unwrap_or_default() {
+        let c = match cat.as_str() {
+            "Browser" => Some(ToolCategory::Browser),
+            "File" => Some(ToolCategory::File),
+            "Text" => Some(ToolCategory::Text),
+            "Data" => Some(ToolCategory::Data),
+            "System" => Some(ToolCategory::System),
+            "Device" => Some(ToolCategory::Device),
+            "Dev" => Some(ToolCategory::Dev),
+            "Utility" => Some(ToolCategory::Utility),
+            _ => None,
+        };
+        if let Some(c) = c {
+            out.push(c);
+        }
+    }
+    if out.is_empty() {
+        out.push(ToolCategory::Utility);
+    }
+    out
+}
+
 /// 统一工具注册表（线程安全）
 pub struct ToolRegistry {
     /// 工具定义（name -> Tool）
@@ -79,28 +104,8 @@ impl ToolRegistry {
             let server_name = manager.find_server_for_tool(&tool.name)
                 .unwrap_or_else(|| "unknown".to_string());
             
-            // 获取服务器配置的分类
-            let server_categories = manager.get_server_categories(&server_name)
-                .map(|cats| cats.iter().filter_map(|s| {
-                    // 将字符串转换为 ToolCategory
-                    match s.as_str() {
-                        "Browser" => Some(ToolCategory::Browser),
-                        "File" => Some(ToolCategory::File),
-                        "Text" => Some(ToolCategory::Text),
-                        "Data" => Some(ToolCategory::Data),
-                        "System" => Some(ToolCategory::System),
-                        "Device" => Some(ToolCategory::Device),
-                        "Dev" => Some(ToolCategory::Dev),
-                        "Utility" => Some(ToolCategory::Utility),
-                        _ => None,
-                    }
-                }).collect());
-            
-            // 自动推断分类（配置优先 + 自动推断）
-            let categories = server_categories.unwrap_or_else(|| {
-                // 默认使用 Utility 分类
-                vec![ToolCategory::Utility]
-            });
+            // 获取服务器配置的分类（统一映射，见 map_categories）
+            let categories = map_categories(manager.get_server_categories(&server_name));
             
             let metadata = ToolMetadata {
                 source: ToolSource::Mcp { server_name },
@@ -117,6 +122,44 @@ impl ToolRegistry {
         
         let tools = self.tools.read().unwrap();
         info!("MCP tools synced: {} tools", tools.len());
+    }
+
+    /// 按 server 重新同步注册（卸旧 → 从已注入 McpManager 登记表重注册该 server 工具）
+    ///
+    /// 用于“刷新某 server 工具”后保持注册表与 McpManager 路由表一致。
+    /// 需先 `set_mcp_manager`。返回注册的工具数。
+    pub fn sync_mcp_server(&self, server_name: &str) -> anyhow::Result<usize> {
+        let mcp = self
+            .mcp_manager
+            .read()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("MCP manager 尚未注入（先调用 set_mcp_manager）"))?;
+
+        // 卸旧
+        self.unregister_mcp_server_tools(server_name)?;
+
+        // 从 manager 登记表重注册（不触发连接；数据由刷新/预载/连接写路径填好）
+        let tools = mcp.get_server_tools(server_name);
+        let categories = map_categories(mcp.get_server_categories(server_name));
+        let mut count = 0usize;
+        for tool in tools {
+            let metadata = ToolMetadata {
+                source: ToolSource::Mcp {
+                    server_name: server_name.to_string(),
+                },
+                categories: categories.clone(),
+                enabled: true,
+                priority: 100,
+                tags: vec![],
+                created_at: chrono::Utc::now(),
+                version: None,
+            };
+            self.register_tool(tool, metadata);
+            count += 1;
+        }
+        info!("synced MCP server '{}': {} tools", server_name, count);
+        Ok(count)
     }
     
     /// 注册单个工具

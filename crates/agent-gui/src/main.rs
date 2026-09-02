@@ -7,11 +7,11 @@ mod services;
 mod storage;
 
 use config::GuiConfig;
+use context::tools::plans_flexible_tool::register_plans_flexible_tool;
 use context::{
     AiContext, InitStatus, KvContext, McpChangeNotifier, McpContext, PromptContext, RagContext,
     StorageContext, ToolsContext,
 };
-use context::tools::plans_flexible_tool::register_plans_flexible_tool;
 use dioxus::{desktop::Config, prelude::*};
 use pages::home::{HomePage, PageRoute};
 use pages::plan::PlanPage;
@@ -201,15 +201,13 @@ fn app() -> Element {
 
     // ── 延后注入 MCP → Tools ──
     // use_effect 在 tools / mcp 任一变化时触发：
-    // 1. 注册 MCP 缓存工具到 ToolRegistry
-    // 2. 注入 McpManager 到 ToolRegistry（用于后续工具调用）
+    // McpContext::init 已把缓存工具预载进 McpManager（懒连接路由表）；
+    // 这里 set_mcp_manager 从 McpManager 拉取 MCP 工具并统一注册进 ToolRegistry，
+    // 是 MCP 工具进入 ToolRegistry 的唯一入口（避免重复注册）。
     use_effect(move || {
         let tools_arc = tools.read().as_ref().and_then(|x| x.clone());
         let mcp_arc = mcp.read().as_ref().and_then(|x| x.clone());
         if let (Some(t), Some(m)) = (tools_arc, mcp_arc) {
-            // 1. 从缓存注册 MCP 工具（不连接服务器）
-            m.register_cached_tools(&t.registry);
-            // 2. 注入 McpManager 用于后续工具调用路由
             t.set_mcp_manager(m.manager.clone());
         }
     });
@@ -221,8 +219,7 @@ fn app() -> Element {
         let tools_arc = tools.read().as_ref().and_then(|x| x.clone());
         let storage_arc = storage.read().as_ref().and_then(|x| x.clone());
         if let (Some(t), Some(s)) = (tools_arc, storage_arc) {
-            let service =
-                Arc::new(PlansFlexibleService::new(s.plans_flexible_repo()));
+            let service = Arc::new(PlansFlexibleService::new(s.plans_flexible_repo()));
             register_plans_flexible_tool(&t, service);
         }
     });

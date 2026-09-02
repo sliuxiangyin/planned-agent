@@ -177,22 +177,13 @@ impl From<&McpServerEntry> for McpServerConfig {
 /// 负责配置文件读写、服务器 CRUD、工具缓存；
 /// 不负责 MCP 连接管理——连接由 [`crate::manager::McpManager`] 负责。
 #[derive(Clone)]
-pub struct McpConfigManager {
+pub(crate) struct McpConfigManager {
     storage: Arc<dyn McpConfigStorage>,
 }
 
 impl McpConfigManager {
     /// 默认配置文件路径（CLI 场景）
     pub const DEFAULT_PATH: &'static str = "./data/mcp-config.json";
-
-    /// **便捷构造**（向后兼容）：直接传路径，内部用 [`crate::storage::FileMcpConfigStorage`]
-    ///
-    /// CLI 调用方继续用 `McpConfigManager::new(DEFAULT_PATH)` 即可。
-    pub fn new(config_path: &str) -> Self {
-        Self::with_storage(Arc::new(
-            crate::storage::FileMcpConfigStorage::new(config_path),
-        ))
-    }
 
     /// **DI 构造**：调用方注入任意 [`McpConfigStorage`] 实现
     ///
@@ -201,10 +192,6 @@ impl McpConfigManager {
         Self { storage }
     }
 
-    /// 访问内部 storage（高级用法：直接读写底层后端）
-    pub fn storage(&self) -> &Arc<dyn McpConfigStorage> {
-        &self.storage
-    }
 
     // ── 全部方法委托给 storage ──
 
@@ -213,10 +200,6 @@ impl McpConfigManager {
         self.storage.load_config()
     }
 
-    /// 保存配置（原子 / 事务语义由 storage 实现保证）
-    pub fn save_config(&self, config: &McpConfigFile) -> Result<()> {
-        self.storage.save_config(config)
-    }
 
     // ── 服务器 CRUD ──
 
@@ -239,25 +222,6 @@ impl McpConfigManager {
         self.storage.cache_tools(server_name, tools)
     }
 
-    /// 读取缓存的工具（不连接 MCP）；无缓存时返回空 vec
-    pub fn get_cached_tools(&self, server_name: &str) -> Vec<Tool> {
-        self.storage.get_cached_tools(server_name)
-    }
-
-    /// 读取所有服务器的缓存工具，返回 (server_name, tools)
-    pub fn get_all_cached_tools(&self) -> Vec<(String, Vec<Tool>)> {
-        self.storage.get_all_cached_tools()
-    }
-
-    /// 清除指定服务器的缓存工具
-    pub fn clear_cached_tools(&self, server_name: &str) -> Result<()> {
-        self.storage.clear_cached_tools(server_name)
-    }
-
-    /// 检查指定服务器是否有缓存工具
-    pub fn has_cached_tools(&self, server_name: &str) -> bool {
-        self.storage.has_cached_tools(server_name)
-    }
 
     // ── 刷新工具（复合操作，保留在 manager） ──
 
