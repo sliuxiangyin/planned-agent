@@ -356,7 +356,7 @@ pub fn McpEditorPage(
                                 tracing::warn!("McpContext 未就绪，无法保存");
                                 return;
                             };
-                            let Some(tools) = tools_ctx_arc.clone() else {
+                            let Some(_tools) = tools_ctx_arc.clone() else {
                                 tracing::warn!("ToolsContext 未就绪，无法保存");
                                 return;
                             };

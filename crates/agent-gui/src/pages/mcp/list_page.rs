@@ -102,21 +102,8 @@ pub fn McpListPage(on_edit: EventHandler<String>, on_add: EventHandler<()>) -> E
         }
     });
 
-    // ── 变更监听：McpChangeNotifier 触发时重新加载视图 ──
-    // 让编辑器保存/刷新完成后自动反映到列表（不需要手动 reload）
+    // 变更通知器：保存/刷新/删除完成时 bump()（本组件已在各操作内部直接 reload 视图）
     let notifier = use_context::<McpChangeNotifier>();
-    {
-        let mcp_ctx = mcp_ctx.clone();
-        let mut views = views.clone();
-        use_effect(move || {
-            // 订阅 version 变化（每次 bump 触发这里）
-            let _ = notifier.version();
-            if let Some(c) = mcp_ctx.as_ref() {
-
-                // views.set(c.load_servers());
-            }
-        });
-    }
 
     // AlertDialog 的开/关
     let mut dialog_open = use_signal(|| false);

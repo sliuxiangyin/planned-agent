@@ -11,7 +11,7 @@ use std::sync::Arc;
 use planned_agent_core::mcp::types::ConnectionError;
 use planned_agent_mcp_rmcp::{
     storage::{FileMcpConfigStorage, FileMcpStatusStorage, McpConfigStorage, McpStatusStorage},
-    McpManager, McpServerView, ServerStatus,
+    McpManager, McpServerView,
 };
 use planned_agent_tool_manager::ToolRegistry;
 
@@ -32,14 +32,6 @@ pub struct McpChangeNotifier {
 }
 
 impl McpChangeNotifier {
-    /// 创建一个新的变更通知器（绑定到一个新的 Signal）
-    pub fn new() -> Self {
-        Self {
-            version: Signal::new(0),
-        }
-    }
-
-    /// 从已有的 Signal 创建（用于在 use_signal 已存在的情况下绑定）
     pub fn from_signal(version: Signal<u64>) -> Self {
         Self { version }
     }
@@ -50,11 +42,6 @@ impl McpChangeNotifier {
         let mut signal = self.version;
         let cur = signal.cloned();
         signal.set(cur + 1);
-    }
-
-    /// 当前版本号（只读，便于调试）
-    pub fn version(&self) -> u64 {
-        self.version.cloned()
     }
 }
 
@@ -146,14 +133,6 @@ impl McpContext {
     pub fn load_servers(&self) -> Vec<McpServerView> {
         self.manager.list_servers().unwrap_or_else(|e| {
             tracing::warn!("加载 MCP servers 失败，按空启动: {}", e);
-            Vec::new()
-        })
-    }
-
-    /// 加载所有 server 的最近连接状态
-    pub fn load_all_statuses(&self) -> Vec<(String, ServerStatus)> {
-        self.manager.list_status().unwrap_or_else(|e| {
-            tracing::warn!("加载 MCP 状态失败，按空启动: {}", e);
             Vec::new()
         })
     }
