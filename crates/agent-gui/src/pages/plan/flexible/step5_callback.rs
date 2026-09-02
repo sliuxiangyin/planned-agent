@@ -114,7 +114,14 @@ impl SubAgentResultCallback for FlexibleStep5Callback {
         let service2 = service.clone();
         tokio::spawn(async move {
             match service2
-                .write(&plan_id2, &input_schema, &output, &steps, &execution_plan)
+                .write(
+                    &plan_id2,
+                    None, // TODO(会话阶段): 传入产出本版本的 session_id
+                    &input_schema,
+                    &output,
+                    &steps,
+                    &execution_plan,
+                )
                 .await
             {
                 Ok(model) => tracing::info!(

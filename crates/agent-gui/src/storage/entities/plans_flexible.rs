@@ -12,6 +12,8 @@ pub struct Model {
     pub id: String,
     /// FK → plans.id
     pub plan_id: String,
+    /// 产出该版本的会话 id（FK → sessions.id）；非会话写入可为空
+    pub session_id: Option<String>,
     /// 版本号：1, 2, 3...（对应 step5 输出 metadata.version）
     pub version: i32,
     /// 输入参数定义 JSON（来自 step5 输出 input_schema）

@@ -19,16 +19,18 @@ impl PlansFlexibleService {
 
     /// 写入一条 plans_flexible 快照，返回写入后的完整 Model。
     /// version 由 repo 自动递增（最新版本 +1，首条为 1）。
+    /// `session_id` 关联产出该版本的会话；无会话写入（如 plans_flexible 工具）传 None。
     pub async fn write(
         &self,
         plan_id: &str,
+        session_id: Option<String>,
         input_schema: &str,
         output: &str,
         steps: &str,
         execution_plan: &str,
     ) -> StorageResult<PlansFlexibleModel> {
         self.repo
-            .create(plan_id, input_schema, output, steps, execution_plan)
+            .create(plan_id, session_id, input_schema, output, steps, execution_plan)
             .await
     }
 

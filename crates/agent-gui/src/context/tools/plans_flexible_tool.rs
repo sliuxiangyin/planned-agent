@@ -74,6 +74,7 @@ impl ToolExecutor for PlansFlexibleExecutor {
                     .service
                     .write(
                         plan_id,
+                        None, // 工具无会话上下文；会话归属由 step5 落库路径填写
                         &input_schema.to_string(),
                         &output.to_string(),
                         &steps.to_string(),

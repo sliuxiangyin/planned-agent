@@ -21,6 +21,7 @@ impl ChatMessageRepo {
     pub async fn create(
         &self,
         plan_id: &str,
+        session_id: Option<String>,
         message_json: &str,
         sequence_order: i32,
         is_error_type: i32,
@@ -31,6 +32,7 @@ impl ChatMessageRepo {
         let model = chat_message::ActiveModel {
             id: Set(id),
             plan_id: Set(plan_id.to_string()),
+            session_id: Set(session_id),
             message_json: Set(message_json.to_string()),
             sequence_order: Set(sequence_order),
             is_error_type: Set(is_error_type),
@@ -76,6 +78,21 @@ impl ChatMessageRepo {
     ) -> StorageResult<Vec<chat_message::Model>> {
         let list = chat_message::Entity::find()
             .filter(chat_message::Column::PlanId.eq(plan_id))
+            .order_by_asc(chat_message::Column::SequenceOrder)
+            .all(&self.db)
+            .await?;
+        Ok(list)
+    }
+
+    /// 按 plan_id + session_id 查找某会话的全部消息（按 sequence_order 正序）
+    pub async fn find_by_plan_and_session(
+        &self,
+        plan_id: &str,
+        session_id: &str,
+    ) -> StorageResult<Vec<chat_message::Model>> {
+        let list = chat_message::Entity::find()
+            .filter(chat_message::Column::PlanId.eq(plan_id))
+            .filter(chat_message::Column::SessionId.eq(session_id))
             .order_by_asc(chat_message::Column::SequenceOrder)
             .all(&self.db)
             .await?;

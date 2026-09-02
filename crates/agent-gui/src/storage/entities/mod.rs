@@ -3,4 +3,5 @@
 pub mod chat_message;
 pub mod plan;
 pub mod plans_flexible;
+pub mod session;
 pub mod test;

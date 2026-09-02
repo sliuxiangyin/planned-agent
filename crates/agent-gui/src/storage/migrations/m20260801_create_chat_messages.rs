@@ -20,6 +20,8 @@ impl MigrationTrait for Migration {
                             .primary_key(),
                     )
                     .col(ColumnDef::new(ChatMessages::PlanId).string().not_null())
+                    // session_id 关联归属会话；会话生命周期尚未接入前可为空
+                    .col(ColumnDef::new(ChatMessages::SessionId).string().null())
                     .col(ColumnDef::new(ChatMessages::MessageJson).string().not_null())
                     .col(
                         ColumnDef::new(ChatMessages::SequenceOrder)
@@ -46,6 +48,13 @@ impl MigrationTrait for Migration {
                             .to(Plans::Table, Plans::Id)
                             .on_delete(ForeignKeyAction::Cascade),
                     )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_chat_messages_session_id")
+                            .from(ChatMessages::Table, ChatMessages::SessionId)
+                            .to(Sessions::Table, Sessions::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -56,6 +65,17 @@ impl MigrationTrait for Migration {
                     .name("idx_chat_messages_plan")
                     .table(ChatMessages::Table)
                     .col(ChatMessages::PlanId)
+                    .col(ChatMessages::SequenceOrder)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_chat_messages_session")
+                    .table(ChatMessages::Table)
+                    .col(ChatMessages::SessionId)
                     .col(ChatMessages::SequenceOrder)
                     .to_owned(),
             )
@@ -79,11 +99,19 @@ enum Plans {
     Id,
 }
 
+/// sessions 表名引用（FK 目标）
+#[derive(DeriveIden)]
+enum Sessions {
+    Table,
+    Id,
+}
+
 #[derive(DeriveIden)]
 enum ChatMessages {
     Table,
     Id,
     PlanId,
+    SessionId,
     MessageJson,
     SequenceOrder,
     IsErrorType,

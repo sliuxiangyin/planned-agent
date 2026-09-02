@@ -79,7 +79,14 @@ impl ChatHistoryStore for ChatMessageStore {
                     Err(_) => 1,
                 };
                 let row = repo
-                    .create(&plan_id, &msg_json, next_seq, is_error_type, is_agent_tool)
+                    .create(
+                        &plan_id,
+                        None, // TODO(会话阶段): 绑定当前 session_id
+                        &msg_json,
+                        next_seq,
+                        is_error_type,
+                        is_agent_tool,
+                    )
                     .await?;
                 Ok::<_, anyhow::Error>(row)
             })

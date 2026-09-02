@@ -18,7 +18,7 @@ use sea_orm_migration::MigratorTrait;
 use crate::config::GuiStorageConfig;
 use crate::storage::{
     migrations::Migrator,
-    repository::{ChatMessageRepo, PlanRepo, PlansFlexibleRepo, TestRepo},
+    repository::{ChatMessageRepo, PlanRepo, PlansFlexibleRepo, SessionRepo, TestRepo},
 };
 
 /// GUI 层 Storage 上下文
@@ -36,6 +36,8 @@ pub struct StorageContext {
     chat_message_repo: Arc<ChatMessageRepo>,
     /// plans_flexible 表仓库（灵活模式计划版本快照）
     plans_flexible_repo: Arc<PlansFlexibleRepo>,
+    /// sessions 表仓库（灵活模式会话生命周期）
+    session_repo: Arc<SessionRepo>,
 }
 
 impl StorageContext {
@@ -43,6 +45,7 @@ impl StorageContext {
     pub fn plan_repo(&self) -> Arc<PlanRepo> { self.plan_repo.clone() }
     pub fn chat_message_repo(&self) -> Arc<ChatMessageRepo> { self.chat_message_repo.clone() }
     pub fn plans_flexible_repo(&self) -> Arc<PlansFlexibleRepo> { self.plans_flexible_repo.clone() }
+    pub fn session_repo(&self) -> Arc<SessionRepo> { self.session_repo.clone() }
 
     /// 从配置异步初始化 SQLite + 迁移 + Repos
     pub async fn init(config: &GuiStorageConfig) -> anyhow::Result<Self> {
@@ -68,6 +71,7 @@ impl StorageContext {
             plan_repo: Arc::new(PlanRepo::new(db.clone())),
             chat_message_repo: Arc::new(ChatMessageRepo::new(db.clone())),
             plans_flexible_repo: Arc::new(PlansFlexibleRepo::new(db.clone())),
+            session_repo: Arc::new(SessionRepo::new(db.clone())),
         })
     }
 }

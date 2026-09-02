@@ -10,6 +10,8 @@ pub struct Model {
     pub id: String,
     /// 关联计划 id
     pub plan_id: String,
+    /// 归属会话 id（FK → sessions.id）；会话生命周期接入前可为空
+    pub session_id: Option<String>,
     /// Message 的完整 JSON 序列化
     pub message_json: String,
     /// 显示排序序号

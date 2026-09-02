@@ -24,6 +24,7 @@ impl PlansFlexibleRepo {
     pub async fn create(
         &self,
         plan_id: &str,
+        session_id: Option<String>,
         input_schema: &str,
         output: &str,
         steps: &str,
@@ -39,6 +40,7 @@ impl PlansFlexibleRepo {
         let model = plans_flexible::ActiveModel {
             id: Set(id),
             plan_id: Set(plan_id.to_string()),
+            session_id: Set(session_id),
             version: Set(version),
             input_schema: Set(input_schema.to_string()),
             output: Set(output.to_string()),

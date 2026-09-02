@@ -21,6 +21,8 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(PlansFlexible::PlanId).string().not_null())
                     .col(ColumnDef::new(PlansFlexible::Version).integer().not_null())
+                    // session_id 关联产出该版本的会话；plans_flexible_tool 等非会话写入可为空
+                    .col(ColumnDef::new(PlansFlexible::SessionId).string().null())
                     .col(
                         ColumnDef::new(PlansFlexible::InputSchema)
                             .string()
@@ -53,6 +55,13 @@ impl MigrationTrait for Migration {
                             .to(Plans::Table, Plans::Id)
                             .on_delete(ForeignKeyAction::Cascade),
                     )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_plans_flexible_session_id")
+                            .from(PlansFlexible::Table, PlansFlexible::SessionId)
+                            .to(Sessions::Table, Sessions::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -64,6 +73,16 @@ impl MigrationTrait for Migration {
                     .table(PlansFlexible::Table)
                     .col(PlansFlexible::PlanId)
                     .col(PlansFlexible::Version)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_plans_flexible_session")
+                    .table(PlansFlexible::Table)
+                    .col(PlansFlexible::SessionId)
                     .to_owned(),
             )
             .await?;
@@ -85,12 +104,20 @@ enum Plans {
     Id,
 }
 
+/// sessions 表名引用（FK 目标）
+#[derive(DeriveIden)]
+enum Sessions {
+    Table,
+    Id,
+}
+
 #[derive(DeriveIden)]
 enum PlansFlexible {
     Table,
     Id,
     PlanId,
     Version,
+    SessionId,
     InputSchema,
     Output,
     Steps,
