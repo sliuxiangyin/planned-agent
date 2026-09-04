@@ -34,6 +34,8 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .default(0),
                     )
+                    // 当前活动/上次会话指针：下次进入时默认定位的会话；首次进入前为空
+                    .col(ColumnDef::new(Plans::CurrentSessionId).string().null())
                     .col(ColumnDef::new(Plans::CreatedAt).string().not_null())
                     .col(ColumnDef::new(Plans::UpdatedAt).string().not_null())
                     .to_owned(),
@@ -59,6 +61,7 @@ enum Plans {
     Mode,
     Status,
     FlexibleVersion,
+    CurrentSessionId,
     CreatedAt,
     UpdatedAt,
 }

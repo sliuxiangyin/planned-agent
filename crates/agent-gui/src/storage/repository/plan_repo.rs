@@ -28,6 +28,7 @@ impl PlanRepo {
             mode: Set(mode.to_string()),
             status: Set("pending_generation".to_string()),
             flexible_version: Set(0),
+            current_session_id: Set(None),
             created_at: Set(now.clone()),
             updated_at: Set(now),
         };
@@ -70,6 +71,24 @@ impl PlanRepo {
         plan::ActiveModel {
             id: Set(id.to_string()),
             flexible_version: Set(version),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .update(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    /// 更新灵活模式当前会话指针（下次进入默认定位的会话）
+    pub async fn update_current_session_id(
+        &self,
+        id: &str,
+        session_id: Option<String>,
+    ) -> StorageResult<()> {
+        let now = Utc::now().to_rfc3339();
+        plan::ActiveModel {
+            id: Set(id.to_string()),
+            current_session_id: Set(session_id),
             updated_at: Set(now),
             ..Default::default()
         }

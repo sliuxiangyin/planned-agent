@@ -18,6 +18,8 @@ pub struct Model {
     /// 灵活模式当前使用的版本号，0 = 尚未生成（周密模式忽略此字段）
     #[sea_orm(default_value = 0)]
     pub flexible_version: i32,
+    /// 当前活动/上次会话 id（FK → sessions.id，可空）：下次进入默认定位的会话
+    pub current_session_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

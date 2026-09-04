@@ -16,7 +16,10 @@ use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 
 use crate::config::GuiStorageConfig;
+use crate::services::plans_flexible_service::PlansFlexibleService;
 use crate::storage::{
+    entities::session,
+    error::StorageResult,
     migrations::Migrator,
     repository::{ChatMessageRepo, PlanRepo, PlansFlexibleRepo, SessionRepo, TestRepo},
 };
@@ -46,6 +49,17 @@ impl StorageContext {
     pub fn chat_message_repo(&self) -> Arc<ChatMessageRepo> { self.chat_message_repo.clone() }
     pub fn plans_flexible_repo(&self) -> Arc<PlansFlexibleRepo> { self.plans_flexible_repo.clone() }
     pub fn session_repo(&self) -> Arc<SessionRepo> { self.session_repo.clone() }
+
+    /// 定位/新建该 plan 的当前会话（装配 PlansFlexibleService 后转发）。
+    /// 复用点：任何需要"进入某 plan 时的当前会话"的调用方。
+    pub async fn ensure_current_session(&self, plan_id: &str) -> StorageResult<session::Model> {
+        let svc = PlansFlexibleService::new(
+            self.plans_flexible_repo(),
+            self.plan_repo(),
+            self.session_repo(),
+        );
+        svc.ensure_current_session(plan_id).await
+    }
 
     /// 从配置异步初始化 SQLite + 迁移 + Repos
     pub async fn init(config: &GuiStorageConfig) -> anyhow::Result<Self> {

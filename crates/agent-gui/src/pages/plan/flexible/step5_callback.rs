@@ -2,11 +2,13 @@
 //!
 //! step5 完成后，`on_result` 拿到最终输出（`extract_last_assistant_text` 文本，纯 JSON），
 //! 解析出 `input_schema` / `output` / `steps` / `execution_plan`，通过
-//! `PlansFlexibleService::write` 持久化到 plans_flexible（version 由 repo 自动递增）。
+//! `PlansFlexibleService::save_snapshot` 按会话 upsert 持久化到 plans_flexible：
+//! 同一 session 内多次产出覆盖该行（version 不变），新 session 首次产出才新增一条（version 递增）。
+//! `session_id` 必填，on_result 时从共享会话槽动态读取当前会话。
 //!
 //! 纯旁路持久化：回调返回 `Accept`，原始 JSON 原样流回父 agent / GUI，不影响展示。
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use planned_agent::chat::{ResultDecision, SubAgentResultCallback};
 use planned_agent_core::mcp::types::ToolResult;
@@ -18,11 +20,21 @@ use crate::services::plans_flexible_service::PlansFlexibleService;
 pub struct FlexibleStep5Callback {
     plan_id: String,
     service: Arc<PlansFlexibleService>,
+    /// 共享"当前会话"槽（由 controller 在进入/切换会话时写入），on_result 时读取以定位归属 session。
+    session_slot: Arc<RwLock<Option<String>>>,
 }
 
 impl FlexibleStep5Callback {
-    pub fn new(plan_id: String, service: Arc<PlansFlexibleService>) -> Self {
-        Self { plan_id, service }
+    pub fn new(
+        plan_id: String,
+        service: Arc<PlansFlexibleService>,
+        session_slot: Arc<RwLock<Option<String>>>,
+    ) -> Self {
+        Self {
+            plan_id,
+            service,
+            session_slot,
+        }
     }
 }
 
@@ -112,11 +124,25 @@ impl SubAgentResultCallback for FlexibleStep5Callback {
 
         let plan_id2 = plan_id.clone();
         let service2 = service.clone();
+        let session_slot2 = self.session_slot.clone();
         tokio::spawn(async move {
+            // 读取当前会话 id（进入/切换会话时由 controller 写入）。
+            let session_id = match session_slot2.read() {
+                Ok(guard) => guard.clone(),
+                Err(_) => None,
+            };
+            let Some(session_id) = session_id else {
+                // 不应到达：step5 只在 ChatService 就绪后运行，此时 controller 必已写入会话槽。
+                // 走到这里说明会话时序/注册不变量被破坏，loud 报错，本次跳过落库以免丢坏数据。
+                tracing::error!(
+                    "[flexible_step5] 当前会话 id 缺失（不变量破坏），跳过 plans_flexible 写入（plan_id={plan_id2}）"
+                );
+                return;
+            };
             match service2
-                .write(
+                .save_snapshot(
                     &plan_id2,
-                    None, // TODO(会话阶段): 传入产出本版本的 session_id
+                    &session_id,
                     &input_schema,
                     &output,
                     &steps,
@@ -125,12 +151,12 @@ impl SubAgentResultCallback for FlexibleStep5Callback {
                 .await
             {
                 Ok(model) => tracing::info!(
-                    "[flexible_step5] 已写入 plans_flexible: id={}, plan_id={}, version={}",
+                    "[flexible_step5] 已保存 plans_flexible: id={}, plan_id={}, version={}",
                     model.id,
                     model.plan_id,
                     model.version
                 ),
-                Err(e) => tracing::error!("[flexible_step5] 写入 plans_flexible 失败: {}", e),
+                Err(e) => tracing::error!("[flexible_step5] 保存 plans_flexible 失败: {}", e),
             }
         });
 
@@ -184,6 +210,11 @@ fn extract_json_object(text: &str) -> Option<Value> {
 pub fn create_step5_callback(
     plan_id: String,
     service: Arc<PlansFlexibleService>,
+    session_slot: Arc<RwLock<Option<String>>>,
 ) -> Option<Arc<dyn SubAgentResultCallback>> {
-    Some(Arc::new(FlexibleStep5Callback::new(plan_id, service)))
+    Some(Arc::new(FlexibleStep5Callback::new(
+        plan_id,
+        service,
+        session_slot,
+    )))
 }

@@ -7,7 +7,6 @@ mod services;
 mod storage;
 
 use config::GuiConfig;
-use context::tools::plans_flexible_tool::register_plans_flexible_tool;
 use context::{
     AiContext, InitStatus, KvContext, McpChangeNotifier, McpContext, PromptContext, RagContext,
     StorageContext, ToolsContext,
@@ -16,7 +15,6 @@ use dioxus::{desktop::Config, prelude::*};
 use pages::home::{HomePage, PageRoute};
 use pages::plan::PlanPage;
 use pages::settings::SettingsPage;
-use services::plans_flexible_service::PlansFlexibleService;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -209,18 +207,6 @@ fn app() -> Element {
         let mcp_arc = mcp.read().as_ref().and_then(|x| x.clone());
         if let (Some(t), Some(m)) = (tools_arc, mcp_arc) {
             t.set_mcp_manager(m.manager.clone());
-        }
-    });
-
-    // ── 延后注册 plans_flexible 自定义工具 ──
-    // storage 与 tools 并发初始化；storage 就绪后把 PlansFlexibleService 注入
-    // 并注册 `plans_flexible` 工具（executor 需要真实数据源）。
-    use_effect(move || {
-        let tools_arc = tools.read().as_ref().and_then(|x| x.clone());
-        let storage_arc = storage.read().as_ref().and_then(|x| x.clone());
-        if let (Some(t), Some(s)) = (tools_arc, storage_arc) {
-            let service = Arc::new(PlansFlexibleService::new(s.plans_flexible_repo()));
-            register_plans_flexible_tool(&t, service);
         }
     });
 

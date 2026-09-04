@@ -108,6 +108,20 @@ impl ChatMessageRepo {
         Ok(())
     }
 
+    /// 按 plan_id + session_id 删除某会话的全部消息
+    pub async fn delete_by_plan_and_session(
+        &self,
+        plan_id: &str,
+        session_id: &str,
+    ) -> StorageResult<()> {
+        chat_message::Entity::delete_many()
+            .filter(chat_message::Column::PlanId.eq(plan_id))
+            .filter(chat_message::Column::SessionId.eq(session_id))
+            .exec(&self.db)
+            .await?;
+        Ok(())
+    }
+
     /// 根据 UUID id 更新消息内容
     pub async fn update_by_id(
         &self,
@@ -120,6 +134,15 @@ impl ChatMessageRepo {
                 chat_message::Column::MessageJson,
                 Expr::val(message_json),
             )
+            .exec(&self.db)
+            .await?;
+        Ok(())
+    }
+
+    /// 根据 UUID id 删除单条消息
+    pub async fn delete_by_id(&self, id: &str) -> StorageResult<()> {
+        chat_message::Entity::delete_many()
+            .filter(chat_message::Column::Id.eq(id))
             .exec(&self.db)
             .await?;
         Ok(())

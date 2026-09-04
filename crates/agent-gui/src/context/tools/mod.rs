@@ -6,8 +6,6 @@
 //! - ToolRegistry 内部已用 `RwLock<Option<...>>`，天然支持延后设置与将来替换
 //! - **不新增任何占位/扩展 API**——按需再设计
 
-pub mod plans_flexible_tool;
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
