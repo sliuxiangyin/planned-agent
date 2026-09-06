@@ -112,7 +112,18 @@ pub fn ChatUIActionsView(
 
     let n = questions.len();
     if n == 0 {
-        return rsx! {};
+        // 兜底：正常情况下服务端已拦截空 questions（视为参数损坏的 request_user_action），
+        // 不会发送到前端。若仍有残余，渲染一条可见说明而非空白卡区，避免看起来"卡住"。
+        return rsx! {
+            div { class: Styles::chat_ui_actions,
+                div { class: Styles::wizard_header,
+                    span { class: Styles::chat_ui_actions_message, "{message}" }
+                }
+                div { class: Styles::question_card,
+                    div { class: Styles::question_text, "请求未携带可交互的选项，无法继续。" }
+                }
+            }
+        };
     }
 
     let qi = current().min(n - 1);

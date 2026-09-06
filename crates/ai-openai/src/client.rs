@@ -108,6 +108,10 @@ struct CompatChatStreamDelta {
 struct CompatChatStreamToolCall {
     index: u32,
     id: Option<String>,
+    /// MiniMax 等提供商会在 tool_calls 增量里给 `"type":""`；空串会令 `FunctionType`
+    /// 枚举反序列化抛 `unknown variant ''` → 整块被丢弃 → 参数丢失。
+    /// 宽容解析，空串/未知值视为 None（是否 function 由上层按 index/arguments 判断）。
+    #[serde(deserialize_with = "opt_function_type_or_none")]
     r#type: Option<async_openai::types::chat::FunctionType>,
     function: Option<async_openai::types::chat::FunctionCallStream>,
 }
@@ -128,6 +132,30 @@ where
                 return Ok(None);
             }
             // 未知非标值也宽容为 None，而不是让整块解析失败
+            Ok(serde_json::from_value(v).ok())
+        }
+    }
+}
+
+/// 宽松解析流式 `tool_calls[].type`：把空串或非标值当作 `None`。
+///
+/// MiniMax 等提供商在 tool_calls 流式增量里会给 `"type":""`（甚至每个分片都重复带空串
+/// `id`/`type`/`name` 占位）。若按枚举严格解析，空串会抛 `unknown variant ''`，导致
+/// **整块（含真正 arguments 的分片）反序列化失败被丢弃** → 工具参数残缺/为空。
+/// 此处宽容空串与未知值，保证含参数内容的分片得以保留、由上层按 index 累积。
+fn opt_function_type_or_none<'de, D>(
+    de: D,
+) -> Result<Option<async_openai::types::chat::FunctionType>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <Option<serde_json::Value> as serde::Deserialize>::deserialize(de)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => {
+            if v.as_str().is_some_and(|s| s.is_empty()) {
+                return Ok(None);
+            }
             Ok(serde_json::from_value(v).ok())
         }
     }
@@ -674,6 +702,41 @@ mod tests {
         }"#;
         let chunk: CompatChatStreamChunk = serde_json::from_str(json).unwrap();
         assert_eq!(chunk.choices[0].finish_reason, None);
+    }
+
+    /// 复现 MiniMax 流式 tool_calls 增量带 `"type":""`/`"id":""` 占位（含真实 arguments）
+    /// 时，整块不应解析失败而被丢弃——空串 `type` 应被宽容为 `None`，arguments 得以保留。
+    /// 回归：修复前 `FunctionType` 枚举解析 `""` 抛 unknown variant，导致含参数的分片被吞，
+    /// 最终 `request_user_action` 的 questions 为空、前端无卡片可交互而永久卡住。
+    #[test]
+    fn stream_chunk_accepts_empty_tool_call_type_placeholder() {
+        let json = r#"{
+            "id":"06ec40829eaeb000968187b3d8e4efe8",
+            "choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[
+                {"id":"","type":"","function":{"name":"","arguments":"{\"message\":\"需求已明确\",\"questions\":[{\"header\":\"格式\",\"question\":\"请选择输出格式\",\"options\":[{\"label\":\"JSON\",\"value\":\"json\"}]}]}"},"index":0}
+            ]}}],
+            "created":1788677506,
+            "model":"MiniMax-M3",
+            "object":"chat.completion.chunk",
+            "usage":null,
+            "service_tier":"standard"
+        }"#;
+        let chunk: CompatChatStreamChunk = serde_json::from_str(json)
+            .unwrap_or_else(|e| panic!("含空串 type 的 tool_calls 分片不应使整块解析失败: {}", e));
+        let calls = chunk.choices[0]
+            .delta
+            .tool_calls
+            .as_ref()
+            .expect("应有 tool_calls");
+        assert_eq!(calls.len(), 1);
+        let call = &calls[0];
+        // 空串 type 宽容为 None（修复核心）
+        assert!(call.r#type.is_none(), "空串 type 应宽容为 None");
+        // 含真实参数内容的 arguments 保留，供上层按 index 累积
+        let func = call.function.as_ref().expect("应有 function");
+        let args: serde_json::Value =
+            serde_json::from_str(func.arguments.as_deref().unwrap_or("")).unwrap();
+        assert!(args["questions"].is_array());
     }
 
     /// 复现 MiniMax 兼容提供商流式响应中的 `service_tier: "standard"`，

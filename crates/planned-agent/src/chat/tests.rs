@@ -531,24 +531,19 @@ mod tests {
         let ticket = svc.send_text("问一下").expect("send 成功");
 
         // 应 emit ChatEvent::Error（含"未携带任何可交互"），不应停在 awaiting
-        let mut saw_error = false;
-        loop {
-            let ev = events.recv().await.expect("收到事件");
-            match ev {
-                ChatEvent::Error(e) => {
-                    assert!(
-                        e.contains("request_user_action"),
-                        "错误应说明 request_user_action 无效: {}",
-                        e
-                    );
-                    saw_error = true;
-                    break;
-                }
+        let error_text = loop {
+            match events.recv().await.expect("收到事件") {
+                ChatEvent::Error(e) => break Some(e),
                 ChatEvent::Done { .. } => panic!("应先 emit Error 再结束，不应直接 Done"),
                 _ => {}
             }
-        }
-        assert!(saw_error, "应收到 Error 事件");
+        };
+        let error_text = error_text.expect("应收到 Error 事件");
+        assert!(
+            error_text.contains("request_user_action"),
+            "错误应说明 request_user_action 无效: {}",
+            error_text
+        );
 
         // 对话应正常结束（Done），而不是永久挂起
         ticket.wait().await.expect("空 questions 的 UI 工具应让会话正常结束");

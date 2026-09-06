@@ -152,6 +152,9 @@ pub fn handle_event(mut chat: ChatSignals, ev: ServiceChatEvent) {
         }
         ServiceChatEvent::Error(e) => {
             tracing::error!(target: "event", event = "Error", error = %e, "聊天事件错误");
+            // 兜底展示：后端可能未在不可恢复错误（如子 agent 参数损坏直接错误收尾）时
+            // 补 assistant 文本。此处把错误本身渲染为可见 assistant 文本，避免用户只看到空白。
+            chat.render_error(&format!("⚠️ 出错了：{}", e));
             // 后端已通过流式事件补了 error 消息，前端只做清理 + 闭合当前 turn
             chat.stop_streaming();
             chat.finish_turn();
