@@ -107,12 +107,19 @@ struct CompatChatStreamDelta {
 #[serde(rename_all = "snake_case")]
 struct CompatChatStreamToolCall {
     index: u32,
+    #[serde(default)]
     id: Option<String>,
     /// MiniMax 等提供商会在 tool_calls 增量里给 `"type":""`；空串会令 `FunctionType`
     /// 枚举反序列化抛 `unknown variant ''` → 整块被丢弃 → 参数丢失。
     /// 宽容解析，空串/未知值视为 None（是否 function 由上层按 index/arguments 判断）。
-    #[serde(deserialize_with = "opt_function_type_or_none")]
+    ///
+    /// 必须带 `#[serde(default)]`：`deserialize_with` 会覆盖 serde 对缺失字段默认给的
+    /// `Option = None` 语义——若不带 default，MiniMax 只发 `function.arguments`/`index`
+    /// 而完全省略 `type`/`id` 字段时，会抛 `missing field type` → 含真实参数内容的分片
+    /// 被丢弃 → 工具参数残缺/为空。default 保证字段缺失时取 None、存在时才走宽容解析。
+    #[serde(default, deserialize_with = "opt_function_type_or_none")]
     r#type: Option<async_openai::types::chat::FunctionType>,
+    #[serde(default)]
     function: Option<async_openai::types::chat::FunctionCallStream>,
 }
 
@@ -702,6 +709,40 @@ mod tests {
         }"#;
         let chunk: CompatChatStreamChunk = serde_json::from_str(json).unwrap();
         assert_eq!(chunk.choices[0].finish_reason, None);
+    }
+
+    /// 复现 MiniMax 流式 tool_calls 增量**完全省略** `type`/`id`（只带 `function.arguments`
+    /// 与 `index`，即本次 `missing field type` 报错）时，整块也不应解析失败而被丢弃，
+    /// arguments 得以保留——缺失字段经 `#[serde(default)]` 取 None 而非抛错。
+    #[test]
+    fn stream_chunk_accepts_tool_call_without_type_field() {
+        let json = r#"{
+            "id":"06eca834da48db93d47c1bad0324e5a2",
+            "choices":[{"finish_reason":"tool_calls","index":0,"delta":{"role":"assistant","tool_calls":[
+                {"function":{"arguments":"\"questions\": [{\"header\": \"plan\", \"question\": \"\u8bf7\u9009\u62e9\uff0c\uff1a\", \"options\": [{\"label\": \"A\", \"value\": \"A\"}]}]}"},"index":0}
+            ]}}],
+            "created":1788704074,
+            "model":"MiniMax-M3",
+            "object":"chat.completion.chunk",
+            "usage":null,
+            "service_tier":"standard"
+        }"#;
+        let chunk: CompatChatStreamChunk = serde_json::from_str(json)
+            .unwrap_or_else(|e| panic!("省略 type/id 字段的 tool_calls 分片不应使整块解析失败: {}", e));
+        let calls = chunk.choices[0]
+            .delta
+            .tool_calls
+            .as_ref()
+            .expect("应有 tool_calls");
+        assert_eq!(calls.len(), 1);
+        let call = &calls[0];
+        // 缺失的 type/id 应宽容为 None（修复核心）
+        assert!(call.r#type.is_none(), "缺失 type 应宽容为 None");
+        assert!(call.id.is_none(), "缺失 id 应宽容为 None");
+        // 含真实参数内容的 arguments 保留，供上层按 index 累积（增量片段，无需也不应单独完整解析）
+        let func = call.function.as_ref().expect("应有 function");
+        let raw_args = func.arguments.as_deref().unwrap_or("");
+        assert!(raw_args.contains("questions"), "arguments 应保留真实参数片段: {}", raw_args);
     }
 
     /// 复现 MiniMax 流式 tool_calls 增量带 `"type":""`/`"id":""` 占位（含真实 arguments）

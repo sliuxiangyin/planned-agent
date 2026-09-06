@@ -85,6 +85,13 @@ impl ChatServiceFactory {
                 system_prompt_template: Some("flexible/flexible_global_system".to_string()),
                 // 协调器仅做状态机调度，不执行业务：工具层只暴露 5 个 step 子 agent +
                 // flexible_state + request_user_action，杜绝误调业务 / 其它子 agent 工具。
+                //
+                // ⚠️ 以下两项是「轮次触顶」复现测试的临时改动，测试完请还原：
+                //   1) "builtin_read_documentation"：临时放开的一个简单无副作用工具，
+                //      配合 chat/max_rounds_demo 模板让协调器持续调用工具直到触顶。
+                //      正常使用应删除该条目。
+                //   2) max_tool_rounds: 2：把轮次上限压到很小，2 轮即可触顶。
+                //      正常协调器要调度 step1~step5 需要多轮，默认应为 10（删除这行即回默认）。
                 allowed_tools: Some(vec![
                     "flexible_step1".to_string(),
                     "flexible_step2".to_string(),
@@ -93,7 +100,9 @@ impl ChatServiceFactory {
                     "flexible_step5".to_string(),
                     "flexible_state".to_string(),
                     "request_user_action".to_string(),
+                    "builtin_read_documentation".to_string(),
                 ]),
+                max_tool_rounds: 2,
                 ..Default::default()
             },
             Arc::new(store),
