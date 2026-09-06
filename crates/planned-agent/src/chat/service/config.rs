@@ -29,10 +29,24 @@ pub struct ChatConfig {
     pub max_tool_rounds: usize,
     /// 是否启用思考模式标记（仅作 hint，具体行为由 provider 决定）。
     pub enable_thinking: bool,
-    /// 工具白名单。
+    /// 工具白名单：控制哪些工具暴露给 LLM。
     ///
-    /// - `None`：全部工具可用
-    /// - `Some(names)`：仅白名单中的工具会暴露给 LLM
+    /// - `None`：**全部**工具可用（含 `Utility`、`SubAgent` 等协调/专属类工具，不过滤）。
+    /// - `Some(tokens)`：仅按下列 token 命中的工具暴露（各 token 取**并集**）：
+    ///   - `"all"`：加载**除 `Utility` 与 `SubAgent` 两类外**的全部工具。
+    ///     适合"纯业务执行"型 agent（如 step2 / thorough），避免背上数据库查找、专属工具、
+    ///     以及各类子 agent 工具。
+    ///   - 分类名：如 `"Utility"` / `"SubAgent"` / `"Browser"` / `"Data"` 等，加载该分类下全部工具。
+    ///   - 精确工具名：如 `"flexible_state"` / `"flexible_step1"`，加载该工具（跨分类放行）。
+    ///
+    /// 示例：
+    /// - 协调器只做调度，要 5 个 step 子 agent + `flexible_state` + 用户交互、不要业务工具：
+    ///   `Some(["flexible_step1","flexible_step2","flexible_step3","flexible_step4",
+    ///         "flexible_step5","flexible_state","request_user_action"])`
+    /// - step2 要全部业务工具但不要 Utility/SubAgent：
+    ///   `Some(["all"])`
+    /// - 全量基础上再补回整个 Utility 与 SubAgent 类（≈ 等价 `None`，但显式）：
+    ///   `Some(["all","Utility","SubAgent"])`
     pub allowed_tools: Option<Vec<String>>,
     /// system prompt 的 `{{ context }}` 变量值（`None` 或空串时渲染为空）。
     pub context: Option<String>,

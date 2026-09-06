@@ -475,7 +475,27 @@ impl ToolRegistry {
         
         all_tools
     }
-    
+
+    /// 获取所有 enabled 工具，并附每个工具的分类。
+    ///
+    /// `Tool` 本身不含分类信息，分类级过滤（如 `ChatConfig.allowed_tools` 的 `"all"`
+    /// 需剔除 `Utility` / `SubAgent` 两类）需依赖此处返回的 categories。
+    pub fn get_enabled_tools_with_categories(&self) -> Vec<(Tool, Vec<ToolCategory>)> {
+        let tools = self.tools.read().unwrap();
+        let meta = self.metadata.read().unwrap();
+
+        tools
+            .values()
+            .filter_map(|t| {
+                let m = meta.get(&t.name)?;
+                if !m.enabled {
+                    return None;
+                }
+                Some((t.clone(), m.categories.clone()))
+            })
+            .collect()
+    }
+
     /// 获取指定来源的工具
     pub fn get_tools_by_source(&self, source_type: &str) -> Vec<Tool> {
         let tools = self.tools.read().unwrap();

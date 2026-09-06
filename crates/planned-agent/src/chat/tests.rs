@@ -167,7 +167,6 @@ mod tests {
             Arc::new(ToolRegistry::new()),
             Arc::new(MockPromptManager),
             ChatConfig::new(),
-            None, // 测试用默认 InMemoryStore
         );
         svc.start_driver().expect("启动 driver 失败");
         svc

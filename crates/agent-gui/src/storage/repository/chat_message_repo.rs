@@ -21,7 +21,7 @@ impl ChatMessageRepo {
     pub async fn create(
         &self,
         plan_id: &str,
-        session_id: Option<String>,
+        session_id: &str,
         message_json: &str,
         sequence_order: i32,
         is_error_type: i32,
@@ -32,7 +32,7 @@ impl ChatMessageRepo {
         let model = chat_message::ActiveModel {
             id: Set(id),
             plan_id: Set(plan_id.to_string()),
-            session_id: Set(session_id),
+            session_id: Set(session_id.to_string()),
             message_json: Set(message_json.to_string()),
             sequence_order: Set(sequence_order),
             is_error_type: Set(is_error_type),

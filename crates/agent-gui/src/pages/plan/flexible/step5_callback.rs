@@ -8,7 +8,8 @@
 //!
 //! 纯旁路持久化：回调返回 `Accept`，原始 JSON 原样流回父 agent / GUI，不影响展示。
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use tokio::sync::watch;
 
 use planned_agent::chat::{ResultDecision, SubAgentResultCallback};
 use planned_agent_core::mcp::types::ToolResult;
@@ -20,20 +21,20 @@ use crate::services::plans_flexible_service::PlansFlexibleService;
 pub struct FlexibleStep5Callback {
     plan_id: String,
     service: Arc<PlansFlexibleService>,
-    /// 共享"当前会话"槽（由 controller 在进入/切换会话时写入），on_result 时读取以定位归属 session。
-    session_slot: Arc<RwLock<Option<String>>>,
+    /// 当前会话共享槽（tokio watch receiver）：on_result 时 `borrow()` 读当前 session 以定位归属。
+    session_rx: watch::Receiver<Option<String>>,
 }
 
 impl FlexibleStep5Callback {
     pub fn new(
         plan_id: String,
         service: Arc<PlansFlexibleService>,
-        session_slot: Arc<RwLock<Option<String>>>,
+        session_rx: watch::Receiver<Option<String>>,
     ) -> Self {
         Self {
             plan_id,
             service,
-            session_slot,
+            session_rx,
         }
     }
 }
@@ -124,13 +125,9 @@ impl SubAgentResultCallback for FlexibleStep5Callback {
 
         let plan_id2 = plan_id.clone();
         let service2 = service.clone();
-        let session_slot2 = self.session_slot.clone();
+        // 同步读当前会话 id（watch 承载 latest 值；controller set 后任何回调都能拿到，无订阅时序竞态）
+        let session_id = self.session_rx.borrow().clone();
         tokio::spawn(async move {
-            // 读取当前会话 id（进入/切换会话时由 controller 写入）。
-            let session_id = match session_slot2.read() {
-                Ok(guard) => guard.clone(),
-                Err(_) => None,
-            };
             let Some(session_id) = session_id else {
                 // 不应到达：step5 只在 ChatService 就绪后运行，此时 controller 必已写入会话槽。
                 // 走到这里说明会话时序/注册不变量被破坏，loud 报错，本次跳过落库以免丢坏数据。
@@ -210,11 +207,11 @@ fn extract_json_object(text: &str) -> Option<Value> {
 pub fn create_step5_callback(
     plan_id: String,
     service: Arc<PlansFlexibleService>,
-    session_slot: Arc<RwLock<Option<String>>>,
+    session_rx: watch::Receiver<Option<String>>,
 ) -> Option<Arc<dyn SubAgentResultCallback>> {
     Some(Arc::new(FlexibleStep5Callback::new(
         plan_id,
         service,
-        session_slot,
+        session_rx,
     )))
 }

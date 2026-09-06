@@ -30,7 +30,7 @@ pub enum ToolCategory {
     Device,
     /// 开发工具：Git、构建、测试
     Dev,
-    /// 工具类：工具、自定义、内置
+    /// 工具类：工具、自定义、内置、数据库查询读写
     Utility,
     /// 子 Agent：由 `register_sub_agent` 注册的子 agent 工具
     SubAgent,
@@ -65,5 +65,36 @@ impl ToolCategory {
             ToolCategory::Utility => "工具",
             ToolCategory::SubAgent => "子Agent",
         }
+    }
+
+    /// 稳定英文标识（与注册 / MCP 分类字符串一致），用作 `ChatConfig::allowed_tools` 的分类 token。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ToolCategory::Browser => "Browser",
+            ToolCategory::File => "File",
+            ToolCategory::Text => "Text",
+            ToolCategory::Data => "Data",
+            ToolCategory::System => "System",
+            ToolCategory::Device => "Device",
+            ToolCategory::Dev => "Dev",
+            ToolCategory::Utility => "Utility",
+            ToolCategory::SubAgent => "SubAgent",
+        }
+    }
+
+    /// 由英文标识解析分类；非法分类名返回 `None`。
+    pub fn from_name(name: &str) -> Option<ToolCategory> {
+        Some(match name {
+            "Browser" => ToolCategory::Browser,
+            "File" => ToolCategory::File,
+            "Text" => ToolCategory::Text,
+            "Data" => ToolCategory::Data,
+            "System" => ToolCategory::System,
+            "Device" => ToolCategory::Device,
+            "Dev" => ToolCategory::Dev,
+            "Utility" => ToolCategory::Utility,
+            "SubAgent" => ToolCategory::SubAgent,
+            _ => return None,
+        })
     }
 }

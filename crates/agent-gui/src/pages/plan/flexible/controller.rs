@@ -17,7 +17,8 @@
 //! - 所有 `use_*` 在该 hook 内无条件、顺序稳定调用（遵守 rules of hooks）。
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use tokio::sync::watch;
 
 use anyhow::anyhow;
 use dioxus::prelude::*;
@@ -25,6 +26,7 @@ use planned_agent::chat::{ChatConfig, SubscriptionGuard};
 use planned_agent::ChatService;
 use planned_agent_core::events::UIAction;
 use planned_agent_core::prompt::PromptManager;
+use planned_agent_core::tool_registry::ToolCategory;
 use planned_agent_prompt_manager::FilePromptManager;
 
 use crate::components::chat::chat_flow::{
@@ -37,6 +39,7 @@ use crate::context::{
 use crate::services::plans_flexible_service::PlansFlexibleService;
 
 use super::chat_flexible_message_storage::ChatMessageStore;
+use super::flexible_state_tool::{flexible_state_tool, FlexibleStateExecutor};
 use super::step2_callback::create_step2_callback;
 use super::step5_callback::create_step5_callback;
 
@@ -81,11 +84,47 @@ impl ChatServiceFactory {
             self.prompt.manager.clone(),
             ChatConfig {
                 system_prompt_template: Some("flexible/flexible_global_system".to_string()),
-                allowed_tools: None,
+                // 协调器仅做状态机调度，不执行业务：工具层只暴露 5 个 step 子 agent +
+                // flexible_state + request_user_action，杜绝误调业务 / 其它子 agent 工具。
+                allowed_tools: Some(vec![
+                    "flexible_step1".to_string(),
+                    "flexible_step2".to_string(),
+                    "flexible_step3".to_string(),
+                    "flexible_step4".to_string(),
+                    "flexible_step5".to_string(),
+                    "flexible_state".to_string(),
+                    "request_user_action".to_string(),
+                ]),
                 ..Default::default()
             },
             Arc::new(store),
         ))
+    }
+}
+
+/// 共享「当前会话 id」槽（tokio watch）。
+///
+/// 承载的是「最新值」而非事件流：消费方（如 step5 callback）随时 `receiver().borrow()`
+/// 读当前 session；controller 建/切会话时 `set()`。相比手写 `Arc<RwLock>` 语义更明确，
+/// 且保留常驻 `_anchor` receiver，保证 `send` 永不因无订阅者而被丢弃（持久语义与旧实现一致）。
+struct SessionSlot {
+    tx: watch::Sender<Option<String>>,
+    #[allow(dead_code)] // 常驻保活：保证 send 总被记录；不做读取
+    _anchor: watch::Receiver<Option<String>>,
+}
+
+impl SessionSlot {
+    fn new() -> Self {
+        let (tx, rx) = watch::channel(None);
+        Self { tx, _anchor: rx }
+    }
+    /// 记录当前会话（此后 subscribe 的消费方可立即读到该最新值）。
+    fn set(&self, session_id: String) {
+        let _ = self.tx.send(Some(session_id));
+    }
+    /// 为单个消费方派生 receiver（自带当前值快照）。
+    fn receiver(&self) -> watch::Receiver<Option<String>> {
+        self.tx.subscribe()
     }
 }
 
@@ -109,8 +148,9 @@ pub(crate) struct FlexibleController {
     factory: Signal<Option<ChatServiceFactory>, SyncStorage>,
     /// 当前活跃会话 id（service 就绪后必有值；UI 响应式展示来源）
     session_id: Signal<String, SyncStorage>,
-    /// 共享"当前会话"槽（供 step5 callback 等 `'static` 旁路读取；随 session_id 同步）
-    session_slot: Signal<Arc<RwLock<Option<String>>>, SyncStorage>,
+    /// 共享"当前会话"槽（tokio watch：承载当前 session 最新值；供 step5 callback 等
+    /// `'static` 旁路经 `receiver()` 读当前值）
+    session_slot: Signal<Arc<SessionSlot>, SyncStorage>,
     /// 初始化是否已尝试（防止重复 spawn）
     #[allow(dead_code)] // 由 hook 内闭包写入，跨 render 保持
     svc_started: Signal<bool, SyncStorage>,
@@ -199,9 +239,7 @@ impl FlexibleController {
                 return;
             }
             // 记录当前会话：UI 信号 + step5 共享槽
-            if let Ok(mut g) = slot.write() {
-                *g = Some(target_session.clone());
-            }
+            slot.set(target_session.clone());
             session_id_sig.set(target_session);
             initialized.set(false);
             svc.set(Some(Arc::new(service)));
@@ -264,7 +302,7 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
     let mut templates = use_signal_sync(|| Vec::<String>::new());
     // 当前活跃会话 id（service 就绪后必有值）与其共享槽（供 step5 callback 读取）
     let session_id = use_signal_sync(|| String::new());
-    let session_slot = use_signal_sync(|| Arc::new(RwLock::new(None::<String>)));
+    let session_slot = use_signal_sync(|| Arc::new(SessionSlot::new()));
 
     // ── 依赖 context ──
     let storage_resource = use_context::<Resource<Option<Arc<StorageContext>>>>();
@@ -328,9 +366,7 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
                     }
                     // 记录当前会话：共享槽（step5 callback 读取）+
                     // UI 信号（service 就绪后必有值）
-                    if let Ok(mut g) = slot.write() {
-                        *g = Some(session_id.clone());
-                    }
+                    slot.set(session_id.clone());
                     session_id_sig.set(session_id);
                     factory.set(Some(factory_obj));
                     svc.set(Some(Arc::new(service)));
@@ -346,7 +382,9 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
             return;
         }
         initialized.set(true);
-        let Some(service) = svc.read().clone() else { return };
+        let Some(service) = svc.read().clone() else {
+            return;
+        };
         // 从服务端 store 恢复历史
         let history = service.history_store();
         if !history.is_empty() {
@@ -382,6 +420,27 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
     // ── 注册子 agent（生命周期方案，避免重复注册与孤儿工具）──
     let registry = tools_ctx.registry.clone();
     use_hook(move || {
+        // flexible_step5：step5 落库回调（storage 就绪时才有；否则 None 仅记日志跳过）
+        let plans_flexible_service = storage_repo(storage_resource, |ctx| {
+            Arc::new(PlansFlexibleService::new(
+                ctx.plans_flexible_repo(),
+                ctx.plan_repo(),
+                ctx.session_repo(),
+                ctx.flexible_state_repo(),
+            ))
+        });
+        // flexible_state：协调器读写「当前会话流程中间状态」的旁路工具（storage 就绪时注册）。
+        // 按引用借用再 clone，避免 move 掉 plans_flexible_service（下文 step5 回调仍要读它）。
+        if let Some(svc) = plans_flexible_service.as_ref() {
+            let receiver = session_slot.read().clone().receiver();
+            let executor = FlexibleStateExecutor::new(plan_id.clone(), svc.clone(), receiver);
+            tools_ctx.register_custom_tool(
+                flexible_state_tool(),
+                vec![ToolCategory::Utility],
+                Arc::new(executor),
+            );
+        }
+
         register_sub_agent(
             &ai_ctx,
             &tools_ctx,
@@ -433,6 +492,9 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
             }),
             ChatConfig {
                 system_prompt_template: Some("flexible/flexible_step2".into()),
+                // step2 是纯业务执行：用 "all" 剔除 Utility/SubAgent（含 flexible_state、兄弟 step 子 agent），
+                // 只暴露业务工具，避免执行 agent 误碰协调层工具。
+                allowed_tools: Some(vec!["all".to_string()]),
                 ..Default::default()
             },
             1, // depth
@@ -454,7 +516,7 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
                     },
                     "output_format": {
                         "type": "string",
-                        "description": "来自 flexible_step1 的输出格式，已由用户确认（如 Excel、CSV、JSON、文本等）"
+                        "description": "来自 flexible_step1 的输出格式，已由用户确认（如 CSV、JSON、Markdown、文本等）"
                     }
                 },
                 "required": ["execution_trace_summary"]
@@ -483,7 +545,7 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
                     },
                     "output_format": {
                         "type": "string",
-                        "description": "来自 flexible_step1 的输出格式，已由用户确认（如 Excel、CSV、JSON、文本等）"
+                        "description": "来自 flexible_step1 的输出格式，已由用户确认（如 CSV、JSON、Markdown、文本等）"
                     },
                     "field_selection_result": {
                         "type": "string",
@@ -501,18 +563,12 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
             2, // max_depth
             None,
         );
-        // flexible_step5：step5 落库回调（storage 就绪时才有；否则 None 仅记日志跳过）
-        let plans_flexible_service = storage_repo(storage_resource, |ctx| {
-            Arc::new(PlansFlexibleService::new(
-                ctx.plans_flexible_repo(),
-                ctx.plan_repo(),
-                ctx.session_repo(),
-            ))
-        });
+
         let step5_callback = plans_flexible_service
+            .as_ref()
             .map(|svc| {
-                let slot = session_slot.read().clone();
-                create_step5_callback(plan_id.clone(), svc, slot)
+                let receiver = session_slot.read().clone().receiver();
+                create_step5_callback(plan_id.clone(), svc.clone(), receiver)
             })
             .flatten();
         register_sub_agent(
@@ -560,6 +616,7 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
             "flexible_step3",
             "flexible_step4",
             "flexible_step5",
+            "flexible_state",
         ] {
             let _ = registry.unregister_tool(name);
         }

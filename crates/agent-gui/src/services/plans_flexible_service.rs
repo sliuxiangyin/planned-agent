@@ -11,7 +11,9 @@ use std::sync::Arc;
 use crate::storage::entities::plans_flexible::Model as PlansFlexibleModel;
 use crate::storage::entities::session;
 use crate::storage::error::{StorageError, StorageResult};
-use crate::storage::repository::{PlanRepo, PlansFlexibleRepo, SessionRepo};
+use crate::storage::repository::{
+    FlexibleStateRepo, PlanRepo, PlansFlexibleRepo, SessionRepo,
+};
 
 /// 灵活计划聚合服务：注入相关仓库，向上提供跨表的业务操作。
 #[derive(Clone)]
@@ -22,6 +24,8 @@ pub struct PlansFlexibleService {
     plan_repo: Arc<PlanRepo>,
     /// sessions 表（会话生命周期）
     session_repo: Arc<SessionRepo>,
+    /// flexible_state 表（流程中间状态：当前阶段 + 各步骤产物）
+    state_repo: Arc<FlexibleStateRepo>,
 }
 
 impl PlansFlexibleService {
@@ -29,11 +33,13 @@ impl PlansFlexibleService {
         repo: Arc<PlansFlexibleRepo>,
         plan_repo: Arc<PlanRepo>,
         session_repo: Arc<SessionRepo>,
+        state_repo: Arc<FlexibleStateRepo>,
     ) -> Self {
         Self {
             repo,
             plan_repo,
             session_repo,
+            state_repo,
         }
     }
 
@@ -111,5 +117,50 @@ impl PlansFlexibleService {
     /// 按 plan_id 查询最新版本号（version 最大者）。该 plan 尚无快照时返回 None。
     pub async fn get_latest_version(&self, plan_id: &str) -> StorageResult<Option<i32>> {
         self.repo.find_latest_version(plan_id).await
+    }
+
+    // ────────────────────────── 流程中间状态（flexible_state）──────────────────────────
+
+    /// 读取某会话的流程中间状态（current_step + products）。该会话尚无记录时返回 None。
+    ///
+    /// 纯查询，无副作用（不会触发会话新建）。`session_id` 由调用方（协调器工具）从
+    /// 当前会话 watch 槽提供，必填。
+    pub async fn load_state(
+        &self,
+        plan_id: &str,
+        session_id: &str,
+    ) -> StorageResult<Option<(String, String)>> {
+        let state = self
+            .state_repo
+            .find_by_plan_and_session(plan_id, session_id)
+            .await?;
+        Ok(state.map(|m| (m.current_step, m.products)))
+    }
+
+    /// 覆盖保存某会话的流程中间状态（upsert 语义），返回完整内容。
+    ///
+    /// 该 plan+session 已有记录 → 覆盖（current_step + products）；否则新增一条。
+    pub async fn save_state(
+        &self,
+        plan_id: &str,
+        session_id: &str,
+        current_step: &str,
+        products: &str,
+    ) -> StorageResult<(String, String)> {
+        if let Some(existing) = self
+            .state_repo
+            .find_by_plan_and_session(plan_id, session_id)
+            .await?
+        {
+            self.state_repo
+                .update_content(&existing.id, current_step, products)
+                .await
+                .map(|m| (m.current_step, m.products))
+        } else {
+            self.state_repo
+                .create(plan_id, session_id, current_step, products)
+                .await
+                .map(|m| (m.current_step, m.products))
+        }
     }
 }

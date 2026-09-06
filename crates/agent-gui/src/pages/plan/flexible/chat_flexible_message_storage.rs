@@ -93,7 +93,7 @@ impl ChatHistoryStore for ChatMessageStore {
                 let row = repo
                     .create(
                         &plan_id,
-                        Some(session_id.clone()),
+                        &session_id,
                         &msg_json,
                         next_seq,
                         is_error_type,

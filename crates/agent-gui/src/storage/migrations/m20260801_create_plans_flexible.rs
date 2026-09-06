@@ -21,8 +21,8 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(PlansFlexible::PlanId).string().not_null())
                     .col(ColumnDef::new(PlansFlexible::Version).integer().not_null())
-                    // session_id 关联产出该版本的会话；plans_flexible_tool 等非会话写入可为空
-                    .col(ColumnDef::new(PlansFlexible::SessionId).string().null())
+                    // session_id 关联产出该版本的会话；快照必然归属某个会话，非空
+                    .col(ColumnDef::new(PlansFlexible::SessionId).string().not_null())
                     .col(
                         ColumnDef::new(PlansFlexible::InputSchema)
                             .string()

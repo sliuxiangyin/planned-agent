@@ -75,7 +75,7 @@ text = """
     "status": { "type": "string", "required": true, "description": "订单状态", "default": "paid" }
   },
   "output": {
-    "format": "Excel",
+    "format": "CSV",
     "fields": ["order_id", "amount", "customer_name"]
   },
   "steps": [
@@ -91,7 +91,7 @@ text = """
       "tool": "export_tool",
       "params": {
         "data": "{{step_1.output}}",
-        "filename": "orders_2026-09.xlsx"
+        "filename": "orders_2026-09.csv"
       }
     }
   ],

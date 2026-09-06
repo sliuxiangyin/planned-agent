@@ -20,8 +20,8 @@ impl MigrationTrait for Migration {
                             .primary_key(),
                     )
                     .col(ColumnDef::new(ChatMessages::PlanId).string().not_null())
-                    // session_id 关联归属会话；会话生命周期尚未接入前可为空
-                    .col(ColumnDef::new(ChatMessages::SessionId).string().null())
+                    // session_id 关联归属会话；消息必然归属某个会话，非空
+                    .col(ColumnDef::new(ChatMessages::SessionId).string().not_null())
                     .col(ColumnDef::new(ChatMessages::MessageJson).string().not_null())
                     .col(
                         ColumnDef::new(ChatMessages::SequenceOrder)

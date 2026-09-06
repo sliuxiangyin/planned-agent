@@ -41,7 +41,7 @@ impl PlansFlexibleRepo {
         let model = plans_flexible::ActiveModel {
             id: Set(id),
             plan_id: Set(plan_id.to_string()),
-            session_id: Set(Some(session_id.to_string())),
+            session_id: Set(session_id.to_string()),
             version: Set(version),
             input_schema: Set(input_schema.to_string()),
             output: Set(output.to_string()),

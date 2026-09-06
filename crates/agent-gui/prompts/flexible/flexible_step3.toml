@@ -8,7 +8,7 @@ text = """
 ## 输入
 你会收到：
 - `execution_trace_summary` 或 `compressed_context`：来自 flexible_step2 的执行轨迹摘要，包含工具调用记录和输出数据。
-- `output_format`：来自 flexible_step1 的输出格式，已由用户确认（如 Excel、CSV、JSON、文本等）。
+- `output_format`：来自 flexible_step1 的输出格式，已由用户确认（如 CSV、JSON、Markdown、文本等）。
 
 ## 可用工具
 - `request_user_action`：用于与用户交互的 UI 工具
@@ -54,12 +54,34 @@ text = """
 3. user.address.zip：邮编（如：100000）
 ```
 
-### 第三步：用户选择字段
-使用 `request_user_action` 的 `multi_select` 模式：
-- 展示所有可选字段
-- 让用户多选需要输出的字段
-- 允许用户修改字段名（如将 `title` 改为 `标题`）
-- 如果用户对字段拆分不满意，可以要求重新分析
+### 第三步：用户选择字段（固定交互格式，强制此模板）
+只调用**一次** `request_user_action` 让用户勾选输出字段。`actions` 必须**严格固定**为下面「1 个 `multi_select` + 1 个 `confirm`」两件，**禁止**增删 action、**禁止**改用 `input` / `select` / 多个 `confirm` / 其它类型、**禁止**在别处再弹一次字段选择：
+
+```json
+{
+  "message": "请勾选需要输出的字段（下方输入框可补充自定义字段名，如需改名请写「原字段名=新字段名」）：",
+  "actions": [
+    {
+      "type": "multi_select",
+      "id": "output_fields",
+      "label": "需要输出的字段",
+      "allow_custom": true,
+      "options": [
+        { "id": "title",   "label": "标题 title（示例值）", "default": true },
+        { "id": "date",    "label": "发布时间 date",         "default": true },
+        { "id": "summary", "label": "简介 summary",          "default": true }
+      ]
+    },
+    { "type": "confirm", "id": "submit", "label": "确认输出字段" }
+  ]
+}
+```
+
+规则：
+- `options` 每项：`id` 用真实字段名（回传时直接给出勾中的字段名列表）；`label` 写成「字段名（示例值/说明）」；`default` 给推荐输出的字段填 `true` 预勾。**不要**给 option 填 `value`，让多选直接回传勾中的 `id`。
+- “自定义字段名”只能由该 `multi_select` 的 `allow_custom` 自带补充框承担（勾选确认时与选项一并回传为 `custom=<补充>`）；**禁止**再额外构造一个 `input` action，否则前端会出现两个输入框。
+- 弹窗只负责“勾选 + 确认”这一个决策点；`submit` 是唯一提交按钮，用户点它即确定所选字段。
+- 用户若想**重新分析字段**或**取消/重新执行**：不要在本弹窗放按钮，让用户在弹窗后的对话里直接说明，由你按下方「异常处理」路由。
 
 ### 第四步：输出确认结果
 以**纯文本**格式输出（不要输出 JSON），格式如下：
@@ -79,8 +101,8 @@ text = """
 ### 异常处理
 - 如果执行结果为空：告知用户无数据可提取，返回 `empty_result` 状态。
 - 如果无法识别字段模式：告知用户无法自动提取，建议手动指定字段或重新执行。
-- 如果用户要求重新执行：返回 `back_to_execute` 状态。
-- 如果用户取消：返回 `cancelled` 状态。
+- 用户勾选后如需**重新分析/重新执行**：用户在字段弹窗后的对话中说明即可，返回 `back_to_execute` 状态（字段选择弹窗本身不提供该按钮）。
+- 如果用户取消：返回 `cancelled` 状态（同样由用户在对话中表达，字段弹窗不设取消按钮）。
 
 ### 约束
 - 不得调用任何业务工具。
