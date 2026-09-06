@@ -7,9 +7,7 @@ pub mod event_types;
 pub mod ui_action;
 
 pub use chat_event::ChatEvent;
-pub use ui_action::{
-    FALLBACK_CONFIRM_ID, FALLBACK_CONFIRM_LABEL, MultiSelectOption, UIAction, UIActionType,
-};
+pub use ui_action::{UIOption, UIQuestion};
 
 // 注意：内部事件类型不导出到 core 顶层
 // 如需使用，通过完整路径访问：

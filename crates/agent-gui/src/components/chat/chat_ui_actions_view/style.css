@@ -1,11 +1,23 @@
 /* ── ChatUIActionsView 组件样式 ─────────────────────────────────────── */
 
+/* 整卡：作为一张悬浮卡片（圆角 + 阴影 + 外间距），与消息流分离 */
 .chat-ui-actions {
-    padding: 10px 16px;
-    border-top: 1px solid var(--primary-color-4);
+    margin: 4px 8px 8px;
+    padding: 12px 14px;
     background: var(--primary-color-2);
+    border: 1px solid var(--primary-color-4);
+    border-radius: 12px;
+    box-shadow: 0 3px 14px rgba(0, 0, 0, 0.12);
     display: flex;
     flex-direction: column;
+    gap: 8px;
+}
+
+/* 卡头一行：左侧引导 message，右侧进度 */
+.wizard-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
     gap: 8px;
 }
 
@@ -15,9 +27,31 @@
     color: var(--secondary-color-4);
     line-height: 1.4;
     white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 
-/* Confirm / Select 按钮组：同行 flex-wrap 排列 */
+.wizard-progress {
+    flex-shrink: 0;
+    font-size: 0.72rem;
+    color: var(--secondary-color-4);
+    white-space: nowrap;
+}
+
+/* 底部导航：左「取消」、右「上一步 / 下一步」 */
+.wizard-nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    padding-top: 2px;
+}
+
+.wizard-nav-actions {
+    display: flex;
+    gap: 6px;
+}
+
+/* 单选按钮组：同行 flex-wrap 排列 */
 .action-buttons {
     display: flex;
     flex-wrap: wrap;
@@ -42,20 +76,43 @@
     min-width: 0;
 }
 
-/* Select 单选组的「自定义输入」入口（D）：独占一行，输入框撑满剩余宽度 */
-.select-custom-row {
+/* 「自定义回答」按钮态：整行，主按钮宽 100%，可清除 */
+.custom-trigger-row {
     display: flex;
-    gap: 8px;
     align-items: center;
+    gap: 6px;
     width: 100%;
 }
 
-.select-custom-row input {
+/* 触发按钮撑满可用宽度（已填时作为摘要显示） */
+.custom-trigger-row button,
+.custom-trigger-row .custom-trigger-btn {
     flex: 1;
-    min-width: 0;
+    width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
-/* MultiSelect 复选框组 */
+.custom-clear-btn {
+    flex-shrink: 0;
+}
+
+/* 展开后的输入区 */
+.custom-edit-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+}
+
+.custom-edit-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+}
+
+/* 多选复选框组 */
 .multi-select-group {
     display: flex;
     flex-direction: column;
@@ -71,9 +128,40 @@
     color: var(--secondary-color-5);
     cursor: pointer;
     user-select: none;
+    min-width: 0;
+    overflow-wrap: anywhere;
 }
 
 .checkbox-label input[type="checkbox"] {
     accent-color: var(--primary-color);
     cursor: pointer;
+}
+
+/* ── 当前问题卡片 ───────────────────────────────────────────── */
+
+.question-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 10px;
+    border-left: 3px solid var(--primary-color-4);
+    background: var(--primary-color-1);
+    border-radius: 6px;
+}
+
+/* 小节标题（header）—— 答案键/短标签 */
+.question-header {
+    font-weight: 600;
+    font-size: 0.8rem;
+    color: var(--primary-color);
+}
+
+/* 问题全文 */
+.question-text {
+    font-size: 0.85rem;
+    color: var(--secondary-color-5);
+    line-height: 1.4;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    min-width: 0;
 }

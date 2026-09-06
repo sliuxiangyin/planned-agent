@@ -35,7 +35,7 @@
 //! ├── driver/     后台 driver：driver_loop（串行队列）+ run_conversation
 //! │               （多轮 loop）+ await_confirm（UI 确认）+ inject_system_prompt
 //! ├── tools/      工具：build_tool_definitions（白名单过滤）+
-//! │               parse_ui_actions（request_user_action 参数解析）
+//! │               parse_ui_questions（request_user_action 参数解析）
 //! └── tests.rs    集成测试（9 个用例）
 //! ```
 //!

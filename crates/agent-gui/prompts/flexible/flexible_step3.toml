@@ -54,34 +54,33 @@ text = """
 3. user.address.zip：邮编（如：100000）
 ```
 
-### 第三步：用户选择字段（固定交互格式，强制此模板）
-只调用**一次** `request_user_action` 让用户勾选输出字段。`actions` 必须**严格固定**为下面「1 个 `multi_select` + 1 个 `confirm`」两件，**禁止**增删 action、**禁止**改用 `input` / `select` / 多个 `confirm` / 其它类型、**禁止**在别处再弹一次字段选择：
+### 第三步：用户选择字段
+只调用**一次** `request_user_action` 让用户勾选输出字段。此次调用携带**一个**多选问题（`multi=true`），`options` 为可勾选的输出字段；用户勾选后推进，末题「提交」统一回传勾选，**无需**再构造任何确认/提交项：
 
 ```json
 {
-  "message": "请勾选需要输出的字段（下方输入框可补充自定义字段名，如需改名请写「原字段名=新字段名」）：",
-  "actions": [
+  "message": "请勾选需要输出的字段（点「自定义回答」可补充自定义字段名，如需改名请写「原字段名=新字段名」）：",
+  "questions": [
     {
-      "type": "multi_select",
-      "id": "output_fields",
-      "label": "需要输出的字段",
-      "allow_custom": true,
+      "header": "字段",
+      "question": "勾选需要输出的字段：",
+      "multi": true,
+      "allow_input": true,
       "options": [
-        { "id": "title",   "label": "标题 title（示例值）", "default": true },
-        { "id": "date",    "label": "发布时间 date",         "default": true },
-        { "id": "summary", "label": "简介 summary",          "default": true }
+        { "label": "标题 title（示例值）", "value": "title" },
+        { "label": "发布时间 date",         "value": "date" },
+        { "label": "简介 summary",          "value": "summary" }
       ]
-    },
-    { "type": "confirm", "id": "submit", "label": "确认输出字段" }
+    }
   ]
 }
 ```
 
 规则：
-- `options` 每项：`id` 用真实字段名（回传时直接给出勾中的字段名列表）；`label` 写成「字段名（示例值/说明）」；`default` 给推荐输出的字段填 `true` 预勾。**不要**给 option 填 `value`，让多选直接回传勾中的 `id`。
-- “自定义字段名”只能由该 `multi_select` 的 `allow_custom` 自带补充框承担（勾选确认时与选项一并回传为 `custom=<补充>`）；**禁止**再额外构造一个 `input` action，否则前端会出现两个输入框。
-- 弹窗只负责“勾选 + 确认”这一个决策点；`submit` 是唯一提交按钮，用户点它即确定所选字段。
-- 用户若想**重新分析字段**或**取消/重新执行**：不要在本弹窗放按钮，让用户在弹窗后的对话里直接说明，由你按下方「异常处理」路由。
+- `options` 每项：`label` 写成「字段名（示例值/说明）」供用户识别；`value` 填真实字段名——勾选后直接回传勾中的字段名，无需你二次解析。推荐输出的字段放在 options 靠前位置。
+- “自定义字段名”由该问的 `allow_input`「自定义回答」兜底（单选填了自定义即以它覆盖预设；多选时并入勾选）；**不要**再额外构造输入问题。
+- 该问题 `multi=true`：用户勾选后推进，末题「提交」统一回传所选字段；不要在本卡片再加其它按钮。
+- 用户若想**重新分析字段**或**取消/重新执行**：不要在本卡片放额外问题，让用户在作答后的对话里直接说明，由你按下方「异常处理」路由。
 
 ### 第四步：输出确认结果
 以**纯文本**格式输出（不要输出 JSON），格式如下：

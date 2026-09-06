@@ -14,9 +14,7 @@ pub mod chat;
 pub use chat::{
     ChatConfig, ChatEvent, ChatService, SendTicket, SubscriptionGuard, SubscriptionId,
 };
-pub use planned_agent_core::events::{
-    FALLBACK_CONFIRM_ID, FALLBACK_CONFIRM_LABEL, MultiSelectOption, UIAction, UIActionType,
-};
+pub use planned_agent_core::events::{UIOption, UIQuestion};
 
 // ─── �?core 透传：粗粒度相关类型 ──────────────────────────────
 pub use planned_agent_core::planner::coarse::{

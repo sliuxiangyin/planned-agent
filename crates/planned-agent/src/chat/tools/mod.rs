@@ -2,7 +2,7 @@
 
 mod ui;
 
-pub(super) use ui::parse_ui_actions;
+pub(super) use ui::parse_ui_questions;
 
 use std::collections::HashSet;
 

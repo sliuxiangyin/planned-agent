@@ -42,6 +42,7 @@ struct CompatChatResponse {
 struct CompatChatResponseChoice {
     index: u32,
     message: CompatChatResponseMessage,
+    #[serde(default, deserialize_with = "opt_finish_reason_or_none")]
     finish_reason: Option<async_openai::types::chat::FinishReason>,
 }
 
@@ -88,6 +89,7 @@ struct CompatChatStreamChunk {
 struct CompatChatStreamChoice {
     index: u32,
     delta: CompatChatStreamDelta,
+    #[serde(default, deserialize_with = "opt_finish_reason_or_none")]
     finish_reason: Option<async_openai::types::chat::FinishReason>,
 }
 
@@ -108,6 +110,27 @@ struct CompatChatStreamToolCall {
     id: Option<String>,
     r#type: Option<async_openai::types::chat::FunctionType>,
     function: Option<async_openai::types::chat::FunctionCallStream>,
+}
+
+/// 宽松解析 `finish_reason`：把空串或 `async_openai` 枚举不认识的任何非标值都当作 `None`，
+/// 避免 MiniMax 等提供商返回 `finish_reason: ""` 时导致整块流/响应反序列化失败。
+fn opt_finish_reason_or_none<'de, D>(
+    de: D,
+) -> Result<Option<async_openai::types::chat::FinishReason>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <Option<serde_json::Value> as serde::Deserialize>::deserialize(de)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => {
+            if v.as_str().is_some_and(|s| s.is_empty()) {
+                return Ok(None);
+            }
+            // 未知非标值也宽容为 None，而不是让整块解析失败
+            Ok(serde_json::from_value(v).ok())
+        }
+    }
 }
 
 /// OpenAI 客户端配置
@@ -635,6 +658,23 @@ fn split_think_content(seg: &str, in_think: &mut bool) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 复现 MiniMax 返回 `finish_reason: ""`（空串）时，整块流不应解析失败，
+    /// 空串应被宽容为 `None`。回归：修复前会抛 unknown variant 反序列化错误。
+    #[test]
+    fn stream_chunk_accepts_empty_finish_reason() {
+        let json = r#"{
+            "id":"06ec3869118c546b84014f6f29256030",
+            "choices":[{"finish_reason":"","index":0,"delta":{"content":"tion: 比如","role":"assistant"}}],
+            "created":1788675433,
+            "model":"MiniMax-M3",
+            "object":"chat.completion.chunk",
+            "usage":null,
+            "service_tier":"standard"
+        }"#;
+        let chunk: CompatChatStreamChunk = serde_json::from_str(json).unwrap();
+        assert_eq!(chunk.choices[0].finish_reason, None);
+    }
 
     /// 复现 MiniMax 兼容提供商流式响应中的 `service_tier: "standard"`，
     /// 验证自定义 chunk 类型能正常反序列化（未知字段被 serde 忽略）。

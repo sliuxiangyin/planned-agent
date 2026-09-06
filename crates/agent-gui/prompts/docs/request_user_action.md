@@ -2,207 +2,250 @@
 
 ## 概述
 
-`request_user_action` 用于向用户请求交互——确认、选择、输入或多项勾选。
+`request_user_action` 用于向用户发起结构化 UI 交互。
+一次调用携带 1..≤4 个**彼此独立**的并列问题；前端渲染成「逐题向导卡片」——一次只显示一题（带步骤进度），用户逐题作答，到最后一题统一提交、整体一次回传。
 调用后等待用户操作，不要自行假设用户选择。
 
 调用参数：
 
 | 参数 | 必填 | 说明 |
 |------|------|------|
-| message | ✅ | 展示给用户的引导文本，清晰说明需要用户做什么决定 |
-| actions | ✅ | 用户可选的动作列表（数组） |
+| message | ❌ | 可选：整批问题的引导文本，说明需要用户做什么决定 |
+| questions | ✅ | 并列的问题列表（数组），1..≤4 个，彼此独立 |
+
+调用 JSON：
+
+```json
+{
+  "message": "可选：整批问题的引导文本",
+  "questions": [
+    {
+      "header": "短标签（≤4字，同批内唯一）",
+      "question": "问题全文，说明需要用户做什么决定",
+      "multi": false,
+      "allow_input": true,
+      "options": [
+        { "label": "人看的文本", "value": "程序用的实际值" },
+        { "label": "…", "description": "tooltip 补充（可选）" }
+      ]
+    }
+  ]
+}
+```
 
 ---
 
-## Actions 类型
+## 交互原语：只有「问题 + options」
 
-### 1. confirm — 确认按钮
+`request_user_action` 不再有平铺的 action 与 `type` 枚举（confirm/select/input/multi_select 均已废弃）。
+**只有一种交互原语：问题 + 一组 options。** 不同的交互形态只是同一原语的不同字段组合。
 
-用于"是/否"、确认、跳过等场景。一行可放多个。
+### 1. 单选（`multi` 缺省 / `false`）
 
-| 字段 | 必填 | 说明 |
-|------|------|------|
-| id | ✅ | 唯一标识（如 `generate`、`skip`） |
-| type | ✅ | `"confirm"` |
-| label | ✅ | 按钮展示文本 |
-| description | ❌ | tooltip 补充说明 |
-
-**用户操作返回值：**
-
-- 无 MultiSelect 伴随：返回按钮 `label` 文本
-- 有 MultiSelect 伴随：返回勾选项的 `id=value` 逗号拼接（选项未填 `value` 时仅回传 `id`）
-
-### 2. select — 单选按钮
-
-从多个选项中选择一个。一行可放多个，用户点击即选中。
+默认交互形态。单选点选即选中并自动进入下一题（末题除外）；最后一题作答后点「提交」统一回传。该项回传用所选 `value`（未填则回传 `label`）。
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| id | ✅ | 唯一标识 |
-| type | ✅ | `"select"` |
-| label | ✅ | 按钮展示文本 |
-| description | ❌ | tooltip 补充说明 |
+| header | ✅ | 短标签（≤4 字），同批内唯一，作为该题答案的回传键 |
+| question | ✅ | 问题全文，说明需要用户做什么决定 |
+| options | ✅ | 2-5 项可选答案 |
+| multi | ❌ | `false` 或缺省 = 单选 |
+| allow_input | ❌ | 缺省/`true` = 选项下带「自定义回答」按钮（点击展开输入框；单选填了自定义即以其覆盖预设）；仅 `false`（options 已穷尽）才隐藏 |
 
-**用户操作返回值：** 按钮 `label` 文本
+### 2. 多选（`multi: true`）
 
-> **自定义输入入口：** select 单选列表渲染时，末尾自动附带一个「自定义输入」框（类似
-> reasonix 追问形式）。用户对预设选项都不满意时，可手动输入自己的内容作为选择；
-> 输入文本将作为该单选问题的返回值回传（与点击按钮回传 `label` 同一语义，无需你
-> 额外构造 input action）。
-
-### 3. input — 文本输入框
-
-引导用户自由输入文本，如路径、关键词等。独占一行。
+用户可勾选多项，勾选后点「下一步」继续（整批在最后一题统一提交）。回传勾选项按 `value`（缺省 `label`）以 `", "` 连接；`allow_input` 填了自定义文本会并入其后。
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| id | ✅ | 唯一标识 |
-| type | ✅ | `"input"` |
-| label | ✅ | 输入框标签 |
-| description | ❌ | placeholder 占位文本 |
+| header | ✅ | 短标签，作为该题答案的回传键 |
+| question | ✅ | 问题全文 |
+| options | ✅ | 2-5 项，逐项可勾选 |
+| multi | ✅ | `true` = 可多选 |
+| allow_input | ❌ | 缺省/`true` = 选项下带「自定义回答」按钮（点击展开输入框；单选填了自定义即以其覆盖预设）；仅 `false`（options 已穷尽）才隐藏 |
 
-**用户操作返回值：** 用户输入的文本
+> 多选由用户勾选并点「下一步」，整批在最后一题统一提交；**无需**为它额外构造确认/提交问题。
 
-### 4. multi_select — 多选复选框
+### 3. 确认 / 跳过 / 执行（是-否或决定类）
 
-逐项勾选场景。不直接返回——需配合 `confirm` 按钮收集勾选结果。
+「确认 / 跳过 / 执行」这类是/否或决定：做成**单选问题**的 options。
+旧 `confirm` 概念消失。
 
-| 字段 | 必填 | 说明 |
-|------|------|------|
-| id | ✅ | 唯一标识 |
-| type | ✅ | `"multi_select"` |
-| label | ✅ | 复选框组标签 |
-| description | ❌ | 补充说明 |
-| options | ✅ | 复选框选项数组 |
+```json
+{
+  "questions": [
+    {
+      "header": "动作",
+      "question": "是否执行？",
+      "options": [
+        { "label": "执行", "value": "run" },
+        { "label": "暂不执行", "value": "hold" }
+      ]
+    }
+  ]
+}
+```
 
-### MultiSelect options 字段
+### 4. 自定义回答兜底（默认开启）
 
-| 字段 | 必填 | 说明 |
-|------|------|------|
-| id | ✅ | 唯一标识，小写蛇形（如 `param_city`） |
-| label | ✅ | 展示文本（纯描述即可） |
-| value | ❌（强烈建议） | **实际数据负载**。勾选后回传为 `id=value` 格式；未填写时勾选仅回传 `id` |
-| default | ❌ | 是否默认勾选，默认 `false` |
+reasonix 交互**每题都带**「自定义回答」，这里同样默认开启（`allow_input` 缺省即 `true`）。
+前端把它渲染成一个**按钮**（选项下方，宽 100%），平时不占地方；用户点击后才**原地展开**输入框，可自由填写并收起/清除。
 
-**value 字段设计意图：**
+取值规则：
+- 单选：只要用户填了自定义文本，就**以该文本覆盖所选预设**作为该题答案（单选仍为单值；进入自定义会自动取消预设选中）。
+- 多选：自定义文本并入勾选项之后，以 `", "` 连接。
+- 完全没填：视为未作答该问，回传省略该行。
+- 用户取消整批：回传为空串（按未作答处理）。
 
-- AI 把识别到的原始值填入 `value`，`label` 只做展示
-- 用户勾选后，系统直接取 `value` 获得结果，不再需要 AI 二次解析
-- 示例：`{ id: "param_city", label: "城市", value: "北京" }` → 勾选后回传 `param_city=北京`
-- 兜底：若未填 `value`，勾选后仅回传 `id`（如 `param_city`），系统侧需自行处理
+旧 select 的「自定义输入 / allow_custom」与独立的 `input` 动作都并入这个字段。
+仅当某问 options 已穷尽、确不需要用户自由补充时，才设 `allow_input: false` 隐藏该按钮。
+
+```json
+{
+  "questions": [
+    {
+      "header": "路径",
+      "question": "目标路径是哪个？",
+      "allow_input": true,
+      "options": [
+        { "label": "当前目录", "value": "." },
+        { "label": "上一级目录", "value": ".." }
+      ]
+    }
+  ]
+}
+```
 
 ---
 
-## 组合规则
+## 批量与独立性
 
-| 组合 | 允许 | 说明 |
-|------|------|------|
-| Input + Confirm | ✅ | 同一问题不同回答方式（如"输入路径 / 使用默认值"） |
-| MultiSelect + Confirm | ✅ | 复选框组 + 确认/跳过按钮，Confirm 自动收集勾选结果 |
-| Input + Select | ❌ | 两个不同问题混在一次交互，禁止 |
-| 纯 Confirm | ✅ | 简单确认场景 |
-| 纯 Select | ✅ | 多选一场景 |
-
-- 纯 MultiSelect 无 confirm 伴随 → 禁止：用户勾选后无提交按钮，交互卡死（前端无兜底入口）
-
-核心原则：**一次 request_user_action 调用只针对一个决策点**。
+- 一次 `request_user_action` 可携带 **1..≤4 个彼此独立、无依赖的并列问题**，一次收齐，减少打断。
+- 若问题之间存在从属 / 依赖（A 的答案决定是否问 B），**必须拆开分次调用**，不得硬塞进同一批：
+  先问 A → 等回传 → 再据 A 的答案决定是否问 B。
 
 ---
 
 ## 参数生成原则
 
-1. **id 命名**：小写蛇形，前缀体现分类
-   - `param_` — 可参数化值（`param_city`、`param_version`）
-   - `opt_` — 一般选项（`opt_a`、`opt_b`）
-   - 语义化动作（`generate`、`skip`、`edit`）
-
-2. **label 写法**：简洁清晰，用户无需额外解释
-   - ✅ `"确认生成"` / `"城市"` / `"还需补充"`
-   - ❌ `"点击此按钮确认生成执行计划"`
-
-3. **value 填写（multi_select 的 options）**：当选项有对应的实际数据值时（参数识别等），务必填充 `value`
-   - ✅ `{ id: "param_city", label: "城市", value: "北京" }`
-   - ❌ `{ id: "param_city", label: "城市 = 北京" }` — 把数据塞 label 里，系统无法直接取用
-   - 注意：confirm / select 类型当前回传按钮 `label`（`value` 字段支持规划中），不要在它们上面填 `value` 并期望回传
-
-4. **提供退出路径**：至少包含一个允许用户跳过的动作
-   - `{ id: "skip", type: "confirm", label: "跳过" }`
-
-5. **value 内容限制**：`value` 内避免包含逗号 `,` 与等号 `=`——多选回传用 `,` 分隔、用 `=` 连接 `id` 与 `value`，包含这两个字符会被解析截断
+1. **header 短标签**：≤4 字，同批内唯一，作为该题答案的回传键，前缀/命名体现问题归属。
+   - `类型`、`路径`、`时间范围`、`字段`、`参数`
+2. **question 写法**：写清需要用户做什么决定，用户无需额外解释。
+   - ✅ `"是否执行？"` / `"从结果中勾选需要输出的字段"`
+   - ❌ `"请点击下方按钮确认生成执行计划的整个流程并同时选择若干输出字段…"`
+3. **options[].label 给人看、options[].value 给程序用**：当选项有对应的实际数据值时，务必填充 `value`，让系统直接取用、无需二次解析。
+   - ✅ `{ "label": "城市：北京", "value": "北京" }`
+   - ❌ 把机器值硬塞进 `label`，或期望回传 `label` 之外的加工值
+4. **每问 2-5 项，推荐项放第一个**。
+5. **value 内容限制**：多选回传用 `", "` 分隔，避免单选项的 `value` / `label` 内含逗号 `,`，否则会被解析截断。
 
 ---
 
-## choice 的语义边界
+## 回传（用户作答结果）
 
-`request_user_action` 的回传 `choice` 是**短字符串**，只承担两类职责：
+用户作答后回给 LLM 的 tool 结果形如**多行文本 `header => answer`**（每问一行）；用户对某一问未作答则该行省略。
 
-1. **确认信号**——告诉 AI 用户点了哪个动作（confirm / select 按钮的 `label`）
-2. **短数据负载**——multi_select 勾选结果（`id=value` 拼接）、input 用户输入文本
+```
+类型 => CSV
+路径 => /tmp/output.csv
+```
 
-当用户确认的对象是 **AI 展示的一段内容**（数据格式、JSON、计划文本等）时：
+LLM 读取时按 `header` 对应到具体问题：
 
-- 内容由 AI 在**对话消息**中产出，**不要**塞进 action 的 `value`，也不要期望 `choice` 携带大段内容
-- 调用方在卡片挂起时已持有对话历史快照，可在用户确认后从快照中提取内容，或由 AI 在后续对话中继续产出
-- 示例：AI 先输出 `{"name":"test"}` 再弹"可以/取消"卡片——用户点"可以"后，`choice` 只是"可以"，JSON 应从对话快照中提取
+- 单选：该行的 `answer` 是被点选项的 `value`（缺省 `label`）；若该问 `allow_input` 且用户填了自定义文本，则 `answer` = 该自定义文本（覆盖预设，单选仍单值）
+- 多选：`answer` 是勾选项按 `", "` 连接后的文本；用户填了自定义文本则并入其后
+- 用户取消整批：tool 结果为空串（按未作答处理）
 
 ---
 
 ## 完整示例
 
-### 参数识别（MultiSelect + Confirm × 2）
+### 单一批次多问题：参数固化的确认识别
 
-AI 识别到 "在北京搜索 v2.1.0 版本 Rust 项目" 中的可参数化值：
+AI 识别到 "在北京搜索 v2.1.0 版本 Rust 项目" 中的可参数化值，用一次调用收齐确认：
 
 ```json
 {
-  "message": "识别到以下可参数化的动态值，勾选需要固化的参数：",
-  "actions": [
+  "message": "识别到以下可参数化的动态值，确认需要固化的参数：",
+  "questions": [
     {
-      "id": "multi",
-      "type": "multi_select",
-      "label": "选择参数",
+      "header": "参数",
+      "question": "勾选需要固化的参数：",
+      "multi": true,
       "options": [
-        { "id": "param_city",    "label": "城市",     "value": "北京" },
-        { "id": "param_version", "label": "版本",     "value": "v2.1.0" },
-        { "id": "param_keyword", "label": "搜索关键词", "value": "Rust" }
+        { "label": "城市", "value": "北京" },
+        { "label": "版本", "value": "v2.1.0" },
+        { "label": "搜索关键词", "value": "Rust" }
       ]
     },
-    { "id": "confirm", "type": "confirm", "label": "确认固化所选" },
-    { "id": "skip",    "type": "confirm", "label": "跳过，直接执行" }
+    {
+      "header": "动作",
+      "question": "是否固化所选参数并继续？",
+      "options": [
+        { "label": "确认固化", "value": "confirm" },
+        { "label": "跳过，直接执行", "value": "skip" }
+      ]
+    }
   ]
 }
 ```
 
-用户勾选"城市"和"版本" → 点击"确认固化所选" → 回调 `choice = "param_city=北京,param_version=v2.1.0"`
+用户勾选"城市"和"版本" → 在"动作"选"确认固化" → 回传：
+
+```
+参数 => 北京, v2.1.0
+动作 => confirm
+```
 
 系统本地解析得到：参数 `city=北京`、`version=v2.1.0`，无需 AI 再次参与。
 
-### 清晰度追问（纯 Select）
+### 单选问题（处理方式选择）
 
 ```json
 {
-  "message": "你想怎么处理这个数据？",
-  "actions": [
-    { "id": "opt_csv",  "type": "select", "label": "导出 CSV", "description": "适合 Excel 打开" },
-    { "id": "opt_json", "type": "select", "label": "导出 JSON", "description": "适合程序读取" },
-    { "id": "opt_screen","type": "select", "label": "屏幕打印", "description": "直接显示结果" }
+  "questions": [
+    {
+      "header": "格式",
+      "question": "你想怎么处理这个数据？",
+      "options": [
+        { "label": "导出 CSV", "value": "csv", "description": "适合 Excel 打开" },
+        { "label": "导出 JSON", "value": "json", "description": "适合程序读取" },
+        { "label": "屏幕打印", "value": "screen", "description": "直接显示结果" }
+      ]
+    }
   ]
 }
 ```
 
-用户点击"导出 CSV" → 回调 `choice = "导出 CSV"`
+用户点击"导出 CSV" → 回传 `格式 => csv`
 
-### 文本输入 + 默认值（Input + Confirm）
+### 单选问题 + 自由输入兜底
 
 ```json
 {
-  "message": "请提供目标文件路径：",
-  "actions": [
-    { "id": "custom_path", "type": "input", "label": "手动输入", "description": "输入文件完整路径" },
-    { "id": "default",     "type": "confirm", "label": "使用当前目录", "description": "采用当前工作目录" }
+  "questions": [
+    {
+      "header": "路径",
+      "question": "请提供目标文件路径（或直接选用当前目录）：",
+      "allow_input": true,
+      "options": [
+        { "label": "使用当前目录", "value": "." }
+      ]
+    }
   ]
 }
 ```
 
-用户输入 `/tmp/output.csv` 回车 → 回调 `choice = "/tmp/output.csv"`
-用户点击"使用当前目录" → 回调 `choice = "使用当前目录"`
+用户输入 `/tmp/output.csv` → 回传 `路径 => /tmp/output.csv`；
+用户点"使用当前目录" → 回传 `路径 => .`。
+
+---
+
+## 与 AI 产出内容的分界
+
+`request_user_action` 的问题答案回传是**短字符串**，适合承载：确认信号、被选项的 `value`、用户自由输入。
+当用户需要确认的对象是 **AI 展示的一段内容**（数据格式、JSON、计划文本等）时：
+
+- 内容由 AI 在**对话消息**中产出，**不要**塞进选项的 `value`，也不要期望回传携带大段内容
+- 调用方在卡片挂起时已持有对话历史快照，可在用户确认后从快照中提取内容，或由 AI 在后续对话中继续产出
+- 示例：AI 先输出 `{"name":"test"}` 再弹"可以/取消"卡片——用户点"可以"后，回传只是"动作 => 可以"，JSON 应从对话快照中提取

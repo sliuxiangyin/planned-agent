@@ -66,7 +66,7 @@ chat/
 │   └── mod.rs    SubAgentRunner / SubAgentSession
 ├── tools/       工具相关
 │   ├── mod.rs     build_tool_definitions（白名单过滤）
-│   └── ui.rs      parse_ui_actions（request_user_action 参数解析）
+│   └── ui.rs      parse_ui_questions（request_user_action 参数解析）
 └── tests.rs     集成测试
 ```
 

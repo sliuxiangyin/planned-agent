@@ -3,7 +3,7 @@
 //! `PendingUI`、`ToolCallPhase`、`ToolViewData`、`Bubble` ——
 //! 纯数据类型，不含业务逻辑。
 
-use planned_agent_core::events::UIAction;
+use planned_agent_core::events::UIQuestion;
 
 // ── UI 交互 ──────────────────────────────────────────────────────────────
 
@@ -12,8 +12,8 @@ use planned_agent_core::events::UIAction;
 pub struct PendingUI {
     /// 展示给用户的引导文本
     pub message: String,
-    /// 用户可选的动作列表
-    pub actions: Vec<UIAction>,
+    /// 并列的问题列表（每问有 options/multi/allow_input）
+    pub questions: Vec<UIQuestion>,
     /// 对应的 LLM tool_call_id（`confirm_user_action` 按此回填 tool 消息）
     pub tool_call_id: String,
     /// 子 agent 的 run_id（`UIActionRequest` 中的 `session_id` 字段）：

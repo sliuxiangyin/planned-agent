@@ -47,7 +47,7 @@ struct Styles;
 pub struct ChatPanelProps {
     pub chat: ChatSignals,
     pub chat_service: Arc<ChatService<FilePromptManager>>,
-    pub on_user_action: EventHandler<(planned_agent::UIAction, String, PendingUI)>,
+    pub on_user_action: EventHandler<(String, PendingUI)>,
     #[props(default = String::new())]
     pub template_label: String,
     #[props(default)]
@@ -151,9 +151,9 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
                         div { class: Styles::chat_actions_area,
                             ChatUIActionsView {
                                 message: p.message.clone(),
-                                actions: p.actions.clone(),
-                                on_action: move |(action, choice)| {
-                                    on_action.call((action, choice, p.clone()));
+                                questions: p.questions.clone(),
+                                on_submit: move |choice| {
+                                    on_action.call((choice, p.clone()));
                                 },
                             }
                         }

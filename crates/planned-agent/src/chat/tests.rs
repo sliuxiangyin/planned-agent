@@ -5,7 +5,7 @@
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
+    use std::collections::{HashSet, VecDeque};
     use std::sync::Arc;
 
     use anyhow::{anyhow, Result};
@@ -172,14 +172,19 @@ mod tests {
         svc
     }
 
-    fn request_user_action_args(message: &str, action_ids: &[&str]) -> Value {
+    fn request_user_action_args(message: &str, option_labels: &[&str]) -> Value {
         json!({
             "message": message,
-            "actions": action_ids.iter().map(|id| json!({
-                "id": id,
-                "type": "confirm",
-                "label": id,
-            })).collect::<Vec<_>>(),
+            "questions": [{
+                "header": "decision",
+                "question": message,
+                "options": option_labels.iter().map(|l| json!({
+                    "label": l,
+                    "value": l,
+                })).collect::<Vec<_>>(),
+                "multi": false,
+                "allow_input": false,
+            }],
         })
     }
 
@@ -192,6 +197,33 @@ mod tests {
             let _ = tx.send(ev);
         });
         rx
+    }
+
+    /// 协议闭合校验：history 中每条 assistant 消息的每个 tool_call，
+    /// 都必须有一条同 tool_call_id 的 Tool 消息与之配对（无未闭合项）。
+    fn assert_closed_protocol(history: &[Message]) {
+        let tool_ids: HashSet<String> = history
+            .iter()
+            .filter(|m| matches!(m.role, MessageRole::Tool))
+            .filter_map(|m| m.tool_call_id.clone())
+            .collect();
+        let unpaired: Vec<String> = history
+            .iter()
+            .filter(|m| matches!(m.role, MessageRole::Assistant))
+            .flat_map(|m| {
+                m.tool_calls
+                    .as_ref()
+                    .map(|tcs| tcs.clone())
+                    .unwrap_or_default()
+            })
+            .filter(|tc| !tool_ids.contains(&tc.id))
+            .map(|tc| tc.id)
+            .collect();
+        assert!(
+            unpaired.is_empty(),
+            "存在未闭合的 tool_calls（无配对 Tool 消息）: {:?}",
+            unpaired
+        );
     }
 
     /// 完整闭环：单轮无工具 → 文本 → Done。
@@ -296,43 +328,29 @@ mod tests {
         assert_eq!(pending_count, 2);
         assert!(!svc.is_awaiting_user_action(), "结束后不再 awaiting");
 
-        // 历史校验：request_user_action 不产生 tool 消息，选择结果作为 text 闭合到 assistant
+        // 历史校验：每次 confirm 都 push 一条 Tool 消息，choice/action_id 序列化进 tool content
         let history = svc.history();
-        assert!(
-            !history
-                .iter()
-                .any(|m| matches!(m.role, MessageRole::Tool)),
-            "request_user_action 不应产生 tool 消息"
-        );
-        // assistant 消息 content 含选择文本
-        let assistant_texts: Vec<String> = history
+        let tool_contents: Vec<String> = history
             .iter()
-            .filter(|m| matches!(m.role, MessageRole::Assistant))
+            .filter(|m| matches!(m.role, MessageRole::Tool))
             .filter_map(|m| match &m.content {
-                Some(MessageContent::Text { text }) => Some(text.clone()),
+                Some(MessageContent::ToolResult { content, .. }) => Some(content.clone()),
                 _ => None,
             })
             .collect();
+        assert_eq!(tool_contents.len(), 2, "两次 confirm 各 push 一条 tool 消息");
         assert!(
-            assistant_texts.iter().any(|t| t.contains("[用户选择]: JSON")),
-            "第 1 次选择应闭合到 assistant content: {:?}",
-            assistant_texts
+            tool_contents.iter().any(|c| c.contains("\"JSON\"")),
+            "第 1 次选择 JSON 应写入 tool content: {:?}",
+            tool_contents
         );
         assert!(
-            assistant_texts.iter().any(|t| t.contains("[用户选择]: 确认")),
-            "第 2 次选择应闭合到 assistant content: {:?}",
-            assistant_texts
+            tool_contents.iter().any(|c| c.contains("\"确认\"")),
+            "第 2 次选择 确认 应写入 tool content: {:?}",
+            tool_contents
         );
-        // 不应残留未闭合的 request_user_action tool_calls
-        assert!(
-            !history.iter().any(|m| {
-                matches!(m.role, MessageRole::Assistant)
-                    && m.tool_calls.as_ref().is_some_and(|tcs| {
-                        tcs.iter().any(|tc| tc.function.name == "request_user_action")
-                    })
-            }),
-            "不应残留未闭合的 request_user_action tool_calls"
-        );
+        // 协议闭合：每条 assistant 的 tool_call 都有配对的 Tool 消息，无未闭合项
+        assert_closed_protocol(&history);
     }
 
     /// 串行队列：awaiting 期间的 send 排队，当前对话结束后再处理下一条。
@@ -484,13 +502,18 @@ mod tests {
         ticket.wait().await.expect("取消后正常结束");
 
         let history = svc.history();
-        let has_unclosed = history
-            .iter()
-            .any(|m| matches!(m.role, MessageRole::Assistant) && m.tool_calls.is_some());
+        // 取消后协议应闭合：awaiting 时的 request_user_action tool_call 需有配对 cancelled Tool 消息
+        let has_request = history.iter().any(|m| {
+            matches!(m.role, MessageRole::Assistant)
+                && m.tool_calls.as_ref().is_some_and(|tcs| {
+                    tcs.iter().any(|tc| tc.function.name == "request_user_action")
+                })
+        });
         assert!(
-            !has_unclosed,
-            "取消后不应存在带 tool_calls 的 assistant 消息"
+            has_request,
+            "取消前 awaiting 中应已有带 request_user_action 的 assistant 消息"
         );
+        assert_closed_protocol(&history);
     }
 
     /// 订阅者 panic 被隔离：一个 handler 崩溃不影响其它订阅者与 driver。
@@ -531,9 +554,9 @@ mod tests {
         assert!(svc.history().is_empty(), "clear 后历史为空");
     }
 
-    /// 对话失败（LLM 请求异常）→ 历史回滚到调用前，不残留脏上下文。
+    /// 对话失败（LLM 请求异常）→ 保留用户回合并补一条 Error assistant，不进入 awaiting。
     #[tokio::test(flavor = "current_thread")]
-    async fn failed_conversation_rolls_back_history() {
+    async fn failed_conversation_retains_context_and_emits_error() {
         // 空脚本：chat_completion_stream 立即 Err
         let svc = make_service(vec![]);
         let mut events = collect_events(&svc);
@@ -553,7 +576,26 @@ mod tests {
             }
         }
         assert!(got_error, "应收到 Error 事件");
-        assert!(svc.history().is_empty(), "失败后历史应回滚为空");
+        // 失败不回滚：保留用户回合并补一条 Error assistant（供上下文延续），不进入 awaiting
+        assert!(!svc.is_awaiting_user_action(), "失败后不应处于 awaiting");
+        let history = svc.history();
+        let texts: Vec<String> = history
+            .iter()
+            .filter_map(|m| match &m.content {
+                Some(MessageContent::Text { text }) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t.contains("问一下")),
+            "失败后应保留用户回合: {:?}",
+            texts
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("Error:")),
+            "失败应补 Error assistant 文本: {:?}",
+            texts
+        );
     }
 
     /// 方案 B 核心：不重建 service，热切换模板 + 会话重置后，

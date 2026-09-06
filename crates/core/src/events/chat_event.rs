@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::ai::types::Message;
-use crate::events::UIAction;
+use crate::events::UIQuestion;
 use crate::tool_registry::types::ToolSource;
 
 /// 流式聊天事件。
@@ -72,19 +72,19 @@ pub enum ChatEvent {
         /// 工具输出内容(原始 `ToolResult.content`)。
         content: Value,
     },
-    /// Agent 请求用户交互——前端应渲染对应 UI 组件（按钮/选项列表等）。
+    /// Agent 请求用户交互——前端应渲染一张"问题卡"。
     ///
     /// 触发时机：tool_calls 中检测到 `request_user_action` 时发出，
     /// 或子 agent 挂起（`awaiting_user_action`）时发出。
-    /// 此后 chat 循环中断，调用方需收集用户选择后重新调用 `chat_with_callback`
+    /// 此后 chat 循环中断，调用方需收集用户作答后重新调用 `chat_with_callback`
     /// （子 agent 场景则调用 `ChatService::resume_sub_agent`）。
     UIActionRequest {
-        /// 展示给用户的引导文本
+        /// 展示给用户的引导文本（可选）
         message: String,
-        /// 用户可执行的动作列表
-        actions: Vec<UIAction>,
+        /// 并列的问题数组（1..N，建议 ≤4；彼此独立）
+        questions: Vec<UIQuestion>,
         /// 子 agent 会话 ID：本事件源自子 agent 挂起时非 `None`，
-        /// 调用方恢复时应携带 `session_id` + 用户选择调用 `resume_sub_agent`；
+        /// 调用方恢复时应携带 `session_id` + 用户作答调用 `resume_sub_agent`；
         /// 主 agent 自身 `request_user_action` 时为 `None`。
         session_id: Option<String>,
     },
@@ -110,17 +110,19 @@ pub enum ChatEvent {
 mod tests {
     use super::*;
     use crate::ai::types::{MessageContent, MessageRole};
-    use crate::events::UIActionType;
     use serde_json::json;
 
-    fn sample_ui_action() -> UIAction {
-        UIAction {
-            id: "ok".to_string(),
-            action_type: UIActionType::Confirm,
-            label: "确认".to_string(),
-            description: None,
-            options: vec![],
-            allow_custom: true,
+    fn sample_question() -> UIQuestion {
+        UIQuestion {
+            header: "执行".to_string(),
+            question: "要执行吗？".to_string(),
+            options: vec![crate::events::UIOption {
+                label: "确认".to_string(),
+                description: None,
+                value: Some("run".to_string()),
+            }],
+            multi: false,
+            allow_input: false,
         }
     }
 
@@ -172,8 +174,8 @@ mod tests {
             content: json!({ "result": "ok" }),
         });
         round_trip(&ChatEvent::UIActionRequest {
-            message: "请确认".to_string(),
-            actions: vec![sample_ui_action()],
+            message: "开始前确认：".to_string(),
+            questions: vec![sample_question()],
             session_id: Some("sid".to_string()),
         });
         round_trip(&ChatEvent::SubChat {

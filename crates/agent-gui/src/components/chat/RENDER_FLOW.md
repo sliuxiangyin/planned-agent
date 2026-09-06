@@ -26,7 +26,7 @@ chat/
 ├── chat_panel/               # 完整聊天面板（消息列表 + 输入区 + composer 工具栏）
 │   ├── component.rs          #   ChatPanel 组件（只读渲染，ToolView/AgentView 分流）
 │   └── style.css
-├── chat_ui_actions_view/     # Agent 交互卡片（Confirm / Select / Input / MultiSelect）
+├── chat_ui_actions_view/     # Agent 交互卡片（reasonix 式并列 questions 问题卡）
 ├── reasoning_view/           # Assistant「深度思考」折叠面板
 └── tool_view/                # Tool 调用详情折叠卡片
 ```
@@ -106,9 +106,26 @@ pub struct ToolViewData {
 ```rust
 pub struct PendingUI {
     pub message: String,           // 引导文本
-    pub actions: Vec<UIAction>,    // 可选动作（Confirm/Select/Input/MultiSelect）
+    pub questions: Vec<UIQuestion>,// 并列问题列表（≤4，彼此独立）
     pub tool_call_id: String,      // confirm_user_action 回填用
     pub run_id: Option<String>,    // Some = 子 agent 挂起（resume 路径）；None = 主 agent
+}
+```
+
+`UIQuestion`（core 层 `crates/core/src/events/ui_action.rs`）是唯一交互原语「问题 + options」，不再有平铺的 `UIAction`/`type` 枚举（Confirm/Select/Input/MultiSelect 均废弃）：
+
+```rust
+pub struct UIQuestion {
+    pub header: String,          // 短标签（≤4 字，同批内唯一），答案回传键
+    pub question: String,        // 问题全文
+    pub options: Vec<UIOption>,  // 用户可点的选项（2..5 个）
+    pub multi: bool,             // false=单选（默认）；true=多选，前端自动补「提交」
+    pub allow_input: bool,       // 默认 true=带「自定义回答」输入框（每题默认带，勿漏）；options 已穷尽时才 false 隐藏
+}
+pub struct UIOption {
+    pub label: String,            // 人看的文本
+    pub description: Option<String>, // 可选 tooltip
+    pub value: Option<String>,    // 机器用的实际值，缺省回 label
 }
 ```
 
@@ -350,10 +367,10 @@ page.rs:
 
 ```
 LLM 调用 request_user_action
-  → 服务端 emit UIActionRequest { message, actions, session_id }
-  → handle_event: set_pending(PendingUI { tool_call_id, run_id })
-  → ChatPanel 在输入框上方渲染 ChatUIActionsView
-  → 用户操作 on_action((UIAction, choice))
+  → 服务端 emit UIActionRequest { message, questions, session_id }
+  → handle_event: set_pending(PendingUI { tool_call_id, run_id, message, questions })
+  → ChatPanel 在输入框上方渲染 ChatUIActionsView（并列 questions 问题卡）
+  → 用户作答 on_user_action((String, PendingUI))  // 回传文本形如 `header => answer`（每问一行）
   → handle_user_action:
       1. choice 文本追加到 active 最后一条 assistant 气泡
       2. push 新 assistant 占位气泡

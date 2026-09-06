@@ -1,5 +1,7 @@
 # Chat UI 交互系统设计
 
+> ⚠️ 本文描述的是旧版 `request_user_action`（平铺 actions + type 枚举）。协议已重构为 questions 模型（header/question/options/multi/allow_input），细节以 crates/agent-gui/prompts/docs/request_user_action.md 为准，本文仅作历史参考。
+
 基于 ToolCall 机制实现 Chat 助手与前端 UI 的双向交互：Agent 通过 tool call 请求用户确认/选择，前端渲染交互组件（按钮、选项列表），用户操作后以 tool result 形式回流，继续对话。
 
 ## 概述

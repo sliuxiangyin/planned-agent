@@ -58,8 +58,8 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
             ChatPanel {
                 chat: ctl.chat,
                 chat_service: service,
-                on_user_action: move |(action, choice, pending)| {
-                    ctl.on_user_action(action, choice, pending);
+                on_user_action: move |(choice, pending)| {
+                    ctl.on_user_action(choice, pending);
                 },
                 template_label: template_label,
                 templates: ctl.templates(),

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use planned_agent_core::ai::types::{Message, MessageContent, MessageRole};
-use planned_agent_core::events::{ChatEvent as CoreChatEvent, UIAction};
+use planned_agent_core::events::{ChatEvent as CoreChatEvent, UIQuestion};
 use planned_agent_core::mcp::types::ToolResult;
 use planned_agent_prompt_manager::FilePromptManager;
 use planned_agent_tool_manager::{
@@ -38,8 +38,8 @@ pub(super) async fn collect_until_outcome(
     // 克隆 stream 以便传入闭包（闭包需要 'static）
     let stream_clone = stream.clone();
 
-    // 捕获挂起时 UIActionRequest 的 message / actions（用于构造 AwaitingUserAction）
-    let ui_request: Arc<Mutex<Option<(String, Vec<UIAction>)>>> = Arc::new(Mutex::new(None));
+    // 捕获挂起时 UIActionRequest 的 message / questions（用于构造 AwaitingUserAction）
+    let ui_request: Arc<Mutex<Option<(String, Vec<UIQuestion>)>>> = Arc::new(Mutex::new(None));
     let ui_request_clone = ui_request.clone();
 
     // 注册临时事件监听：转发子 agent 内部事件，并捕获挂起 UI 信息。
@@ -54,12 +54,12 @@ pub(super) async fn collect_until_outcome(
     let tool_call_id_for_closure = stream.invocation_id().to_string();
     let _guard = service.on_chat_with_guard(move |event| {
         if let ChatEvent::Chat(chat_event) = &event {
-            // 捕获 UIActionRequest 的 message / actions
+            // 捕获 UIActionRequest 的 message / questions
             if let CoreChatEvent::UIActionRequest {
-                message, actions, ..
+                message, questions, ..
             } = chat_event
             {
-                *ui_request_clone.lock().unwrap() = Some((message.clone(), actions.clone()));
+                *ui_request_clone.lock().unwrap() = Some((message.clone(), questions.clone()));
             }
 
             match chat_event {
@@ -139,7 +139,7 @@ pub(super) async fn collect_until_outcome(
         }
         SendOutcome::Suspended { .. } => {
             info!("[子agent] 子 agent 挂起，构造 AwaitingUserAction");
-            let (message, actions) = ui_request.lock().unwrap().take().unwrap_or_default();
+            let (message, questions) = ui_request.lock().unwrap().take().unwrap_or_default();
             Ok(SubAgentRunOutcome::AwaitingUserAction {
                 session: Box::new(ChatSubAgentSession::new(
                     service.clone(),
@@ -148,7 +148,7 @@ pub(super) async fn collect_until_outcome(
                     result_callback.clone(),
                 )),
                 message,
-                actions: serde_json::to_value(actions).unwrap_or_else(|_| Value::Array(vec![])),
+                actions: serde_json::to_value(questions).unwrap_or_else(|_| Value::Array(vec![])),
             })
         }
         SendOutcome::Failed(e) => {

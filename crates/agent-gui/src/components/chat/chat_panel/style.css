@@ -101,6 +101,10 @@
     border-radius: 3px;
     font-family: ui-monospace, "SF Mono", "Consolas", "Monaco", monospace;
     font-size: 0.85em;
+    /* 长代码/连续无断点文本允许折行，避免把气泡撑出横向滚动条 */
+    white-space: normal;
+    word-break: break-word;
+    overflow-wrap: anywhere;
 }
 
 .chat-message .markdown pre {
@@ -206,9 +210,9 @@
     font-style: italic;
 }
 
-/* ── 交互卡片固定区域（输入框上方） ─────────────────────────────── */
+/* ── 交互卡片固定区域（输入框上方）── 外层不做内边距，悬浮观感由内层卡片（圆角+阴影+margin）承担 ── */
 .chat-actions-area {
-    padding: 0 16px 8px;
+    padding: 0;
     flex-shrink: 0;
 }
 

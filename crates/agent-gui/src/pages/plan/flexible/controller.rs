@@ -24,7 +24,6 @@ use anyhow::anyhow;
 use dioxus::prelude::*;
 use planned_agent::chat::{ChatConfig, SubscriptionGuard};
 use planned_agent::ChatService;
-use planned_agent_core::events::UIAction;
 use planned_agent_core::prompt::PromptManager;
 use planned_agent_core::tool_registry::ToolCategory;
 use planned_agent_prompt_manager::FilePromptManager;
@@ -200,11 +199,11 @@ impl FlexibleController {
         chat.clear();
     }
 
-    /// 用户点击 request_user_action / 子 agent 卡片后的回调。
-    pub(crate) fn on_user_action(&self, action: UIAction, choice: String, pending: PendingUI) {
+    /// 用户提交 request_user_action / 子 agent 卡片后的回调。
+    pub(crate) fn on_user_action(&self, choice: String, pending: PendingUI) {
         let Some(svc) = self.service() else { return };
         let mut chat = self.chat;
-        handle_user_action(&mut chat, &svc, action, choice, pending);
+        handle_user_action(&mut chat, &svc, choice, pending);
     }
 
     /// 切换到指定 session：停掉旧对话并退订，为它新建一个绑该 session store 的

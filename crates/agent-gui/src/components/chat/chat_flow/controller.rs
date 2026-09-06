@@ -10,7 +10,7 @@ use dioxus::prelude::{ReadableExt, WritableExt};
 
 use planned_agent::chat::ChatEvent as ServiceChatEvent;
 use planned_agent::ChatService;
-use planned_agent_core::events::{ChatEvent, UIAction};
+use planned_agent_core::events::ChatEvent;
 use planned_agent_prompt_manager::FilePromptManager;
 
 use super::signals::ChatSignals;
@@ -119,14 +119,14 @@ pub fn handle_event(mut chat: ChatSignals, ev: ServiceChatEvent) {
         }
         ServiceChatEvent::Chat(ChatEvent::UIActionRequest {
             message,
-            actions,
+            questions,
             session_id,
         }) => {
             let tool_call_id = chat.pending_tool_call_id.read().clone().unwrap_or_default();
-            tracing::info!(target: "event", event = "UIActionRequest", tool_call_id = %tool_call_id, session_id = ?session_id, message = %message, actions_count = actions.len(), "UIActionRequest");
+            tracing::info!(target: "event", event = "UIActionRequest", tool_call_id = %tool_call_id, session_id = ?session_id, message = %message, questions_count = questions.len(), "UIActionRequest");
             chat.set_pending(PendingUI {
                 message,
-                actions,
+                questions,
                 tool_call_id,
                 run_id: session_id,
             });
@@ -167,11 +167,13 @@ pub fn handle_event(mut chat: ChatSignals, ev: ServiceChatEvent) {
 
 // ── 用户操作回调 ──────────────────────────────────────────────────────────
 
-/// 用户操作 `request_user_action` / 子 agent 挂起卡片后的回调。
+/// 用户提交 `request_user_action` / 子 agent 挂起卡片后的回调。
+///
+/// `choice` 为打包好的选择文本（多行 `header => answer`）；`pending` 携带
+/// tool_call_id / run_id 以决定走主 agent 还是子 agent 路径。
 pub fn handle_user_action(
     chat: &mut ChatSignals,
     svc: &Arc<ChatService<FilePromptManager>>,
-    action: UIAction,
     choice: String,
     pending: PendingUI,
 ) {
@@ -188,7 +190,7 @@ pub fn handle_user_action(
         chat.push_assistant_placeholder();
         chat.clear_pending();
         chat.pending_tool_call_id.set(None);
-        let input = serde_json::json!({ "choice": choice, "action_id": action.id });
+        let input = serde_json::json!({ "choice": choice, "action_id": "submit" });
         if let Err(e) = svc.resume_sub_agent(&run_id, input) {
             chat.append_to_last_assistant(&format!("\n\n*子 agent 恢复出错: {}*", e));
             chat.stop_streaming();
@@ -203,7 +205,7 @@ pub fn handle_user_action(
     chat.clear_pending();
     chat.pending_tool_call_id.set(None);
 
-    if let Err(e) = svc.confirm_user_action(&pending.tool_call_id, &choice, &action.id) {
+    if let Err(e) = svc.confirm_user_action(&pending.tool_call_id, &choice, "submit") {
         chat.append_to_last_assistant(&format!("\n\n*交互提交失败: {}*", e));
         chat.stop_streaming();
     }

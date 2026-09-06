@@ -17,7 +17,7 @@ use super::UIActionStrategy;
 use crate::chat::service::ChatEvent;
 use crate::chat::state::{Command, State};
 use crate::chat::storage::ErrorType;
-use crate::chat::tools::parse_ui_actions;
+use crate::chat::tools::parse_ui_questions;
 
 /// UI 工具调用结果。
 pub(super) enum UIActionOutcome {
@@ -45,14 +45,14 @@ pub(super) async fn handle_ui_tool_call<
     let args: Value =
         serde_json::from_str(&call.function.arguments).unwrap_or_else(|_| Value::Null);
     let message = args["message"].as_str().unwrap_or("").to_string();
-    let actions = parse_ui_actions(&args["actions"]);
+    let questions = parse_ui_questions(&args["questions"]);
     let run_id = state.config.lock().unwrap().run_id.clone();
 
     state
         .subscribers
         .emit(ChatEvent::Chat(CoreChatEvent::UIActionRequest {
             message,
-            actions,
+            questions,
             session_id: run_id.clone(),
         }));
 

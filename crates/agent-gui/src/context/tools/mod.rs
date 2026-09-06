@@ -151,75 +151,52 @@ fn request_user_action_tool() -> Tool {
     Tool {
         name: "request_user_action".into(),
         description:
-            "请求用户进行确认、选择或补充信息。调用后必须等待用户响应，不得自行假设用户选择。\n\
+            "向用户发起一批并列问题（1-4 个，彼此独立），前端渲染成逐题向导卡片：一次只显示一题并带步骤进度，用户逐题作答，到最后一题才统一提交、整体回传一次。调用后必须等待用户作答，不得自行假设或套用默认值。\n\
              \n\
-             动作类型：\n\
-             - select：单选列表，可并列多个，自动附带「自定义输入」入口（若选项已穷尽，可设 allow_custom=false 禁用）。\n\
-             - multi_select：多选复选框，需搭配一个 confirm 按钮提交；同样自带自定义输入入口（可用 allow_custom=false 禁用）。\n\
-             - confirm：确认/批准/跳过类决定；禁止单独用作追问（追问必须提供 select 选项）。\n\
-             - input：自由文本输入，通常配 confirm 提交；不要与 select 混搭（前端会丢弃 select，只保留 input）。\n\
-             \n\
-             组合规则：\n\
-             - 追问（让用户选一项）→ 并列多个 select。\n\
-             - 多选（让用户勾选多项）→ 一个 multi_select + 一个 confirm 提交。\n\
-             - 确认/批准/跳过 → 单个 confirm。\n\
-             - 自由输入 → 一个 input（通常配 confirm 提交）。\n\
-             - 禁止 select 与 input 混搭。"
+             每个问题（question）提供若干选项（options）供用户选择：\n\
+             - multi=false（默认）单选：点选即选中并自动进入下一题。需要「确认/跳过/执行」类决定时，把它们做成单选 options（如「执行 / 暂不执行」）。\n\
+             - multi=true 多选：勾选后需点「下一步」继续。\n\
+             - allow_input：每题**默认都带**一个「自定义回答」按钮（点击后原地展开输入框），供用户对预设都不满意时自由填写。单选场景下只要用户填了自定义文本，就**以该文本覆盖所选预设**作为该题答案（单选仍为单值）；仅当某问 options 已穷尽、确不需用户补充时才设 allow_input=false 隐藏。\n\
+             - 卡片底部有「取消」（跳过整批）/「上一步」；若用户取消整批，回传为空串，按未作答处理。\n\
+             - options[].label 给人看，options[].value 给程序用；回传用 value（缺省回 label）。每问 2-5 项，推荐项放第一个。\n\
+             - 同批问题必须彼此独立、不可存在依赖；一次调用只发起一次用户交互，作答统一在最后一题一次性回传。"
                 .into(),
             input_schema: json!({
             "type": "object",
             "properties": {
                 "message": {
                     "type": "string",
-                    "description": "展示给用户的引导文本，应清晰说明需要用户做什么决定"
+                    "description": "可选：整批问题的引导文本"
                 },
-                "actions": {
+                "questions": {
                     "type": "array",
-                    "description": "用户可选的动作列表（按钮/选项）",
+                    "description": "并列问题数组（1-4 个，彼此独立）",
                     "items": {
                         "type": "object",
+                        "required": ["header", "question"],
                         "properties": {
-                            "id": {
-                                "type": "string",
-                                "description": "动作唯一标识"
-                            },
-                            "type": {
-                                "type": "string",
-                                "enum": ["confirm", "select", "input", "multi_select"],
-                                "description": "动作类型：select=单选列表（追问/提供选项专用，自动带自定义输入入口，可多个并列）, confirm=确认/批准/跳过（仅确认场景，禁止用作追问选项）, input=文本输入提示, multi_select=多选复选框"
-                            },
-                            "label": {
-                                "type": "string",
-                                "description": "展示文本"
-                            },
-                            "description": {
-                                "type": "string",
-                                "description": "补充说明，可选"
-                            },
-                            "allow_custom": {
-                                "type": "boolean",
-                                "description": "是否附带「补充输入」入口（仅 select / multi_select 有效，默认 true）。选项已穷尽、无需用户补充时可置 false 隐藏补充输入框"
-                            },
+                            "header": { "type": "string", "description": "短标签（建议 ≤4 字）；同批内唯一，作为该题答案的键" },
+                            "question": { "type": "string", "description": "问题全文，说明需要用户做什么决定" },
+                            "multi": { "type": "boolean", "description": "false=单选（默认，点选即自动进入下一题）；true=多选（勾选后需点「下一步」）" },
+                            "allow_input": { "type": "boolean", "description": "默认 true = 选项下显示「自定义回答」按钮（点击原地展开输入框；单选填了自定义即以其覆盖预设）。仅当该问 options 已穷尽、确不需用户补充时设 false 隐藏" },
                             "options": {
                                 "type": "array",
-                                "description": "MultiSelect 的复选框选项列表（仅 multi_select 类型使用）",
+                                "description": "可选答案（2-5 项；推荐项放第一个）",
                                 "items": {
                                     "type": "object",
+                                    "required": ["label"],
                                     "properties": {
-                                        "id": { "type": "string", "description": "选项唯一标识" },
-                                        "label": { "type": "string", "description": "选项展示文本" },
-                                        "value": { "type": "string", "description": "选项的实际数据值（推荐）。勾选后回传为 id=value；不填则仅回传 id" },
-                                        "default": { "type": "boolean", "description": "是否默认勾选，默认 false" }
-                                    },
-                                    "required": ["id", "label"]
+                                        "label": { "type": "string", "description": "人看的展示文本" },
+                                        "description": { "type": "string", "description": "tooltip 补充说明，可选" },
+                                        "value": { "type": "string", "description": "程序用实际数据值（可选）；回传用 value，缺省回 label" }
+                                    }
                                 }
                             }
-                        },
-                        "required": ["id", "type", "label"]
+                        }
                     }
                 }
             },
-            "required": ["message", "actions"]
+            "required": ["questions"]
         }),
     }
 }
