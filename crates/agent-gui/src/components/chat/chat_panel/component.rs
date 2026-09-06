@@ -118,6 +118,17 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
     let active = chat.active.read();
     let agent_views = chat.agent_views.read();
 
+    // 把同一 user turn 内连续相邻的 assistant 归并成「回复组」，渲染成一个连续气泡块
+    // （遇 user 气泡即断开新组）。仅涉及视图层，数据 / 事件 / 回显结构不变。
+    let bubbles_all: Vec<&Bubble> = bubbles.iter().chain(active.iter()).collect();
+    let mut groups: Vec<Vec<&Bubble>> = Vec::new();
+    for b in bubbles_all {
+        match groups.last_mut() {
+            Some(g) if g[0].is_assistant == b.is_assistant => g.push(b),
+            _ => groups.push(vec![b]),
+        }
+    }
+
     rsx! {
         div { class: Styles::flexible_page,
 
@@ -129,11 +140,21 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
                     id: "chat-scroll",
                     div { class: Styles::chat_messages__list,
 
-                        for bubble in bubbles.iter().chain(active.iter()) {
-                            if bubble.is_assistant {
-                                { render_assistant_bubble(bubble, &agent_views) }
+                        for group in groups {
+                            if group[0].is_assistant {
+                                if group.len() == 1 {
+                                    { render_assistant_bubble(group[0], &agent_views) }
+                                } else {
+                                    div { class: Styles::chat_message__group,
+                                        for b in group {
+                                            { render_assistant_bubble(b, &agent_views) }
+                                        }
+                                    }
+                                }
                             } else {
-                                { render_user_bubble(bubble) }
+                                for b in group {
+                                    { render_user_bubble(b) }
+                                }
                             }
                         }
                     }

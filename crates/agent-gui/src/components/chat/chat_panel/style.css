@@ -61,6 +61,31 @@
     max-width: 95%;
 }
 
+/* 同一 user turn 内连续 assistant 的「回复组」：外圈负责背景/边框/圆角，
+   内部各 assistant 段不再各自画框，视觉上融合成一条连续回复 */
+.chat-message__group {
+    align-self: flex-start;
+    max-width: 85%;
+    background: var(--primary-color-4);
+    border: 1px solid var(--primary-color-6);
+    border-radius: 12px;
+    overflow: hidden;
+    color: var(--secondary-color-2);
+}
+.chat-message__group:has(.agent-view) {
+    max-width: 95%;
+}
+.chat-message__group .chat-message,
+.chat-message__group .chat-message__assistant {
+    align-self: auto;
+    max-width: none;
+    background: none;
+    border: none;
+    border-radius: 0;
+    padding: 8px 14px;
+    color: var(--secondary-color-2);
+}
+
 /* 用户消息 */
 .chat-message__user {
     align-self: flex-end;
