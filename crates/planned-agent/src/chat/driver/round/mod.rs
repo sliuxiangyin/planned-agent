@@ -243,8 +243,17 @@ pub(super) async fn run_conversation<
             if state.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
                 break;
             }
-            match handle_ui_tool_call(state, call, &ui_strategy, rx, queue).await? {
+            match handle_ui_tool_call(state, call, &ui_strategy, rx, queue, &last_stream_error)
+                .await?
+            {
                 UIActionOutcome::Continue => {}
+                UIActionOutcome::Invalid { reason } => {
+                    // UI 工具无效（如空 questions）：handle 内已闭合该 tool_call 并 emit Error，
+                    // 这里直接结束本轮，不再挂起等用户——否则会话永久卡死。
+                    info!("[round] UI 工具无效，结束本轮: {}", reason);
+                    close_unclosed_tool_calls(state);
+                    return Ok(ConversationOutcome::Completed);
+                }
                 UIActionOutcome::UserCancelled => {
                     close_unclosed_tool_calls(state);
                     return Ok(ConversationOutcome::Completed);

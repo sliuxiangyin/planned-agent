@@ -516,6 +516,59 @@ mod tests {
         assert_closed_protocol(&history);
     }
 
+    /// 回归：`request_user_action` 携带空 questions（如流式参数丢失）时，
+    /// 不得挂起等待用户（前端无卡片可作答会永久卡住），而应 emit Error 并正常结束（Done）。
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_user_action_empty_questions_errors_instead_of_hanging() {
+        // 空 questions 的 request_user_action（模拟 arguments 被畸形 chunk 吞掉后解析为空）
+        let svc = make_service(vec![ScriptedAiClient::tool_calls_chunk(&[(
+            "c1",
+            "request_user_action",
+            json!({ "message": "请选择输出格式", "questions": [] }),
+        )])]);
+        let mut events = collect_events(&svc);
+
+        let ticket = svc.send_text("问一下").expect("send 成功");
+
+        // 应 emit ChatEvent::Error（含"未携带任何可交互"），不应停在 awaiting
+        let mut saw_error = false;
+        loop {
+            let ev = events.recv().await.expect("收到事件");
+            match ev {
+                ChatEvent::Error(e) => {
+                    assert!(
+                        e.contains("request_user_action"),
+                        "错误应说明 request_user_action 无效: {}",
+                        e
+                    );
+                    saw_error = true;
+                    break;
+                }
+                ChatEvent::Done { .. } => panic!("应先 emit Error 再结束，不应直接 Done"),
+                _ => {}
+            }
+        }
+        assert!(saw_error, "应收到 Error 事件");
+
+        // 对话应正常结束（Done），而不是永久挂起
+        ticket.wait().await.expect("空 questions 的 UI 工具应让会话正常结束");
+        assert!(
+            !svc.is_awaiting_user_action(),
+            "空 questions 不应进入 awaiting 状态"
+        );
+
+        // 协议仍应闭合：空 questions 的 tool_call 需有配对（cancelled/error）Tool 消息
+        let history = svc.history();
+        let has_request = history.iter().any(|m| {
+            matches!(m.role, MessageRole::Assistant)
+                && m.tool_calls.as_ref().is_some_and(|tcs| {
+                    tcs.iter().any(|tc| tc.function.name == "request_user_action")
+                })
+        });
+        assert!(has_request, "历史中应已有带 request_user_action 的 assistant 消息");
+        assert_closed_protocol(&history);
+    }
+
     /// 订阅者 panic 被隔离：一个 handler 崩溃不影响其它订阅者与 driver。
     #[tokio::test(flavor = "current_thread")]
     async fn handler_panic_is_isolated() {

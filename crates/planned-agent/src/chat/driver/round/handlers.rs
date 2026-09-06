@@ -13,6 +13,7 @@ use tracing::{info, warn};
 
 use super::super::bridge::ToolExecutionBridge;
 use super::super::confirm::await_confirm;
+use super::close::close_tool_calls_with_reason;
 use super::UIActionStrategy;
 use crate::chat::service::ChatEvent;
 use crate::chat::state::{Command, State};
@@ -23,6 +24,10 @@ use crate::chat::tools::parse_ui_questions;
 pub(super) enum UIActionOutcome {
     Continue,
     UserCancelled,
+    /// UI 工具调用无效（如 `request_user_action` 无任何可交互问题）：
+    /// 不能挂起等待用户（否则前端无卡片可交互会永久卡住），
+    /// 由调用方闭合结束并把错误透出到 UI。
+    Invalid { reason: String },
     Suspended { run_id: String },
 }
 
@@ -41,11 +46,34 @@ pub(super) async fn handle_ui_tool_call<
     ui_strategy: &UIActionStrategy,
     rx: &mut mpsc::UnboundedReceiver<Command>,
     queue: &mut VecDeque<Command>,
+    // 本轮流式处理中记录的底层流错误（无则为空串），用于透出到 UI / 闭合文案。
+    last_stream_error: &str,
 ) -> Result<UIActionOutcome> {
     let args: Value =
         serde_json::from_str(&call.function.arguments).unwrap_or_else(|_| Value::Null);
     let message = args["message"].as_str().unwrap_or("").to_string();
     let questions = parse_ui_questions(&args["questions"]);
+
+    // 空 questions：无任何可交互内容（常见于流式参数被截断/畸形 chunk 被吞，
+    // 如 MiniMax 返回的 tool_calls 增量 `type:""` 导致含 arguments 的分片反序列化失败）。
+    // 此时若照常挂起等待用户，前端没有卡片可作答，会话会永久卡在 awaiting，
+    // 用户永远无法闭合。因此视为"无效调用"：闭合该 tool_call、把错误透出 UI 后结束。
+    if questions.is_empty() {
+        let mut reason =
+            "request_user_action 未携带任何可交互的 questions（工具参数可能因流式解析失败而丢失）"
+                .to_string();
+        if !last_stream_error.is_empty() {
+            reason.push_str("：");
+            reason.push_str(last_stream_error);
+        }
+        warn!("{}", reason);
+        close_tool_calls_with_reason(state, &[call.clone()], &reason);
+        state
+            .subscribers
+            .emit(ChatEvent::Error(reason.clone()));
+        return Ok(UIActionOutcome::Invalid { reason });
+    }
+
     let run_id = state.config.lock().unwrap().run_id.clone();
 
     state
