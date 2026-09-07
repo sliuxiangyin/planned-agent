@@ -12,7 +12,7 @@ use crate::chat::state::State;
 use crate::chat::storage::{ErrorType, StoreMessage};
 
 /// 中断后闭合：确保最后一条 assistant 消息的所有 tool_calls 都有对应的 tool 消息。
-pub(in crate::chat::driver) fn close_unclosed_tool_calls<
+pub(in crate::chat::driver) async fn close_unclosed_tool_calls<
     PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'static,
 >(
     state: &Arc<State<PM>>,
@@ -29,7 +29,7 @@ pub(in crate::chat::driver) fn close_unclosed_tool_calls<
                         "[round] 中断后闭合：最后一条 assistant 消息包含 {} 个 tool_calls，写入 cancelled tool 消息",
                         tool_calls.len()
                     );
-                    close_tool_calls_with_reason(state, tool_calls, "任务被中断");
+                    close_tool_calls_with_reason(state, tool_calls, "任务被中断").await;
                 }
             }
         }
@@ -37,7 +37,7 @@ pub(in crate::chat::driver) fn close_unclosed_tool_calls<
 }
 
 /// max_tool_rounds 场景：为最后一条 assistant 的 tool_calls 补 cancelled tool 消息。
-pub(super) fn close_max_rounds_tool_calls<
+pub(super) async fn close_max_rounds_tool_calls<
     PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'static,
 >(
     state: &Arc<State<PM>>,
@@ -51,7 +51,7 @@ pub(super) fn close_max_rounds_tool_calls<
                         "[round] 达到 max_tool_rounds：为 {} 个 tool_calls 写入 cancelled tool 消息",
                         tool_calls.len()
                     );
-                    close_tool_calls_with_reason(state, tool_calls, "达到最大轮次限制");
+                    close_tool_calls_with_reason(state, tool_calls, "达到最大轮次限制").await;
                 }
             }
         }
@@ -59,7 +59,7 @@ pub(super) fn close_max_rounds_tool_calls<
 }
 
 /// 为 tool_calls 列表补 cancelled tool 消息并 emit ToolExecuted 事件。
-pub(super) fn close_tool_calls_with_reason<
+pub(super) async fn close_tool_calls_with_reason<
     PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'static,
 >(
     state: &Arc<State<PM>>,
@@ -67,7 +67,7 @@ pub(super) fn close_tool_calls_with_reason<
     reason: &str,
 ) {
     for tc in tool_calls {
-        state.history.push_cancelled_tool(&tc.id, reason);
+        state.history.push_cancelled_tool(&tc.id, reason).await;
         state
             .subscribers
             .emit(ChatEvent::Chat(CoreChatEvent::ToolExecuted {
@@ -95,7 +95,7 @@ fn is_cancelled_tool(msg: &StoreMessage) -> bool {
 /// - 最后一条是 cancelled Tool（close_unclosed_tool_calls 已处理）
 /// - 最后一条是执行失败的 Tool（已告知失败）
 /// - 最后一条是 Assistant（不需要补）
-pub(in crate::chat::driver) fn close_orphaned_user<
+pub(in crate::chat::driver) async fn close_orphaned_user<
     PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'static,
 >(
     state: &Arc<State<PM>>,
@@ -132,7 +132,7 @@ pub(in crate::chat::driver) fn close_orphaned_user<
                 }),
                 ..Default::default()
             };
-            state.history.push_assistant(msg.clone());
+            state.history.push_assistant(msg.clone()).await;
             // 推送流式事件组合，让 GUI 同步
             state
                 .subscribers

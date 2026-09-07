@@ -161,13 +161,14 @@ mod tests {
         }
     }
 
-    fn make_service(script: Vec<Vec<ChatCompletionChunk>>) -> ChatService<MockPromptManager> {
+    async fn make_service(script: Vec<Vec<ChatCompletionChunk>>) -> ChatService<MockPromptManager> {
         let svc = ChatService::from_ai_client(
             Arc::new(ScriptedAiClient::new(script)),
             Arc::new(ToolRegistry::new()),
             Arc::new(MockPromptManager),
             ChatConfig::new(),
-        );
+        )
+        .await;
         svc.start_driver().expect("启动 driver 失败");
         svc
     }
@@ -229,7 +230,7 @@ mod tests {
     /// 完整闭环：单轮无工具 → 文本 → Done。
     #[tokio::test(flavor = "current_thread")]
     async fn send_text_completes_with_done() {
-        let svc = make_service(vec![ScriptedAiClient::text_chunk("你好，我是助手")]);
+        let svc = make_service(vec![ScriptedAiClient::text_chunk("你好，我是助手")]).await;
         let mut events = collect_events(&svc);
 
         let ticket = svc.send_text("你好").expect("send 成功");
@@ -282,7 +283,7 @@ mod tests {
                 request_user_action_args("确认计划", &["confirm"]),
             )]),
             ScriptedAiClient::text_chunk("好的，计划如下：..."),
-        ]);
+        ]).await;
         let mut events = collect_events(&svc);
 
         let ticket = svc.send_text("帮我做一个计划").expect("send 成功");
@@ -364,7 +365,7 @@ mod tests {
             )]),
             ScriptedAiClient::text_chunk("第一轮完成"),
             ScriptedAiClient::text_chunk("第二轮完成"),
-        ]);
+        ]).await;
         let mut events = collect_events(&svc);
 
         let t1 = svc.send_text("第一问").expect("send 成功");
@@ -411,7 +412,7 @@ mod tests {
             "c1",
             "request_user_action",
             request_user_action_args("请确认", &["ok"]),
-        )])]);
+        )])]).await;
         let mut events = collect_events(&svc);
 
         let ticket = svc.send_text("问一下").expect("send 成功");
@@ -451,7 +452,7 @@ mod tests {
                 request_user_action_args("请确认", &["ok"]),
             )]),
             ScriptedAiClient::text_chunk("完成"),
-        ]);
+        ]).await;
         let mut events = collect_events(&svc);
 
         let ticket = svc.send_text("问一下").expect("send 成功");
@@ -488,7 +489,7 @@ mod tests {
             "c1",
             "request_user_action",
             request_user_action_args("请确认", &["ok"]),
-        )])]);
+        )])]).await;
         let mut events = collect_events(&svc);
 
         let ticket = svc.send_text("问一下").expect("send 成功");
@@ -525,7 +526,7 @@ mod tests {
             "c1",
             "request_user_action",
             json!({ "message": "请选择输出格式", "questions": [] }),
-        )])]);
+        )])]).await;
         let mut events = collect_events(&svc);
 
         let ticket = svc.send_text("问一下").expect("send 成功");
@@ -567,7 +568,7 @@ mod tests {
     /// 订阅者 panic 被隔离：一个 handler 崩溃不影响其它订阅者与 driver。
     #[tokio::test(flavor = "current_thread")]
     async fn handler_panic_is_isolated() {
-        let svc = make_service(vec![ScriptedAiClient::text_chunk("你好")]);
+        let svc = make_service(vec![ScriptedAiClient::text_chunk("你好")]).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
         // 第一个订阅者：panic
         svc.on_chat(move |_| panic!("订阅者故意 panic"));
@@ -591,14 +592,14 @@ mod tests {
     /// clear() 清空会话历史。
     #[tokio::test(flavor = "current_thread")]
     async fn clear_resets_history() {
-        let svc = make_service(vec![ScriptedAiClient::text_chunk("你好")]);
+        let svc = make_service(vec![ScriptedAiClient::text_chunk("你好")]).await;
         svc.send_text("你好")
             .expect("send 成功")
             .wait()
             .await
             .expect("完成");
         assert!(!svc.history().is_empty(), "对话后历史非空");
-        svc.clear();
+        svc.clear().await;
         assert!(svc.history().is_empty(), "clear 后历史为空");
     }
 
@@ -606,7 +607,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn failed_conversation_retains_context_and_emits_error() {
         // 空脚本：chat_completion_stream 立即 Err
-        let svc = make_service(vec![]);
+        let svc = make_service(vec![]).await;
         let mut events = collect_events(&svc);
 
         let ticket = svc.send_text("问一下").expect("send 成功");
@@ -653,7 +654,7 @@ mod tests {
         let svc = make_service(vec![
             ScriptedAiClient::text_chunk("第一轮"),
             ScriptedAiClient::text_chunk("第二轮"),
-        ]);
+        ]).await;
 
         // 第一轮：注入默认模板
         svc.send_text("你好")
@@ -721,7 +722,7 @@ mod tests {
             "c1",
             "request_user_action",
             request_user_action_args("请确认", &["ok"]),
-        )])]);
+        )])]).await;
         let mut events = collect_events(&svc);
 
         let ticket = svc.send_text("问一下").expect("send 成功");
@@ -765,7 +766,7 @@ mod tests {
         let svc = make_service(vec![
             ScriptedAiClient::text_chunk("hi"),
             ScriptedAiClient::text_chunk("hi"), // 第二次 send 用
-        ]);
+        ]).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
 
         // 模拟"页面作用域"持有 guard
@@ -819,7 +820,7 @@ mod tests {
     /// `detach()` 主动退订后 Drop 幂等：验证同一 guard 多次 Drop / 退订均安全。
     #[tokio::test(flavor = "current_thread")]
     async fn subscription_guard_detach_is_idempotent() {
-        let svc = make_service(vec![]);
+        let svc = make_service(vec![]).await;
         let guard: SubscriptionGuard = svc.on_chat_with_guard(move |_| {});
         let id = guard.id();
 
@@ -847,7 +848,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn subscription_guard_drop_is_noop_after_service_dropped() {
         let guard = {
-            let svc = make_service(vec![]);
+            let svc = make_service(vec![]).await;
             let (tx, _rx) = mpsc::unbounded_channel();
             svc.on_chat_with_guard(move |ev| {
                 let _ = tx.send(ev);
@@ -864,7 +865,7 @@ mod tests {
         let svc = make_service(vec![
             ScriptedAiClient::text_chunk("hi"),
             ScriptedAiClient::text_chunk("hi"), // 第二次 send 用
-        ]);
+        ]).await;
         let (tx1, mut rx1) = mpsc::unbounded_channel();
         let (tx2, mut rx2) = mpsc::unbounded_channel();
 

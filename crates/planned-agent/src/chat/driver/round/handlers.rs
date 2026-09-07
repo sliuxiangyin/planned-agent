@@ -66,7 +66,7 @@ pub(super) async fn handle_ui_tool_call<
             reason.push_str(last_stream_error);
         }
         warn!("{}", reason);
-        close_tool_calls_with_reason(state, &[call.clone()], &reason);
+        close_tool_calls_with_reason(state, &[call.clone()], &reason).await;
         state
             .subscribers
             .emit(ChatEvent::Error(reason.clone()));
@@ -94,7 +94,7 @@ pub(super) async fn handle_ui_tool_call<
                 "choice": choice,
                 "action_id": action_id
             });
-            state.history.push_tool(&call.id, &tool_content, ErrorType::None);
+            state.history.push_tool(&call.id, &tool_content, ErrorType::None).await;
         }
         UIActionStrategy::EmitAndSuspend => {
             return Ok(UIActionOutcome::Suspended {
@@ -170,7 +170,7 @@ pub(super) async fn execute_backend_tool_call<
     } else {
         ErrorType::None
     };
-    state.history.push_tool(&call.id, &content, error_type);
+    state.history.push_tool(&call.id, &content, error_type).await;
     state
         .subscribers
         .emit(ChatEvent::Chat(CoreChatEvent::ToolExecuted {

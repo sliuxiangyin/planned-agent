@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use planned_agent::chat::storage::{ChatHistoryStore, ErrorType, StoreMessage};
 use planned_agent_core::ai::types::Message;
 
@@ -27,15 +28,13 @@ impl ChatMessageStore {
     }
 }
 
+#[async_trait]
 impl ChatHistoryStore for ChatMessageStore {
-    fn load(&self) -> Vec<StoreMessage> {
+    async fn load(&self) -> Vec<StoreMessage> {
         let plan_id = self.plan_id.clone();
         let session_id = self.session_id.clone();
         let repo = self.repo.clone();
-        let rows = match tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(repo.find_by_plan_and_session(&plan_id, &session_id))
-        }) {
+        let rows = match repo.find_by_plan_and_session(&plan_id, &session_id).await {
             Ok(rows) => rows,
             Err(e) => {
                 tracing::error!("加载聊天消息失败: {}", e);
@@ -69,7 +68,7 @@ impl ChatHistoryStore for ChatMessageStore {
         result
     }
 
-    fn append(&self, msg: &StoreMessage) -> String {
+    async fn append(&self, msg: &StoreMessage) -> String {
         let plan_id = self.plan_id.clone();
         let session_id = self.session_id.clone();
         let repo = self.repo.clone();
@@ -84,25 +83,26 @@ impl ChatHistoryStore for ChatMessageStore {
             }
         };
 
-        match tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let rows = repo
-                    .find_by_plan_and_session(&plan_id, &session_id)
-                    .await?;
-                let next_seq = rows.last().map(|r| r.sequence_order + 1).unwrap_or(1);
-                let row = repo
-                    .create(
-                        &plan_id,
-                        &session_id,
-                        &msg_json,
-                        next_seq,
-                        is_error_type,
-                        is_agent_tool,
-                    )
-                    .await?;
-                Ok::<_, anyhow::Error>(row)
-            })
-        }) {
+        let rows = match repo.find_by_plan_and_session(&plan_id, &session_id).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::error!("读取消息失败: {}", e);
+                return String::new();
+            }
+        };
+        let next_seq = rows.last().map(|r| r.sequence_order + 1).unwrap_or(1);
+
+        match repo
+            .create(
+                &plan_id,
+                &session_id,
+                &msg_json,
+                next_seq,
+                is_error_type,
+                is_agent_tool,
+            )
+            .await
+        {
             Ok(row) => {
                 tracing::info!(
                     target: "store",
@@ -120,7 +120,7 @@ impl ChatHistoryStore for ChatMessageStore {
         }
     }
 
-    fn update(&self, id: &str, msg: &StoreMessage) {
+    async fn update(&self, id: &str, msg: &StoreMessage) {
         let repo = self.repo.clone();
         let id_owned = id.to_string();
 
@@ -132,50 +132,20 @@ impl ChatHistoryStore for ChatMessageStore {
             }
         };
 
-        tokio::spawn(async move {
-            if let Err(e) = repo.update_by_id(&id_owned, &msg_json).await {
-                tracing::error!("更新聊天消息失败 (id: {}): {}", id_owned, e);
-            }
-        });
+        if let Err(e) = repo.update_by_id(&id_owned, &msg_json).await {
+            tracing::error!("更新聊天消息失败 (id: {}): {}", id_owned, e);
+        }
     }
 
-    fn rollback_to(&self, len: usize) {
+    async fn clear(&self) {
         let plan_id = self.plan_id.clone();
         let session_id = self.session_id.clone();
         let repo = self.repo.clone();
-        tokio::spawn(async move {
-            let rows = match repo
-                .find_by_plan_and_session(&plan_id, &session_id)
-                .await
-            {
-                Ok(rows) => rows,
-                Err(e) => {
-                    tracing::error!("rollback 读取消息失败: {}", e);
-                    return;
-                }
-            };
-            if rows.len() <= len {
-                return;
-            }
-            for row in rows.iter().skip(len) {
-                if let Err(e) = repo.delete_by_id(&row.id).await {
-                    tracing::error!("rollback 删除消息失败 (id: {}): {}", row.id, e);
-                }
-            }
-        });
-    }
-
-    fn clear(&self) {
-        let plan_id = self.plan_id.clone();
-        let session_id = self.session_id.clone();
-        let repo = self.repo.clone();
-        tokio::spawn(async move {
-            if let Err(e) = repo
-                .delete_by_plan_and_session(&plan_id, &session_id)
-                .await
-            {
-                tracing::error!("清空聊天消息失败: {}", e);
-            }
-        });
+        if let Err(e) = repo
+            .delete_by_plan_and_session(&plan_id, &session_id)
+            .await
+        {
+            tracing::error!("清空聊天消息失败: {}", e);
+        }
     }
 }

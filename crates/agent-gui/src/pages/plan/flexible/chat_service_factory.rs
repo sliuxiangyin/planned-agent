@@ -45,7 +45,7 @@ impl ChatServiceFactory {
     }
 
     /// 为指定 session 造一个绑定该 session store 的 ChatService（未 start_driver）。
-    pub(crate) fn build_for_session(&self, session_id: &str) -> anyhow::Result<ChatSvc> {
+    pub(crate) async fn build_for_session(&self, session_id: &str) -> anyhow::Result<ChatSvc> {
         let repo = self.storage.chat_message_repo();
         let store = ChatMessageStore::new(self.plan_id.clone(), session_id.to_string(), repo);
         Ok(ChatService::with_store(
@@ -80,6 +80,7 @@ impl ChatServiceFactory {
                 ..Default::default()
             },
             Arc::new(store),
-        ))
+        )
+        .await)
     }
 }

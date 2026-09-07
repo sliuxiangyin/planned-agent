@@ -33,13 +33,13 @@ pub(super) async fn driver_loop<PM: planned_agent_core::prompt::PromptManager + 
             Command::Send { message, done } => {
                 tracing::info!("[driver] 收到 Command::Send，开始 run_conversation");
                 state.cancelled.store(false, Ordering::SeqCst);
-                let store_id = state.history.push_user(message);
+                let store_id = state.history.push_user(message).await;
                 *state.run_state.lock().unwrap() = RunState::Running;
 
                 let ui_strategy = pick_ui_strategy(&state);
                 let bridge = bridge::SubAgentBridge::new(state.clone());
                 let result = run_conversation(&state, &mut rx, &mut queue, ui_strategy, &bridge).await;
-                finish_send(&state, result, store_id, done);
+                finish_send(&state, result, store_id, done).await;
             }
             Command::Confirm {
                 tool_call_id,
@@ -53,7 +53,7 @@ pub(super) async fn driver_loop<PM: planned_agent_core::prompt::PromptManager + 
                 )));
             }
             Command::Reset => {
-                state.history.clear();
+                state.history.clear().await;
                 state.subscribers.emit(ChatEvent::HistoryUpdated {
                     messages: state.history.snapshot(),
                 });
@@ -77,7 +77,7 @@ pub(super) async fn driver_loop<PM: planned_agent_core::prompt::PromptManager + 
                     "choice": choice,
                     "action_id": action_id
                 });
-                state.history.push_tool(&tool_call_id, &tool_content, ErrorType::None);
+                state.history.push_tool(&tool_call_id, &tool_content, ErrorType::None).await;
                 *state.run_state.lock().unwrap() = RunState::Running;
 
                 let bridge = bridge::SubAgentBridge::new(state.clone());
@@ -89,7 +89,7 @@ pub(super) async fn driver_loop<PM: planned_agent_core::prompt::PromptManager + 
                     &bridge,
                 )
                 .await;
-                finish_send(&state, result, store_id, done);
+                finish_send(&state, result, store_id, done).await;
             }
         }
     }
@@ -106,7 +106,7 @@ fn pick_ui_strategy<PM: planned_agent_core::prompt::PromptManager + Send + Sync 
     }
 }
 
-fn finish_send<PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'static>(
+async fn finish_send<PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'static>(
     state: &std::sync::Arc<State<PM>>,
     result: anyhow::Result<ConversationOutcome>,
     _store_id: String,
@@ -129,9 +129,9 @@ fn finish_send<PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'st
         Err(e) => {
             tracing::info!("[driver] run_conversation 错误: {}", e);
             // 先闭合可能存在的未闭合 tool_calls
-            round::close::close_unclosed_tool_calls(state);
+            round::close::close_unclosed_tool_calls(state).await;
             // 补一条 error assistant 消息
-            round::close::close_orphaned_user(state, &format!("Error: {}", e));
+            round::close::close_orphaned_user(state, &format!("Error: {}", e)).await;
             state.subscribers.emit(ChatEvent::Error(e.to_string()));
             let _ = done.send(SendOutcome::Failed(e.to_string()));
         }

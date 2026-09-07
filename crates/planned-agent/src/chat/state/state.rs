@@ -146,8 +146,8 @@ pub struct History {
 
 impl History {
     /// 创建历史，从 store 恢复已有消息填入内存。
-    pub fn new(store: Arc<dyn ChatHistoryStore>, tool_registry: Arc<ToolRegistry>) -> Self {
-        let loaded = store.load();
+    pub async fn new(store: Arc<dyn ChatHistoryStore>, tool_registry: Arc<ToolRegistry>) -> Self {
+        let loaded = store.load().await;
         let inner: Vec<(String, StoreMessage)> = loaded
             .into_iter()
             .map(|sm| (NO_STORE_ID.to_string(), sm))
@@ -212,9 +212,9 @@ impl History {
     }
 
     /// 写入一条 user 消息，返回 store_id。
-    pub fn push_user(&self, msg: Message) -> String {
+    pub async fn push_user(&self, msg: Message) -> String {
         let sm = StoreMessage::normal(msg);
-        let store_id = self.store.append(&sm);
+        let store_id = self.store.append(&sm).await;
         self.inner.lock().unwrap().push((store_id.clone(), sm));
         store_id
     }
@@ -222,7 +222,7 @@ impl History {
     /// 写入一条 assistant 消息，返回 store_id。
     ///
     /// 自动检查 tool_calls 中是否包含 SubAgent 工具，设置 `is_agent_tool`。
-    pub fn push_assistant(&self, msg: Message) -> String {
+    pub async fn push_assistant(&self, msg: Message) -> String {
         let is_agent_tool = msg.tool_calls.as_ref().map(|tcs| {
             tcs.iter().any(|tc| {
                 self.tool_registry
@@ -233,7 +233,7 @@ impl History {
         }).unwrap_or(false);
         let mut sm = StoreMessage::normal(msg);
         sm.is_agent_tool = is_agent_tool;
-        let store_id = self.store.append(&sm);
+        let store_id = self.store.append(&sm).await;
         self.inner.lock().unwrap().push((store_id.clone(), sm));
         store_id
     }
@@ -242,7 +242,7 @@ impl History {
     ///
     /// `is_error_type` 默认 `ErrorType::None`；工具执行失败时由 `execute_backend_tool_call`
     /// 传入 `ErrorType::ExecutionError`，使历史回显能正确显示 Error 图标。
-    pub fn push_tool(
+    pub async fn push_tool(
         &self,
         tool_call_id: &str,
         content: &Value,
@@ -262,35 +262,15 @@ impl History {
             ..Default::default()
         };
         let sm = StoreMessage::new(msg, is_error_type);
-        let store_id = self.store.append(&sm);
+        let store_id = self.store.append(&sm).await;
         self.inner.lock().unwrap().push((store_id.clone(), sm));
         store_id
     }
 
-    /// 回滚到指定 store_id 之前（即移除该 store_id 及之后的消息）。
-    pub fn rollback_to_store_id(&self, store_id: &str) {
-        let Some(idx) = self.find_idx_by_store_id(store_id) else {
-            return;
-        };
-        let system_count = self.leading_system_count();
-        self.inner.lock().unwrap().truncate(idx);
-        self.store.rollback_to(idx.saturating_sub(system_count));
-    }
-
-    /// 前导 system 消息数量（store 中不存在 system，用于索引偏移换算）。
-    fn leading_system_count(&self) -> usize {
-        self.inner
-            .lock()
-            .unwrap()
-            .iter()
-            .take_while(|(_, sm)| matches!(sm.message.role, MessageRole::System))
-            .count()
-    }
-
     /// 清空历史（会话重置）。
-    pub fn clear(&self) {
+    pub async fn clear(&self) {
         self.inner.lock().unwrap().clear();
-        self.store.clear();
+        self.store.clear().await;
     }
 
     /// 找到最后一条包含 `request_user_action` 的 assistant 消息的 store_id。
@@ -325,21 +305,19 @@ impl History {
         None
     }
 
-    /// 根据 store_id 找到 inner 索引。
-    fn find_idx_by_store_id(&self, store_id: &str) -> Option<usize> {
-        self.inner.lock().unwrap().iter().position(|(id, _)| id == store_id)
-    }
-
     /// 为指定 tool_call_id 伪造一条取消/中断的 tool 消息，返回 store id。
     /// 若该 tool_call_id 已有对应 tool 消息（已闭合），则跳过不添加。
-    pub fn push_cancelled_tool(&self, tool_call_id: &str, reason: &str) -> String {
-        let mut history = self.inner.lock().unwrap();
-        let already_closed = history.iter().any(|(_, sm)| {
-            matches!(sm.message.role, MessageRole::Tool)
-                && sm.message.tool_call_id.as_deref() == Some(tool_call_id)
-        });
-        if already_closed {
-            return NO_STORE_ID.to_string();
+    pub async fn push_cancelled_tool(&self, tool_call_id: &str, reason: &str) -> String {
+        // 先检查是否已闭合（短暂持锁，不跨 await）
+        {
+            let history = self.inner.lock().unwrap();
+            let already_closed = history.iter().any(|(_, sm)| {
+                matches!(sm.message.role, MessageRole::Tool)
+                    && sm.message.tool_call_id.as_deref() == Some(tool_call_id)
+            });
+            if already_closed {
+                return NO_STORE_ID.to_string();
+            }
         }
         let msg = Message {
             role: MessageRole::Tool,
@@ -354,38 +332,11 @@ impl History {
             ..Default::default()
         };
         let sm = StoreMessage::new(msg, ErrorType::Cancelled);
-        let store_id = self.store.append(&sm);
-        history.push((store_id.clone(), sm));
+        let store_id = self.store.append(&sm).await;
+        self.inner.lock().unwrap().push((store_id.clone(), sm));
         store_id
     }
 
-    /// 若最后一条是带 tool_calls 的 assistant，且并非第一条 assistant，
-    /// 移除它（用于达到 `max_tool_rounds` 时的清理）。移除时同步 store。
-    pub fn pop_last_assistant_tool_calls_if_not_first(&self) {
-        let len_before;
-        {
-            let mut history = self.inner.lock().unwrap();
-            len_before = history.len();
-            if let Some((_, sm)) = history.last() {
-                if matches!(sm.message.role, MessageRole::Assistant)
-                    && sm.message.tool_calls.is_some()
-                    && history
-                        .iter()
-                        .filter(|(_, sm)| matches!(sm.message.role, MessageRole::Assistant))
-                        .count()
-                        > 1
-                {
-                    history.pop();
-                }
-            }
-        }
-        let len_after = self.inner.lock().unwrap().len();
-        if len_after < len_before {
-            let system_count = self.leading_system_count();
-            self.store
-                .rollback_to(len_after.saturating_sub(system_count));
-        }
-    }
 }
 
 // ── Subscribers ─────────────────────────────────────────────────────────────

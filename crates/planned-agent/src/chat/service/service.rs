@@ -46,7 +46,7 @@ impl<PM: PromptManager + Send + Sync + 'static> std::fmt::Debug for ChatService<
 
 impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
     /// 通过 `AiManager` + 配置构造（使用默认 `InMemoryStore`）。
-    pub fn new(
+    pub async fn new(
         ai_manager: AiManager,
         tool_registry: Arc<ToolRegistry>,
         prompt_manager: Arc<PM>,
@@ -58,11 +58,12 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
             tool_registry,
             prompt_manager,
             config,
-        ))
+        )
+        .await)
     }
 
     /// 直接注入 `AiClient` 构造（测试 / 自定义 provider 场景）。
-    pub fn from_ai_client(
+    pub async fn from_ai_client(
         ai_client: Arc<dyn planned_agent_core::ai::AiClient>,
         tool_registry: Arc<ToolRegistry>,
         prompt_manager: Arc<PM>,
@@ -76,7 +77,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
             tool_registry: tool_registry.clone(),
             prompt_manager,
             config: std::sync::Mutex::new(config),
-            history: crate::chat::state::History::new(store, tool_registry),
+            history: crate::chat::state::History::new(store, tool_registry).await,
             subscribers: crate::chat::state::Subscribers::new(),
             cmd_tx,
             driver_rx: std::sync::Mutex::new(Some(cmd_rx)),
@@ -90,7 +91,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
     }
 
     /// 使用自定义 store 构造。
-    pub fn with_store(
+    pub async fn with_store(
         ai_client: Arc<dyn planned_agent_core::ai::AiClient>,
         tool_registry: Arc<ToolRegistry>,
         prompt_manager: Arc<PM>,
@@ -104,7 +105,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
             tool_registry: tool_registry.clone(),
             prompt_manager,
             config: std::sync::Mutex::new(config),
-            history: crate::chat::state::History::new(store, tool_registry),
+            history: crate::chat::state::History::new(store, tool_registry).await,
             subscribers: crate::chat::state::Subscribers::new(),
             cmd_tx,
             driver_rx: std::sync::Mutex::new(Some(cmd_rx)),
@@ -253,14 +254,14 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         self.state.history.snapshot_store()
     }
 
-    pub fn clear(&self) {
+    pub async fn clear(&self) {
         let state = self.state.run_state.lock().unwrap();
         if matches!(*state, crate::chat::state::RunState::Running | crate::chat::state::RunState::AwaitingUserAction) {
             tracing::warn!("chat: clear() 被调用但对话正在运行（{:?}），跳过清空以避免竞争；请用 reset_session()", *state);
             return;
         }
         drop(state);
-        self.state.history.clear();
+        self.state.history.clear().await;
         self.state.subscribers.emit(ChatEvent::HistoryUpdated {
             messages: self.state.history.snapshot(),
         });

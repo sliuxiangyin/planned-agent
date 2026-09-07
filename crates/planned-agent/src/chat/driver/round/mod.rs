@@ -120,7 +120,7 @@ async fn prompt_max_rounds<
     let (ask_message, ask_questions) = continue_question(max_rounds);
 
     // 触顶：本批真实工具一律先按「达到轮次限制」close（主/子一致，本批不执行）。
-    close_max_rounds_tool_calls(state);
+    close_max_rounds_tool_calls(state).await;
 
     // 合成 request_user_action 回合并写入历史（唯一 id，保证多次触顶的 assistant/tool 能对应）。
     let ui_id = next_max_rounds_ui_id();
@@ -141,7 +141,8 @@ async fn prompt_max_rounds<
         content: None,
         tool_calls: Some(vec![call.clone()]),
         ..Default::default()
-    });
+    })
+    .await;
 
     if matches!(ui_strategy, UIActionStrategy::EmitAndSuspend) {
         // 子 agent：不能原地阻塞。emit 请求后挂起交给父 UI；resume 时 driver 以这条
@@ -185,7 +186,7 @@ async fn prompt_max_rounds<
     match await_confirm(state, rx, queue, &ui_id).await? {
         Some((choice, action_id)) => {
             let tool_content = serde_json::json!({ "choice": choice.clone(), "action_id": action_id });
-            state.history.push_tool(&ui_id, &tool_content, ErrorType::None);
+            state.history.push_tool(&ui_id, &tool_content, ErrorType::None).await;
             if choice.contains("continue") {
                 info!("[round] 触顶后用户选择继续执行（id={ui_id}）");
                 Ok(PromptChoice::Continue)
@@ -351,7 +352,7 @@ pub(super) async fn run_conversation<
         }
 
         // 统一写入，保留 tool_calls（包括 request_user_action）
-        state.history.push_assistant(assistant_msg.clone());
+        state.history.push_assistant(assistant_msg.clone()).await;
         state
             .subscribers
             .emit(ChatEvent::Chat(CoreChatEvent::RoundEnd {
@@ -411,7 +412,7 @@ pub(super) async fn run_conversation<
             match execute_backend_tool_call(state, call, bridge).await? {
                 BackendToolResult::Done => {}
                 BackendToolResult::Cancelled => {
-                    close_unclosed_tool_calls(state);
+                    close_unclosed_tool_calls(state).await;
                     return Ok(ConversationOutcome::Completed);
                 }
             }
@@ -431,15 +432,15 @@ pub(super) async fn run_conversation<
                     // UI 工具无效（如空 questions）：handle 内已闭合该 tool_call 并 emit Error，
                     // 这里直接结束本轮，不再挂起等用户——否则会话永久卡死。
                     info!("[round] UI 工具无效，结束本轮: {}", reason);
-                    close_unclosed_tool_calls(state);
+                    close_unclosed_tool_calls(state).await;
                     return Ok(ConversationOutcome::Completed);
                 }
                 UIActionOutcome::UserCancelled => {
-                    close_unclosed_tool_calls(state);
+                    close_unclosed_tool_calls(state).await;
                     return Ok(ConversationOutcome::Completed);
                 }
                 UIActionOutcome::Suspended { run_id } => {
-                    close_unclosed_tool_calls(state);
+                    close_unclosed_tool_calls(state).await;
                     return Ok(ConversationOutcome::Suspended { run_id });
                 }
             }
@@ -449,10 +450,10 @@ pub(super) async fn run_conversation<
     }
 
     // ── 中断后闭合：确保最后一条 assistant 消息的所有 tool_calls 都有对应的 tool 消息 ──
-    close_unclosed_tool_calls(state);
+    close_unclosed_tool_calls(state).await;
     // ── 中断后补齐：若最后一条不是 Assistant，补一条占位消息 ──
     let close_text = stream_error_text.as_deref().unwrap_or("Output interrupt");
-    close_orphaned_user(state, close_text);
+    close_orphaned_user(state, close_text).await;
 
     Ok(ConversationOutcome::Completed)
 }

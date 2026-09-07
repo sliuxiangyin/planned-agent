@@ -99,6 +99,7 @@ impl SubAgentSessionRunner for SubAgentRunner {
             self.prompt_manager.clone(),
             call_config,
         )
+        .await
         .map_err(|e| {
             info!("[子agent] ChatService::new 失败: {}", e);
             e

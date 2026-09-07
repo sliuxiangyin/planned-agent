@@ -135,17 +135,22 @@ impl FlexibleController {
         chat.subscription.set(None);
         chat.clear();
 
-        // 为目标 session 构造绑该 store 的新 ChatService
-        let service = factory.build_for_session(&session_id)?;
-
-        // 在与应用初始化一致的运行时（dioxus spawn）里启动 driver 并挂载；
-        // svc 变化会触发 history/subscription effect 对新 service 重跑。
+        // 在与应用初始化一致的运行时（dioxus spawn）里构造目标 session 的新 ChatService
+        // 并启动 driver、挂载；svc 变化会触发 history/subscription effect 对新 service 重跑。
         let slot = self.session_slot.read().clone();
         let mut session_id_sig = self.session_id;
         let mut svc = self.svc;
         let mut initialized = self.initialized;
         let target_session = session_id.clone();
         spawn(async move {
+            // 为目标 session 构造绑该 store 的新 ChatService
+            let service = match factory.build_for_session(&target_session).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("灵活模式切换会话: 构造 ChatService 失败: {}", e);
+                    return;
+                }
+            };
             if let Err(e) = service.start_driver() {
                 tracing::error!("灵活模式切换会话: ChatService driver 启动失败: {}", e);
                 return;
@@ -261,7 +266,7 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
                     tools_ctx.clone(),
                     prompt_ctx.clone(),
                 );
-                let service = factory_obj.build_for_session(&session.id)?;
+                let service = factory_obj.build_for_session(&session.id).await?;
                 Ok::<(String, ChatServiceFactory, ChatSvc), anyhow::Error>((
                     session_id,
                     factory_obj,

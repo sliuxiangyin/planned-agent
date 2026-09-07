@@ -15,6 +15,7 @@
 //! - **统一 `String` ID**：所有实现使用 `String` 作为持久化 ID 类型，
 //!   InMemoryStore 内部转为 `index.to_string()`，SQLite 实现直接返回 UUID。
 
+use async_trait::async_trait;
 use planned_agent_core::ai::types::Message;
 
 // ── ErrorType ─────────────────────────────────────────────────────────────
@@ -83,23 +84,19 @@ impl StoreMessage {
 /// 使用 `String` 作为持久化 ID 类型：
 /// - `InMemoryStore` 返回 `index.to_string()`；
 /// - SQLite 实现返回 UUID 主键。
+#[async_trait]
 pub trait ChatHistoryStore: Send + Sync {
     /// 恢复历史（`History::new` 时调用一次，填入内存热数据）。
-    fn load(&self) -> Vec<StoreMessage>;
+    async fn load(&self) -> Vec<StoreMessage>;
 
     /// 追加一条消息，返回持久化 ID。
-    fn append(&self, msg: &StoreMessage) -> String;
+    async fn append(&self, msg: &StoreMessage) -> String;
 
     /// 根据 ID 更新消息内容。
-    fn update(&self, id: &str, msg: &StoreMessage);
-
-    /// 回滚到指定长度（`rollback_to` / `pop_last` / `clean_unclosed` 后调用）。
-    ///
-    /// 实现方应删除 `sequence_order >= len` 或等效语义的行。
-    fn rollback_to(&self, len: usize);
+    async fn update(&self, id: &str, msg: &StoreMessage);
 
     /// 清空会话（`clear` / `reset_session` 后调用）。
-    fn clear(&self);
+    async fn clear(&self);
 }
 
 // ── InMemoryStore ─────────────────────────────────────────────────────────
@@ -121,24 +118,21 @@ impl Default for InMemoryStore {
     }
 }
 
+#[async_trait]
 impl ChatHistoryStore for InMemoryStore {
-    fn load(&self) -> Vec<StoreMessage> {
+    async fn load(&self) -> Vec<StoreMessage> {
         Vec::new()
     }
 
-    fn append(&self, _msg: &StoreMessage) -> String {
+    async fn append(&self, _msg: &StoreMessage) -> String {
         String::new() // 内存实现不实际存储
     }
 
-    fn update(&self, _id: &str, _msg: &StoreMessage) {
+    async fn update(&self, _id: &str, _msg: &StoreMessage) {
         // 不落盘
     }
 
-    fn rollback_to(&self, _len: usize) {
-        // 不落盘
-    }
-
-    fn clear(&self) {
+    async fn clear(&self) {
         // 不落盘
     }
 }
