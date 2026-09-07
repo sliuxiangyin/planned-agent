@@ -1,7 +1,6 @@
 //! 用户确认等待逻辑。
 
 use std::collections::VecDeque;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -56,7 +55,8 @@ pub(super) async fn await_confirm<PM: planned_agent_core::prompt::PromptManager 
                 }
             }
             _ = cancel_tick.tick() => {
-                if state.cancelled.load(Ordering::SeqCst) {
+                if state.is_cancelled_effective() {
+                    state.mark_cancelled();
                     return Ok(None);
                 }
             }

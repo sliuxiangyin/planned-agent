@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use planned_agent_core::events::ChatEvent;
 use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 /// 过程流事件类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -63,6 +63,9 @@ pub struct ToolStreamSender {
     tool_name: String,
     invocation_id: String,
     seq: Arc<AtomicU64>,
+    /// 上游父级的取消接收端（可选）。父级被取消时置 `true`，用于把取消传导到子 agent。
+    /// 由父级 bridge 构造时通过 [`ToolStreamSender::with_upstream`] 注入。
+    upstream_cancel: Option<watch::Receiver<bool>>,
 }
 
 impl ToolStreamSender {
@@ -77,7 +80,20 @@ impl ToolStreamSender {
             tool_name: tool_name.into(),
             invocation_id: invocation_id.into(),
             seq: Arc::new(AtomicU64::new(0)),
+            upstream_cancel: None,
         }
+    }
+
+    /// 注入上游父级的取消接收端（返回 self，支持链式）。父级被取消时本流会携带该信号，
+    /// 供下游（子 agent runner）读取并级联取消。
+    pub fn with_upstream(mut self, rx: watch::Receiver<bool>) -> Self {
+        self.upstream_cancel = Some(rx);
+        self
+    }
+
+    /// 取出上游父级取消接收端（若无则为 `None`）。子 agent runner 用它给子服务挂接上游取消。
+    pub fn upstream_cancel(&self) -> Option<watch::Receiver<bool>> {
+        self.upstream_cancel.clone()
     }
 
     /// 创建 no-op 句柄：所有 `emit` 立即返回 `Ok`，不产生任何事件。
@@ -91,6 +107,7 @@ impl ToolStreamSender {
             tool_name: String::new(),
             invocation_id: String::new(),
             seq: Arc::new(AtomicU64::new(0)),
+            upstream_cancel: None,
         }
     }
 

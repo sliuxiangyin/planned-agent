@@ -21,7 +21,7 @@ use planned_agent_core::ai::types::MessageRole;
 use planned_agent_core::prompt::PromptManager;
 use planned_agent_tool_manager::ToolRegistry;
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::warn;
 
 use super::command::RunState;
@@ -50,6 +50,72 @@ pub(crate) struct State<PM: PromptManager + Send + Sync + 'static> {
     pub(crate) driver_started: AtomicBool,
     pub(crate) run_state: Mutex<RunState>,
     pub(crate) cancelled: Arc<AtomicBool>,
+    /// 本地取消 watch：任何取消来源（本服务 `stop()` 或上游父级取消）都会把它置为 `true`，
+    /// 用于向下游子 agent 传播（其把本 watch 作为上游），并作为 driver 可等待的取消信号。
+    pub(crate) cancel_tx: watch::Sender<bool>,
+    /// 上游父级取消接收端。当本服务是某个父服务创建的子 agent 时持有（主 agent 为 `None`）。
+    pub(crate) upstream_cancel: Mutex<Option<watch::Receiver<bool>>>,
+}
+
+impl<PM: PromptManager + Send + Sync + 'static> State<PM> {
+    /// 统一取消入口：置原子标志 + 广播本地取消 watch（幂等）。
+    pub(crate) fn mark_cancelled(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        let _ = self.cancel_tx.send(true);
+    }
+
+    /// 本层（父）本地取消 watch 的接收端 —— 交给下游子 agent 作为其上游取消。
+    pub(crate) fn cancel_rx(&self) -> watch::Receiver<bool> {
+        self.cancel_tx.subscribe()
+    }
+
+    /// 判断是否已被取消（自身 `stop()` 或上游父级取消传导）。
+    ///
+    /// 供 driver 的各"轮询式取消检查点"（LLM 每 chunk、执行前 break 等）使用。
+    /// 与 [`State::cancel_signal`]（可等待）互补：此处是非阻塞快照判断。
+    pub(crate) fn is_cancelled_effective(&self) -> bool {
+        if self.cancelled.load(Ordering::SeqCst) {
+            return true;
+        }
+        self.upstream_cancel
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|r| *r.borrow())
+            .unwrap_or(false)
+    }
+
+    /// 记录上游父级取消接收端（由 runner 在创建子 agent 后调用）。
+    pub(crate) fn attach_upstream(&self, rx: watch::Receiver<bool>) {
+        *self.upstream_cancel.lock().unwrap() = Some(rx);
+    }
+
+    /// 等待"本服务被取消"（含自身 `stop()` 或上游父级取消传导）。
+    ///
+    /// 供 driver 在阻塞等待子工具/子 agent 结果的 `.await` 处用 `select!` 竞速。
+    /// 若先被上游取消触发，会先 `mark_cancelled()`（把取消传导给自己，使更下游子 agent 感知）。
+    pub(crate) async fn cancel_signal(&self) {
+        let mut local = self.cancel_tx.subscribe();
+        // 已经处于已取消状态则立即返回
+        if *local.borrow_and_update() {
+            return;
+        }
+        let upstream = self.upstream_cancel.lock().unwrap().clone();
+        match upstream {
+            None => {
+                let _ = local.wait_for(|v| *v).await;
+            }
+            Some(mut up) => {
+                tokio::select! {
+                    r = local.wait_for(|v| *v) => { let _ = r; }
+                    r = up.wait_for(|v| *v) => {
+                        let _ = r;
+                        self.mark_cancelled();
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// 通过 `AiManager` + 配置构造 `Arc<dyn AiClient>`（便于 `State::new` 复用）。

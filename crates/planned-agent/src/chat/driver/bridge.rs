@@ -48,7 +48,9 @@ impl<PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'static> Tool
         call_id: &str,
     ) -> (ToolStreamSender, tokio::task::JoinHandle<()>) {
         let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(64);
-        let stream = ToolStreamSender::new(stream_tx, tool_name.to_string(), call_id.to_string());
+        // 把本层（父）本地取消 watch 作为下游子 agent 的上游取消，实现级联取消。
+        let stream = ToolStreamSender::new(stream_tx, tool_name.to_string(), call_id.to_string())
+            .with_upstream(self.state.cancel_rx());
 
         let state_clone = self.state.clone();
         let call_id_owned = call_id.to_string();

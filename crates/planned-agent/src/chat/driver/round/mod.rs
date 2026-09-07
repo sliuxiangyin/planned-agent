@@ -275,7 +275,9 @@ pub(super) async fn run_conversation<
         let mut last_stream_error = String::new();
         const MAX_STREAM_ERRORS: u32 = 5;
         while let Some(chunk_result) = inner.next().await {
-            if state.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+            if state.is_cancelled_effective() {
+                // 把上游（父级）取消翻译为本地取消，确保后续闭合路径一致。
+                state.mark_cancelled();
                 break;
             }
             match chunk_result {
@@ -402,7 +404,8 @@ pub(super) async fn run_conversation<
             ui_calls.len()
         );
         for call in &backend_calls {
-            if state.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+            if state.is_cancelled_effective() {
+                state.mark_cancelled();
                 break;
             }
             match execute_backend_tool_call(state, call, bridge).await? {
@@ -416,7 +419,8 @@ pub(super) async fn run_conversation<
         info!("[round] 所有后端工具执行完毕，round += 1，继续循环");
 
         for call in &ui_calls {
-            if state.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+            if state.is_cancelled_effective() {
+                state.mark_cancelled();
                 break;
             }
             match handle_ui_tool_call(state, call, &ui_strategy, rx, queue, &last_stream_error)

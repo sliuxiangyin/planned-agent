@@ -1,7 +1,6 @@
 //! 工具调用处理：UI 工具、后端工具执行。
 
 use std::collections::VecDeque;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -123,12 +122,26 @@ pub(super) async fn execute_backend_tool_call<
 
     let outcome = if bridge.needs_stream(&call.function.name) {
         let (stream, handle) = bridge.create_stream(&call.function.name, &call.id);
-        let result = state
-            .tool_registry
-            .call_tool_streamed(&call.function.name, args, &call.id, stream)
-            .await;
+        // 阻塞等待子 agent/流式工具期间也要能感知本层取消（含上游父级传导），
+        // 否则父 driver 会被正在运行的子 agent 永久阻塞，点击"终止"无响应。
+        let outcome_fut =
+            state
+                .tool_registry
+                .call_tool_streamed(&call.function.name, args, &call.id, stream);
+        tokio::pin!(outcome_fut);
+        let outcome = tokio::select! {
+            r = &mut outcome_fut => r,
+            _ = state.cancel_signal() => {
+                info!(
+                    "[round] 等待子 agent/流式工具 {} (id={}) 期间被取消，提前返回",
+                    call.function.name, call.id
+                );
+                let _ = handle.abort();
+                return Ok(BackendToolResult::Cancelled);
+            }
+        };
         let _ = handle.await;
-        result
+        outcome
     } else {
         state
             .tool_registry
@@ -139,7 +152,8 @@ pub(super) async fn execute_backend_tool_call<
     let (is_error, content) = match &outcome {
         Ok(o) => (o.result.is_error, o.result.content.clone()),
         Err(e) => {
-            if state.cancelled.load(Ordering::SeqCst) {
+            if state.is_cancelled_effective() {
+                state.mark_cancelled();
                 return Ok(BackendToolResult::Cancelled);
             }
             warn!("Tool '{}' failed: {}", call.function.name, e);

@@ -103,6 +103,10 @@ impl SubAgentSessionRunner for SubAgentRunner {
             info!("[子agent] ChatService::new 失败: {}", e);
             e
         })?;
+        // 挂接上游（父级）取消信号：父服务被取消时，本子 agent 级联取消。
+        if let Some(upstream) = stream.upstream_cancel() {
+            service.attach_upstream(upstream);
+        }
         service.start_driver()?;
 
         // 发送任务给子 agent 的 ChatService

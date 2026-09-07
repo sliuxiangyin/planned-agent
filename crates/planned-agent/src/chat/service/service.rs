@@ -18,7 +18,7 @@ use planned_agent_ai_manager::AiManager;
 use planned_agent_core::ai::types::{Message, MessageContent, MessageRole};
 use planned_agent_core::prompt::PromptManager;
 use planned_agent_tool_manager::ToolRegistry;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::chat::state::Command;
 use super::config::ChatConfig;
@@ -70,6 +70,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
     ) -> Self {
         let store: Arc<dyn ChatHistoryStore> = Arc::new(InMemoryStore);
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
         let state = std::sync::Arc::new(State {
             ai_client,
             tool_registry: tool_registry.clone(),
@@ -82,6 +83,8 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
             driver_started: AtomicBool::new(false),
             run_state: std::sync::Mutex::new(crate::chat::state::RunState::Idle),
             cancelled: Arc::new(AtomicBool::new(false)),
+            cancel_tx,
+            upstream_cancel: std::sync::Mutex::new(None),
         });
         Self { state }
     }
@@ -95,6 +98,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         store: Arc<dyn ChatHistoryStore>,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
         let state = std::sync::Arc::new(State {
             ai_client,
             tool_registry: tool_registry.clone(),
@@ -107,6 +111,8 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
             driver_started: AtomicBool::new(false),
             run_state: std::sync::Mutex::new(crate::chat::state::RunState::Idle),
             cancelled: Arc::new(AtomicBool::new(false)),
+            cancel_tx,
+            upstream_cancel: std::sync::Mutex::new(None),
         });
         Self { state }
     }
@@ -207,7 +213,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
     // ── 控制与查询 ──
 
     pub fn stop(&self) {
-        self.state.cancelled.store(true, Ordering::SeqCst);
+        self.state.mark_cancelled();
         let count = self.state.tool_registry.clear_sub_agent_sessions();
         if count > 0 {
             tracing::info!(
@@ -215,6 +221,16 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
                 count
             );
         }
+    }
+
+    /// 给本服务挂接上游父级的取消信号（由 runner 创建子 agent 后调用）。
+    ///
+    /// 之后父服务被取消时，本子 agent 的有效取消也会随之触发（逐层级联）。
+    pub(crate) fn attach_upstream(
+        &self,
+        rx: tokio::sync::watch::Receiver<bool>,
+    ) {
+        self.state.attach_upstream(rx);
     }
 
     pub fn is_cancelled(&self) -> bool {
