@@ -82,7 +82,9 @@ pub fn AgentView(data: AgentViewData) -> Element {
             }
 
             // ── 内容（始终展示） ──
-            div { class: Styles::agent_view__body,
+            // data-agent-streaming 标记：让 ChatPanel 的滚动 effect 能在流式期间
+            // 把本卡片内部滚动容器自动滚到底（随最新输出跟随）。
+            div { class: Styles::agent_view__body, "data-agent-streaming": "{data.is_streaming}",
                 if body_text.is_empty() {
                     if data.is_streaming {
                         span { class: Styles::agent_view__streaming, "" }

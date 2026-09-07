@@ -102,15 +102,24 @@ pub fn handle_event(mut chat: ChatSignals, ev: ServiceChatEvent) {
             content,
         }) => {
             tracing::info!(target: "event", event = "ToolExecuted", id = %id, name = %name, is_error, "ToolExecuted");
-            chat.tool_call_executed(&id, &name, is_error, &content);
-            // 子 agent 完成：更新 AgentView phase
-            if chat.agent_views.read().contains_key(&id) {
-                let phase = if is_error {
-                    super::types::ToolCallPhase::Error
-                } else {
-                    super::types::ToolCallPhase::Completed
-                };
-                chat.finish_agent_view(&id, phase);
+            if name == "request_user_action" {
+                // request_user_action 一律文本化（与回显 build_bubbles 的 ui_action_ids 分支一致）：
+                // 中断/取消时 content 是取消原因，追加到该 request_user_action 回合气泡，不建 tool_view。
+                let text = content.as_str().map(str::trim).unwrap_or("");
+                if !text.is_empty() {
+                    chat.append_to_last_assistant(&format!("\n\n---\n\n**{}**\n\n", text));
+                }
+            } else {
+                chat.tool_call_executed(&id, &name, is_error, &content);
+                // 子 agent 完成：更新 AgentView phase
+                if chat.agent_views.read().contains_key(&id) {
+                    let phase = if is_error {
+                        super::types::ToolCallPhase::Error
+                    } else {
+                        super::types::ToolCallPhase::Completed
+                    };
+                    chat.finish_agent_view(&id, phase);
+                }
             }
         }
         ServiceChatEvent::Chat(ChatEvent::RoundEnd { .. }) => {
@@ -131,7 +140,10 @@ pub fn handle_event(mut chat: ChatSignals, ev: ServiceChatEvent) {
                 run_id: session_id,
             });
         }
-        ServiceChatEvent::Chat(ChatEvent::SubChat { tool_call_id, event }) => {
+        ServiceChatEvent::Chat(ChatEvent::SubChat {
+            tool_call_id,
+            event,
+        }) => {
             // 子 agent 流式事件：攒入对应 AgentViewData
             match *event {
                 ChatEvent::TextDelta(ref text) => {
@@ -183,14 +195,15 @@ pub fn handle_user_action(
     // 子 agent 场景：用户选择追加到 AgentViewData，而非父 agent 气泡
     if let Some(run_id) = pending.run_id.clone() {
         if chat.agent_views.read().contains_key(&run_id) {
-            chat.push_agent_event(&run_id, AgentEvent::TextDelta(
-                format!("\n\n---\n\n**{}**\n\n", choice)
-            ));
+            chat.push_agent_event(
+                &run_id,
+                AgentEvent::TextDelta(format!("\n\n---\n\n**{}**\n\n", choice)),
+            );
         } else {
             // fallback：agent_views 里找不到（历史加载后），写到父 agent 气泡
             chat.append_to_last_assistant(&format!("\n\n---\n\n**{}**\n\n", choice));
         }
-        chat.push_assistant_placeholder();
+        // chat.push_assistant_placeholder();
         chat.clear_pending();
         chat.pending_tool_call_id.set(None);
         let input = serde_json::json!({ "choice": choice, "action_id": "submit" });

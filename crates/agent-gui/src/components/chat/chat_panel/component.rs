@@ -109,8 +109,11 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
         let _len = chat.bubbles.read().len();
         let _active = chat.active.read().len();
         let _has_pending = chat.pending_ui.read().is_some();
+        // 订阅子 agent 流式数据：每次 agent 事件进来都要重跑，才能让
+        // agent_view 卡片内部滚动容器跟着最新输出自动滚到底。
+        let _av = chat.agent_views.read();
         let _ = document::eval(
-            "setTimeout(() => { const el = document.getElementById('chat-scroll'); if (el) el.scrollTop = el.scrollHeight; }, 100);"
+            "setTimeout(() => { const el = document.getElementById('chat-scroll'); if (el) el.scrollTop = el.scrollHeight; document.querySelectorAll('[data-agent-streaming=\"true\"]').forEach(el => el.scrollTop = el.scrollHeight); }, 100);"
         );
     });
 

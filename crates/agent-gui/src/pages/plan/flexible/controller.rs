@@ -18,15 +18,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::watch;
 
 use anyhow::anyhow;
 use dioxus::prelude::*;
 use planned_agent::chat::{ChatConfig, SubscriptionGuard};
-use planned_agent::ChatService;
 use planned_agent_core::prompt::PromptManager;
 use planned_agent_core::tool_registry::ToolCategory;
-use planned_agent_prompt_manager::FilePromptManager;
 
 use crate::components::chat::chat_flow::{
     ensure_subscription, handle_user_action, Bubble, ChatSignals, PendingUI,
@@ -37,104 +34,11 @@ use crate::context::{
 };
 use crate::services::plans_flexible_service::PlansFlexibleService;
 
-use super::chat_flexible_message_storage::ChatMessageStore;
+use super::chat_service_factory::{ChatServiceFactory, ChatSvc};
 use super::flexible_state_tool::{flexible_state_tool, FlexibleStateExecutor};
+use super::session_slot::SessionSlot;
 use super::step2_callback::create_step2_callback;
 use super::step5_callback::create_step5_callback;
-
-/// 便捷类型：灵活模式所用 ChatService。
-pub(crate) type ChatSvc = ChatService<FilePromptManager>;
-
-/// ChatService 创建工厂：固化"造一个绑某 session store 的 ChatService"所需的依赖，
-/// 供初始化与 `switch_session` 复用。依赖均为 Arc，可 Clone、可反复调用。
-#[derive(Clone)]
-pub(crate) struct ChatServiceFactory {
-    storage: Arc<StorageContext>,
-    plan_id: String,
-    ai: Arc<AiContext>,
-    tools: Arc<ToolsContext>,
-    prompt: Arc<PromptContext>,
-}
-
-impl ChatServiceFactory {
-    fn new(
-        storage: Arc<StorageContext>,
-        plan_id: String,
-        ai: Arc<AiContext>,
-        tools: Arc<ToolsContext>,
-        prompt: Arc<PromptContext>,
-    ) -> Self {
-        Self {
-            storage,
-            plan_id,
-            ai,
-            tools,
-            prompt,
-        }
-    }
-
-    /// 为指定 session 造一个绑定该 session store 的 ChatService（未 start_driver）。
-    pub(crate) fn build_for_session(&self, session_id: &str) -> anyhow::Result<ChatSvc> {
-        let repo = self.storage.chat_message_repo();
-        let store = ChatMessageStore::new(self.plan_id.clone(), session_id.to_string(), repo);
-        Ok(ChatService::with_store(
-            self.ai.manager.default()?,
-            self.tools.registry.clone(),
-            self.prompt.manager.clone(),
-            ChatConfig {
-                system_prompt_template: Some("flexible/flexible_global_system".to_string()),
-                // 协调器仅做状态机调度，不执行业务：工具层只暴露 5 个 step 子 agent +
-                // flexible_state + request_user_action，杜绝误调业务 / 其它子 agent 工具。
-                //
-                // ⚠️ 以下两项是「轮次触顶」复现测试的临时改动，测试完请还原：
-                //   1) "builtin_read_documentation"：临时放开的一个简单无副作用工具，
-                //      配合 chat/max_rounds_demo 模板让协调器持续调用工具直到触顶。
-                //      正常使用应删除该条目。
-                //   2) max_tool_rounds: 2：把轮次上限压到很小，2 轮即可触顶。
-                //      正常协调器要调度 step1~step5 需要多轮，默认应为 10（删除这行即回默认）。
-                allowed_tools: Some(vec![
-                    // "flexible_step1".to_string(),
-                    // "flexible_step2".to_string(),
-                    // "flexible_step3".to_string(),
-                    // "flexible_step4".to_string(),
-                    // "flexible_step5".to_string(),
-                    // "flexible_state".to_string(),
-                    "request_user_action".to_string(),
-                    "builtin_read_documentation".to_string(),
-                ]),
-                max_tool_rounds: 2,
-                ..Default::default()
-            },
-            Arc::new(store),
-        ))
-    }
-}
-
-/// 共享「当前会话 id」槽（tokio watch）。
-///
-/// 承载的是「最新值」而非事件流：消费方（如 step5 callback）随时 `receiver().borrow()`
-/// 读当前 session；controller 建/切会话时 `set()`。相比手写 `Arc<RwLock>` 语义更明确，
-/// 且保留常驻 `_anchor` receiver，保证 `send` 永不因无订阅者而被丢弃（持久语义与旧实现一致）。
-struct SessionSlot {
-    tx: watch::Sender<Option<String>>,
-    #[allow(dead_code)] // 常驻保活：保证 send 总被记录；不做读取
-    _anchor: watch::Receiver<Option<String>>,
-}
-
-impl SessionSlot {
-    fn new() -> Self {
-        let (tx, rx) = watch::channel(None);
-        Self { tx, _anchor: rx }
-    }
-    /// 记录当前会话（此后 subscribe 的消费方可立即读到该最新值）。
-    fn set(&self, session_id: String) {
-        let _ = self.tx.send(Some(session_id));
-    }
-    /// 为单个消费方派生 receiver（自带当前值快照）。
-    fn receiver(&self) -> watch::Receiver<Option<String>> {
-        self.tx.subscribe()
-    }
-}
 
 /// 灵活模式控制器：持有全部状态 signal 与 ChatService，并提供事件处理方法。
 #[derive(Clone, Copy)]
@@ -449,6 +353,33 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
             );
         }
 
+        // 测试用：子 agent 连续多次 request_user_action 交互的专用子 agent（可选注册，供 GUI 测试）。
+        // 由引导模板 chat/sub_agent_rua_driver.toml 驱动的协调器去调用它。
+        register_sub_agent(
+            &ai_ctx,
+            &tools_ctx,
+            &prompt_ctx,
+            "flexible_step_rua_demo",
+            "request_user_action 子 agent 交互测试：被调用后在子 agent 内连续向用户发起多次 request_user_action（用于在 GUI 验证子 agent 内交互卡的渲染/回传/取消/回显）。",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "user_message": {
+                        "type": "string",
+                        "description": "来自协调器的测试指令（一般无需传业务内容）"
+                    }
+                },
+                "required": []
+            }),
+            ChatConfig {
+                system_prompt_template: Some("chat/sub_agent_rua_demo".into()),
+                allowed_tools: Some(vec!["request_user_action".to_string()]),
+                ..Default::default()
+            },
+            1, // depth
+            2, // max_depth
+            None,
+        );
         register_sub_agent(
             &ai_ctx,
             &tools_ctx,
