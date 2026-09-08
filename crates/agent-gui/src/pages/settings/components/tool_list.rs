@@ -9,34 +9,22 @@ use super::super::types::{CategoryFilter, ToolSourceFilter};
 /// 工具列表组件
 #[component]
 pub fn ToolList(
-    tools_ctx: Option<std::sync::Arc<ToolsContext>>,
+    tools_ctx: std::sync::Arc<ToolsContext>,
 ) -> Element {
     let mut source_filter = use_signal(|| ToolSourceFilter::All);
     let mut category_filter = use_signal(|| CategoryFilter::All);
     let mut search_query = use_signal(String::new);
 
-    // 克隆出来供多个闭包使用
-    let tools_ctx_for_memo = tools_ctx.clone();
     let tools_ctx_for_stats = tools_ctx.clone();
+    let tools_ctx_for_memo = tools_ctx.clone();
+    let tools_ctx_for_cards = tools_ctx.clone();
 
     // 统计信息
-    let stats = use_signal(move || {
-        match &tools_ctx_for_stats {
-            Some(c) => c.registry.get_stats(),
-            None => planned_agent_tool_manager::types::ToolRegistryStats {
-                total: 0, enabled: 0, disabled: 0,
-                mcp_count: 0, custom_count: 0, builtin_count: 0,
-            },
-        }
-    });
+    let stats = use_signal(move || tools_ctx_for_stats.registry.get_stats());
 
     // 获取筛选后的工具列表
     let display_tools = use_memo(move || {
-        let ctx = match &tools_ctx_for_memo {
-            Some(c) => c,
-            None => return Vec::new(),
-        };
-
+        let ctx = tools_ctx_for_memo.clone();
         let all_tools = ctx.registry.get_all_tools();
 
         all_tools
@@ -102,8 +90,6 @@ pub fn ToolList(
             })
             .collect::<Vec<_>>()
     });
-
-    let tools_ctx_for_cards = tools_ctx.clone();
 
     rsx! {
         div { class: "settings-tool-list",
@@ -202,9 +188,7 @@ pub fn ToolList(
                                                         ),
                                                         title: if enabled { "点击禁用" } else { "点击启用" },
                                                         onclick: move |_| {
-                                                            if let Some(ref c) = ctx {
-                                                                let _ = c.registry.set_tool_enabled(&name, !enabled);
-                                                            }
+                                                            let _ = ctx.registry.set_tool_enabled(&name, !enabled);
                                                         },
                                                         if enabled { "✓ 已启用" } else { "✗ 已禁用" }
                                                     }

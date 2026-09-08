@@ -7,18 +7,28 @@ mod services;
 mod storage;
 
 use config::GuiConfig;
-use context::{
-    AiContext, InitStatus, KvContext, McpChangeNotifier, McpContext, PromptContext, RagContext,
-    StorageContext, ToolsContext,
-};
+use context::{BootPhase, McpChangeNotifier, ReadyServices, bootstrap};
 use dioxus::{desktop::Config, prelude::*};
 use pages::home::{HomePage, PageRoute};
 use pages::plan::PlanPage;
 use pages::settings::SettingsPage;
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
+
+/// `ReadyServices` 的组件 prop 包装：Dioxus 组件 prop 需 `PartialEq`，
+/// 而 `Arc<ReadyServices>` 本身不实现，故用恒等比较的轻量包装。
+struct BootServices(Arc<ReadyServices>);
+impl Clone for BootServices {
+    fn clone(&self) -> Self {
+        BootServices(self.0.clone())
+    }
+}
+impl PartialEq for BootServices {
+    fn eq(&self, _other: &Self) -> bool {
+        true // 就绪后不重建，恒视为等价
+    }
+}
 
 /// 全局配置实例（main 中初始化一次，app 中通过 Context 消费）
 static APP_CONFIG: OnceLock<GuiConfig> = OnceLock::new();
@@ -29,6 +39,8 @@ static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 
 const RESET_CSS: Asset = asset!("/assets/reset.css");
 const THEME_CSS: Asset = asset!("/assets/dx-components-theme.css");
+
+const BOOT_CSS: Asset = asset!("/assets/boot.css");
 
 fn main() {
     init_logging();
@@ -43,9 +55,6 @@ fn main() {
 }
 
 /// 初始化日志：仅写入文件（`logs/gui.log.YYYY-MM-DD`，按天轮转），不输出到 CLI/stdout。
-///
-/// 文件路径与命名规范与 CLI（`planned-agent`）保持一致：目录 `logs/`，
-/// 文件名 `gui.log`（CLI 用 `agent.log`，二者并存不冲突）。
 fn init_logging() {
     let log_dir = "logs";
     let _ = std::fs::create_dir_all(log_dir);
@@ -53,7 +62,6 @@ fn init_logging() {
     let file_appender = tracing_appender::rolling::daily(log_dir, "gui.log");
     let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
 
-    // 默认 info 级别；强制屏蔽 scraper / html5ever 等 DEBUG 刷屏
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("debug"))
         .add_directive("html5ever=warn".parse().expect("valid directive"))
@@ -64,161 +72,185 @@ fn init_logging() {
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_writer(file_writer)
-        .with_ansi(false) // 写文件时不需要 ANSI 颜色
+        .with_ansi(false)
         .init();
 
-    // guard 必须常驻（详见 static LOG_GUARD 注释）
     let _ = LOG_GUARD.set(guard);
 }
 
 fn app() -> Element {
-    // ── 全局配置 ──
+    // ── 全局配置（与启动无关，顶层注入） ──
     let config = use_signal(|| APP_CONFIG.get().cloned().unwrap_or_default());
     use_context_provider(|| config);
 
-    // ── 6 个独立 Resource（互不依赖，并行 init） ────────────────────────
-
-    // 1. AI 管理器（同步 init）
-    let ai: Resource<Option<Arc<AiContext>>> = use_resource(move || {
-        let cfg = config.read().ai_providers.clone();
-        async move {
-            match AiContext::init(&cfg) {
-                Ok(ctx) => Some(Arc::new(ctx)),
-                Err(e) => {
-                    tracing::warn!("AI 不可用: {}", e);
-                    None
-                }
-            }
-        }
-    });
-    use_context_provider(|| ai);
-
-    // 2. Prompt 管理器（异步 init：加载 prompts/ 目录）
-    let prompt: Resource<Option<Arc<PromptContext>>> = use_resource(move || {
-        let cfg = config.read().prompt_manager.clone();
-        async move {
-            match PromptContext::init(&cfg).await {
-                Ok(ctx) => Some(Arc::new(ctx)),
-                Err(e) => {
-                    tracing::warn!("Prompt 不可用: {}", e);
-                    None
-                }
-            }
-        }
-    });
-    use_context_provider(|| prompt);
-
-    // 3. KV 缓存（异步 init：spawn_blocking 内打开 sled）
-    //    必须在 MCP 之前声明：MCP 的 use_resource 闭包会捕获 `kv`。
-    let kv: Resource<Option<Arc<KvContext>>> = use_resource(move || {
-        let cache_cfg = config.read().cache.clone();
-        async move {
-            match KvContext::init(&cache_cfg).await {
-                Ok(ctx) => Some(Arc::new(ctx)),
-                Err(e) => {
-                    tracing::warn!("KV 缓存不可用，应用将无法使用本地 KV 缓存: {}", e);
-                    None
-                }
-            }
-        }
-    });
-    use_context_provider(|| kv);
-
-    // 3.5 MCP 变更通知器（与 McpContext 解耦的轻量 Dioxus context）
-    //     任何对 MCP 数据的写入后都 bump()，让 list_page 等 UI 重新加载视图
+    // ── MCP 变更通知器（轻量，与 McpContext 解耦；写入后 bump 让 UI 刷新） ──
     let mcp_change_signal = use_signal(|| 0u64);
     use_context_provider(|| McpChangeNotifier::from_signal(mcp_change_signal));
-
-    // 4. MCP 管理器（异步 init：按场景选择 KV / 文件存储，10s 超时）
-    let mcp: Resource<Option<Arc<McpContext>>> = use_resource(move || async move {
-        // 等 kv Resource 就绪后再 init（mcp 与 kv 并发，mcp 可能先跑）。
-        // 最多等 500ms，每 50ms 检查一次；超时则降级到文件存储。
-        let kv_arc = wait_for_kv_ready(&kv, Duration::from_millis(500)).await;
-        match McpContext::init(kv_arc).await {
-            Ok(ctx) => Some(Arc::new(ctx)),
-            Err(e) => {
-                tracing::warn!("MCP 不可用: {}", e);
-                None
-            }
-        }
-    });
-    use_context_provider(|| mcp);
-
-    // 5. Tool Registry（同步 init：仅注册内置 provider；MCP 后续延后注入）
-    let tools: Resource<Option<Arc<ToolsContext>>> = use_resource(move || {
-        let docs_dir = config.read().prompt_manager.prompt_dir.join("docs");
-        async move {
-            match ToolsContext::init(docs_dir) {
-                Ok(ctx) => Some(Arc::new(ctx)),
-                Err(e) => {
-                    tracing::warn!("Tools 不可用: {}", e);
-                    None
-                }
-            }
-        }
-    });
-    use_context_provider(|| tools);
-
-    // 6. RAG（异步 init：既有逻辑）
-    let rag: Resource<Option<Arc<RagContext>>> = use_resource(move || {
-        let rag_cfg = config.read().rag.clone();
-        async move {
-            match RagContext::init(&rag_cfg).await {
-                Ok(ctx) => Some(Arc::new(ctx)),
-                Err(e) => {
-                    tracing::warn!("RAG 不可用: {}", e);
-                    None
-                }
-            }
-        }
-    });
-    use_context_provider(|| rag);
-
-    // 7. Storage（异步 init：打开 SQLite + 跑 migration）
-    let storage: Resource<Option<Arc<StorageContext>>> = use_resource(move || {
-        let storage_cfg = config.read().storage.clone();
-        async move {
-            match StorageContext::init(&storage_cfg).await {
-                Ok(ctx) => Some(Arc::new(ctx)),
-                Err(e) => {
-                    tracing::warn!("Storage 不可用，应用将以纯 mock 数据运行: {}", e);
-                    None
-                }
-            }
-        }
-    });
-    use_context_provider(|| storage);
-
-    // 8. KV 缓存（异步 init：spawn_blocking 内打开 sled）—— 已上移到第 3 位供 mcp 引用
-
-    // ── InitStatus 快照（响应式：随 7 个 Resource 变化自动重算） ──
-    let init_status = use_memo(move || {
-        InitStatus::from_resources(&ai, &prompt, &mcp, &tools, &rag, &storage, &kv)
-    });
-    use_context_provider(|| init_status);
-
-    // ── 延后注入 MCP → Tools ──
-    // use_effect 在 tools / mcp 任一变化时触发：
-    // McpContext::init 已把缓存工具预载进 McpManager（懒连接路由表）；
-    // 这里 set_mcp_manager 从 McpManager 拉取 MCP 工具并统一注册进 ToolRegistry，
-    // 是 MCP 工具进入 ToolRegistry 的唯一入口（避免重复注册）。
-    use_effect(move || {
-        let tools_arc = tools.read().as_ref().and_then(|x| x.clone());
-        let mcp_arc = mcp.read().as_ref().and_then(|x| x.clone());
-        if let (Some(t), Some(m)) = (tools_arc, mcp_arc) {
-            t.set_mcp_manager(m.manager.clone());
-        }
-    });
 
     rsx! {
         document::Stylesheet { href: RESET_CSS }
         document::Stylesheet { href: THEME_CSS }
-        AppRouter {}
+        BootGate {}
     }
 }
 
+/// 启动门组件：渲染 Splash / 错误页 / 就绪壳，决定何时进入主界面。
+#[component]
+fn BootGate() -> Element {
+    // 状态机：Loading(已完成模块名) → Ready / Failed
+    let mut phase = use_signal_sync(|| BootPhase::Loading(Vec::new()));
+    // 触发重试的计数器：递增后重新跑 bootstrap
+    let mut attempt = use_signal_sync(|| 0i32);
+    // 幂等守卫：本次 attempt 是否已启动过 bootstrap
+    let mut boot_started_for = use_signal_sync(|| -1i32);
+
+    use_effect(move || {
+        let n = *attempt.read();
+        if *boot_started_for.read() == n {
+            return; // 本次 attempt 已启动，避免重复触发
+        }
+        boot_started_for.set(n);
+
+        let cfg = APP_CONFIG.get().cloned().unwrap_or_default();
+        // Signal 是 Copy：复制进异步任务，独立推进 Loading 进度
+        let mut phase_p = phase;
+        let progress_cb = {
+            let phase_cb = phase;
+            Arc::new(move |name: &'static str| {
+                let mut phase_cb = phase_cb;
+                let mut done = if let BootPhase::Loading(d) = phase_cb.read().clone() {
+                    d
+                } else {
+                    return;
+                };
+                if !done.contains(&name) {
+                    done.push(name);
+                    phase_cb.set(BootPhase::Loading(done));
+                }
+            }) as Arc<dyn Fn(&'static str) + Send + Sync>
+        };
+        spawn(async move {
+            match bootstrap(&cfg, progress_cb).await {
+                Ok(services) => {
+                    phase_p.set(BootPhase::Ready(Arc::new(services)));
+                }
+                Err(errors) => {
+                    tracing::error!("启动失败: {:?}", errors);
+                    phase_p.set(BootPhase::Failed(errors));
+                }
+            }
+        });
+    });
+
+    let boot_phase = phase.read().clone();
+    match boot_phase {
+        BootPhase::Loading(done) => rsx! {
+            document::Stylesheet { href: BOOT_CSS }
+            BootSplash { done }
+        },
+        BootPhase::Failed(errors) => rsx! {
+            document::Stylesheet { href: BOOT_CSS }
+            BootError {
+                errors,
+                on_retry: move |_| {
+                    phase.set(BootPhase::Loading(Vec::new()));
+                    attempt.set(attempt() + 1);
+                },
+            }
+        },
+        BootPhase::Ready(services) => rsx! {
+            ReadyShell { services: BootServices(services) }
+        },
+    }
+}
+
+/// 启动加载动画页
+#[component]
+fn BootSplash(done: Vec<&'static str>) -> Element {
+    let labels = [
+        ("ai", "AI 管理器"),
+        ("prompt", "Prompt 管理器"),
+        ("kv", "KV 缓存"),
+        ("mcp", "MCP 管理器"),
+        ("tools", "工具注册中心"),
+        ("rag", "RAG（可选）"),
+        ("storage", "Storage 数据库"),
+    ];
+    rsx! {
+        div { class: "boot-splash",
+            div { class: "boot-splash__card",
+                div { class: "boot-splash__spinner" }
+                h1 { class: "boot-splash__title", "正在初始化系统组件…" }
+                div { class: "boot-splash__subtitle", "正在加载服务模块…" }
+                ul { class: "boot-splash__list",
+                    for (key, label) in labels {
+                        li { class: if done.contains(&key) { "boot-splash__item done" } else { "" },
+                            if done.contains(&key) {
+                                span { class: "boot-splash__check", "✔" }
+                            } else {
+                                span { class: "boot-splash__dot", "·" }
+                            }
+                            span { class: "boot-splash__label", "{label}" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 启动失败错误页
+#[component]
+fn BootError(errors: Vec<(String, String)>, on_retry: EventHandler) -> Element {
+    rsx! {
+        div { class: "boot-error",
+            div { class: "boot-error__card",
+                div { class: "boot-error__icon", "⚠" }
+                h1 { class: "boot-error__title", "启动失败" }
+                p { class: "boot-error__desc", "以下组件初始化失败，无法进入系统： " }
+                ul {
+                    for (module, err) in &errors {
+                        li { class: "boot-error__item",
+                            strong { "{module}" }
+                            span { "：{err}" }
+                        }
+                    }
+                }
+                button {
+                    class: "boot-error__retry",
+                    onclick: move |_| on_retry.call(()),
+                    "重新加载"
+                }
+            }
+        }
+    }
+}
+
+/// 就绪后唯一渲染的壳：同步注入全部 Arc context，再挂路由。
+///
+/// **注意**：`use_context_provider` 是 hook，调用次数须在一次渲染内稳定，
+/// 因此绝不能放进条件分支——本组件仅在 `Ready` 时渲染一次。
+#[component]
+fn ReadyShell(services: BootServices) -> Element {
+    let services = services.0;
+    let ai = services.ai.clone();
+    let prompt = services.prompt.clone();
+    let kv = services.kv.clone();
+    let mcp = services.mcp.clone();
+    let tools = services.tools.clone();
+    let storage = services.storage.clone();
+
+    use_context_provider(move || ai);
+    use_context_provider(move || prompt);
+    use_context_provider(move || kv);
+    use_context_provider(move || mcp);
+    use_context_provider(move || tools);
+    use_context_provider(move || storage);
+
+    rsx! { AppRouter {} }
+}
+
 /// 顶层路由组件：根据 `PageRoute` 切换 HomePage / PlanPage / SettingsPage。
-/// MCP 服务作为 `SettingsPage` 内部的嵌套视图（不再走顶级路由）。
 #[component]
 fn AppRouter() -> Element {
     let mut page = use_signal(|| PageRoute::Home);
@@ -243,7 +275,6 @@ fn AppRouter() -> Element {
                         }
                     },
                     None => rsx! {
-                        // 不应出现：新建计划现在通过弹窗创建，不再走 plan_id=None 路径
                         div { class: "plan-page",
                             button {
                                 onclick: move |_| navigate(PageRoute::Home),
@@ -259,28 +290,6 @@ fn AppRouter() -> Element {
                     on_back: move |_| navigate(PageRoute::Home),
                 }
             },
-
         }
-    }
-}
-
-/// 轮询等待 KV Resource 就绪（最多等 `max_wait`），返回 `Arc<KvContext>` 或 `None`
-///
-/// 用途：mcp 与 kv 两个 Resource 并发 init 时，mcp 可能先跑。
-/// 这里在调用 [`McpContext::init`] 前先等一会 kv，超时则降级到文件存储。
-async fn wait_for_kv_ready(
-    kv: &Resource<Option<Arc<KvContext>>>,
-    max_wait: Duration,
-) -> Option<Arc<KvContext>> {
-    let start = Instant::now();
-    let interval = Duration::from_millis(50);
-    loop {
-        if let Some(Some(arc)) = kv.read().as_ref() {
-            return Some(arc.clone());
-        }
-        if start.elapsed() >= max_wait {
-            return None;
-        }
-        tokio::time::sleep(interval).await;
     }
 }

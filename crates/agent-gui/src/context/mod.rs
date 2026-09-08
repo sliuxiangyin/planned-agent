@@ -10,7 +10,7 @@ use std::sync::Arc;
 use dioxus::prelude::*;
 
 pub mod ai;
-pub mod init_status;
+pub mod boot;
 pub mod kv;
 pub mod mcp;
 pub mod prompt;
@@ -20,25 +20,20 @@ pub mod sub_agent;
 pub mod tools;
 
 pub use ai::AiContext;
-pub use init_status::{InitStatus, ModuleState, ModuleStatus};
+pub use boot::{BootPhase, ReadyServices, bootstrap};
 pub use kv::KvContext;
 pub use mcp::{McpChangeNotifier, McpContext};
 pub use prompt::PromptContext;
 pub use rag::RagContext;
-pub use storage::{StorageContext, storage_repo};
+pub use storage::StorageContext;
 pub use sub_agent::register_sub_agent;
 pub use tools::ToolsContext;
 
-/// 从 Dioxus Context 取出已初始化的 `Resource<Option<Arc<T>>>` 并解包。
+/// 从 Dioxus Context 取出已注入的 `Arc<T>`（就绪后恒存在）。
 ///
-/// App 启动时通过 `use_resource` + `use_context_provider` 初始化，
-/// 路由到子组件时必定 Ready。若调用过早（尚未初始化）则 panic。
+/// 启动门 [`bootstrap`] 全部成功后才渲染 `ReadyShell`，由它注入纯 `Arc<T>`；
+/// 因此在子组件中调用必然能取到。若仍取不到（层级/时机错误）则 panic，
+/// 帮助尽早暴露装配 bug。
 pub fn require_resource<T: 'static>() -> Arc<T> {
-    let resource = use_context::<Resource<Option<Arc<T>>>>();
-    let guard = resource.read();
-    guard
-        .as_ref()
-        .and_then(|x| x.as_ref())
-        .cloned()
-        .expect("Context Resource 尚未初始化——请确保 App 组件已注入该 Resource")
+    use_context::<Arc<T>>()
 }

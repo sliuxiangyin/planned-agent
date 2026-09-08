@@ -26,10 +26,9 @@ use dioxus::prelude::*;
 use planned_agent_mcp_rmcp::McpManager;
 use planned_agent_mcp_rmcp::config::McpServerEntry;
 use planned_agent_mcp_rmcp::storage::ServerStatus;
-use std::sync::Arc;
 
 use crate::components::page_header::PageHeader;
-use crate::context::{McpChangeNotifier, McpContext, ToolsContext};
+use crate::context::{McpChangeNotifier, McpContext, require_resource};
 
 /// 合法分类列表（字符串→ToolCategory 映射统一在 tool-manager 内，见其 `map_categories`）
 const VALID_CATEGORIES: &[&str] = &[
@@ -65,24 +64,9 @@ pub fn McpEditorPage(
     on_back: EventHandler<()>,
     on_saved: EventHandler<()>,
 ) -> Element {
-    // 从 McpContext.manager 取单门面（同一实例 / 同一后端）
-    let config_mgr: Option<Arc<McpManager>> = use_context::<Resource<Option<std::sync::Arc<McpContext>>>>()
-        .read()
-        .as_ref()
-        .and_then(|x| x.as_ref())
-        .map(|c| c.manager.clone());
-
-    // 完整 McpContext Arc（用于保存后自动刷新工具）
-    let mcp_ctx_arc: Option<Arc<McpContext>> = use_context::<Resource<Option<std::sync::Arc<McpContext>>>>()
-        .read()
-        .as_ref()
-        .and_then(|x| x.clone());
-
-    // ToolsContext（refresh_tools 需要）
-    let tools_ctx_arc: Option<Arc<ToolsContext>> = use_context::<Resource<Option<std::sync::Arc<ToolsContext>>>>()
-        .read()
-        .as_ref()
-        .and_then(|x| x.clone());
+    // 从 McpContext.manager 取单门面（同一实例 / 同一后端；启动门保证就绪）
+    let mcp_ctx_arc = require_resource::<McpContext>();
+    let config_mgr = mcp_ctx_arc.manager.clone();
 
     // MCP 变更通知器（让 list_page 监听）
     let notifier = use_context::<McpChangeNotifier>();
@@ -94,83 +78,42 @@ pub fn McpEditorPage(
     let mut form_name = use_signal({
         let editing_name = editing_name.clone();
         let cfg_mgr = config_mgr.clone();
-        move || {
-            cfg_mgr
-                .as_ref()
-                .map(|m| lookup_initial(&editing_name, m.as_ref(), String::new(), |s| s.name.clone()))
-                .unwrap_or_default()
-        }
+        move || lookup_initial(&editing_name, &cfg_mgr, String::new(), |s| s.name.clone())
     });
     let mut form_command = use_signal({
         let editing_name = editing_name.clone();
         let cfg_mgr = config_mgr.clone();
-        move || {
-            cfg_mgr
-                .as_ref()
-                .map(|m| lookup_initial(&editing_name, m.as_ref(), String::new(), |s| {
-                    s.server_command.clone()
-                }))
-                .unwrap_or_default()
-        }
+        move || lookup_initial(&editing_name, &cfg_mgr, String::new(), |s| s.server_command.clone())
     });
     let mut form_args = use_signal({
         let editing_name = editing_name.clone();
         let cfg_mgr = config_mgr.clone();
-        move || {
-            cfg_mgr
-                .as_ref()
-                .map(|m| lookup_initial(&editing_name, m.as_ref(), String::new(), |s| s.server_args.join(" ")))
-                .unwrap_or_default()
-        }
+        move || lookup_initial(&editing_name, &cfg_mgr, String::new(), |s| s.server_args.join(" "))
     });
     let mut form_timeout = use_signal({
         let editing_name = editing_name.clone();
         let cfg_mgr = config_mgr.clone();
-        move || {
-            cfg_mgr
-                .as_ref()
-                .map(|m| lookup_initial(&editing_name, m.as_ref(), 30u64, |s| s.timeout_secs.unwrap_or(30)))
-                .unwrap_or_default()
-        }
+        move || lookup_initial(&editing_name, &cfg_mgr, 30u64, |s| s.timeout_secs.unwrap_or(30))
     });
     let mut form_handshake_timeout = use_signal({
         let editing_name = editing_name.clone();
         let cfg_mgr = config_mgr.clone();
-        move || {
-            cfg_mgr
-                .as_ref()
-                .map(|m| {
-                    lookup_initial(&editing_name, m.as_ref(), 30u64, |s| {
-                        s.handshake_timeout_secs.unwrap_or(30)
-                    })
-                })
-                .unwrap_or_default()
-        }
+        move || lookup_initial(&editing_name, &cfg_mgr, 30u64, |s| s.handshake_timeout_secs.unwrap_or(30))
     });
     let mut form_max_retries = use_signal({
         let editing_name = editing_name.clone();
         let cfg_mgr = config_mgr.clone();
-        move || {
-            cfg_mgr
-                .as_ref()
-                .map(|m| lookup_initial(&editing_name, m.as_ref(), 3u32, |s| s.max_retries.unwrap_or(3)))
-                .unwrap_or_default()
-        }
+        move || lookup_initial(&editing_name, &cfg_mgr, 3u32, |s| s.max_retries.unwrap_or(3))
     });
     // ── 分类：多选 chip，直接用 Vec<String> 表达（替代之前的"逗号分隔字符串"） ──
     let mut form_categories = use_signal({
         let editing_name = editing_name.clone();
         let cfg_mgr = config_mgr.clone();
         move || {
-            cfg_mgr
-                .as_ref()
-                .map(|m| {
-                    // 读出存储的 Vec<String>（有些老 config 里没有分类字段，取空 Vec）
-                    lookup_initial(&editing_name, m.as_ref(), Vec::<String>::new(), |s| {
-                        s.categories.clone().unwrap_or_default()
-                    })
-                })
-                .unwrap_or_default()
+            // 读出存储的 Vec<String>（有些老 config 里没有分类字段，取空 Vec）
+            lookup_initial(&editing_name, &cfg_mgr, Vec::<String>::new(), |s| {
+                s.categories.clone().unwrap_or_default()
+            })
         }
     });
 
@@ -344,24 +287,13 @@ pub fn McpEditorPage(
             div { class: "settings-mcp-form__actions",
                 button {
                     class: "settings-mcp-form__btn settings-mcp-form__btn--save",
-                    disabled: !is_valid || config_mgr.is_none() || *is_saving.read(),
+                    disabled: !is_valid || *is_saving.read(),
                     onclick: {
                         let editing_name = editing_name.clone();
-                        let mcp_ctx_arc = mcp_ctx_arc.clone();
-                        let tools_ctx_arc = tools_ctx_arc.clone();
+                        let mcp = mcp_ctx_arc.clone();
                         let notifier = notifier;
                         move |_| {
-                            // 1. 前置条件
-                            let Some(mcp) = mcp_ctx_arc.clone() else {
-                                tracing::warn!("McpContext 未就绪，无法保存");
-                                return;
-                            };
-                            let Some(_tools) = tools_ctx_arc.clone() else {
-                                tracing::warn!("ToolsContext 未就绪，无法保存");
-                                return;
-                            };
-
-                            // 2. 前置校验（即便按钮已被禁用，也兜底防 race）
+                            // 前置校验（即便按钮已被禁用，也兜底防 race）
                             let name = form_name.read().trim().to_string();
                             let cmd = form_command.read().trim().to_string();
                             if name.is_empty() || cmd.is_empty() {

@@ -13,7 +13,7 @@ use crate::components::alert_dialog::{
 use crate::components::resizable_panel::ResizablePanel;
 use dioxus::prelude::*;
 
-use crate::context::{storage_repo, StorageContext};
+use crate::context::StorageContext;
 
 use super::left_panel::PlanLeftPanel;
 use super::flexible::FlexiblePage;
@@ -29,8 +29,8 @@ const RESIZABLE_CSS: Asset = asset!("/assets/resizable_panel.css");
 
 #[component]
 pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
-    // ── 全局 Context ──
-    let storage = use_context::<Resource<Option<Arc<StorageContext>>>>();
+    // ── 全局 Context：storage 由启动门保证就绪 ──
+    let storage: Arc<StorageContext> = use_context();
 
     // ── 会话状态管理中心：plan 级共享单例，注入到 context，供 flexible / 会话抽屉等订阅当前会话切换 ──
     use_provide_session_manager();
@@ -59,33 +59,31 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
 
     // ── 加载计划元数据 ──
     let pid = plan_id.clone();
+    let plan_repo_for_load = storage.plan_repo();
     use_effect(move || {
-        if let Some(plan_repo) = storage_repo(storage, |ctx| ctx.plan_repo()) {
-            let pid = pid.clone();
-            spawn(async move {
-                if let Some(info) = load_plan_data_shared(pid, plan_repo).await {
-                    plan.plan_info.set(Some(info.clone()));
-                    plan.set_mode(info.mode);
-                }
-            });
-        }
+        let pid = pid.clone();
+        let plan_repo = plan_repo_for_load.clone();
+        spawn(async move {
+            if let Some(info) = load_plan_data_shared(pid, plan_repo).await {
+                plan.plan_info.set(Some(info.clone()));
+                plan.set_mode(info.mode);
+            }
+        });
     });
 
     // ── 获取 plan_repo 用于删除 ──
-    let plan_repo = storage_repo(storage, |ctx| ctx.plan_repo());
+    let plan_repo = storage.plan_repo();
 
     // ── 清除消息记录回调：删除 chat_messages ──
     let on_confirm_clear = {
         let pid = plan_id.clone();
-        let chat_msg_repo = storage_repo(storage, |ctx| ctx.chat_message_repo());
+        let chat_msg_repo = storage.chat_message_repo();
         move |_: ()| {
             let pid = pid.clone();
             let repo = chat_msg_repo.clone();
             spawn(async move {
-                if let Some(ref repo) = repo {
-                    if let Err(e) = repo.delete_by_plan_id(&pid).await {
-                        tracing::error!("清除消息失败: {}", e);
-                    }
+                if let Err(e) = repo.delete_by_plan_id(&pid).await {
+                    tracing::error!("清除消息失败: {}", e);
                 }
             });
         }
@@ -95,7 +93,7 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
     let on_delete_plan = {
         let pid = plan_id.clone();
         let plan_repo = plan_repo.clone();
-        let chat_msg_repo = storage_repo(storage, |ctx| ctx.chat_message_repo());
+        let chat_msg_repo = storage.chat_message_repo();
         let on_back = on_back;
         move |_: ()| {
             let pid = pid.clone();
@@ -103,15 +101,11 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
             let chat_msg_repo = chat_msg_repo.clone();
             let on_back = on_back;
             spawn(async move {
-                if let Some(repo) = chat_msg_repo {
-                    if let Err(e) = repo.delete_by_plan_id(&pid).await {
-                        tracing::error!("删除消息失败: {}", e);
-                    }
+                if let Err(e) = chat_msg_repo.delete_by_plan_id(&pid).await {
+                    tracing::error!("删除消息失败: {}", e);
                 }
-                if let Some(repo) = plan_repo {
-                    if let Err(e) = repo.delete(&pid).await {
-                        tracing::error!("删除计划失败: {}", e);
-                    }
+                if let Err(e) = plan_repo.delete(&pid).await {
+                    tracing::error!("删除计划失败: {}", e);
                 }
                 on_back.call(());
             });

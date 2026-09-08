@@ -11,7 +11,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dioxus::prelude::*;
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 
@@ -118,15 +117,3 @@ fn resolve_db_path(configured: &str) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-/// 从 `Resource<Option<Arc<StorageContext>>>` 中提取仓库，简化调用链。
-pub fn storage_repo<F, T>(
-    storage: Resource<Option<Arc<StorageContext>>>,
-    f: F,
-) -> Option<Arc<T>>
-where
-    F: FnOnce(&StorageContext) -> Arc<T>,
-{
-    let guard = storage.read();
-    let inner: &Option<Option<Arc<StorageContext>>> = &*guard;
-    inner.as_ref().and_then(|opt| opt.as_ref()).map(|ctx| f(ctx))
-}

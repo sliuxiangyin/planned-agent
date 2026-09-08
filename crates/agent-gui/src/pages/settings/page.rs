@@ -11,7 +11,7 @@
 use dioxus::prelude::*;
 
 use crate::components::page_header::PageHeader;
-use crate::context::ToolsContext;
+use crate::context::{ToolsContext, require_resource};
 use crate::pages::mcp::{McpEditorPage, McpListPage};
 use super::components::tool_list::ToolList;
 use super::types::SettingsTab;
@@ -36,9 +36,8 @@ pub fn SettingsPage(
     // 进入 SettingsPage 时，初始为 List 视图
     let mut mcp_view = use_signal(|| McpView::List);
 
-    // 获取 ToolsContext
-    let tools_resource = use_context::<Resource<Option<std::sync::Arc<ToolsContext>>>>();
-    let tools_ctx = tools_resource.read().as_ref().and_then(|x| x.clone());
+    // 获取 ToolsContext（启动门保证就绪）
+    let tools_ctx = require_resource::<ToolsContext>();
 
     rsx! {
         document::Stylesheet { href: SETTINGS_CSS }

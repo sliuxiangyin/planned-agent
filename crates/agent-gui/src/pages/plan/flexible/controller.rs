@@ -29,8 +29,7 @@ use crate::components::chat::chat_flow::{
     ensure_subscription, handle_user_action, Bubble, ChatSignals, PendingUI,
 };
 use crate::context::{
-    register_sub_agent, require_resource, storage_repo, AiContext, PromptContext, StorageContext,
-    ToolsContext,
+    register_sub_agent, require_resource, AiContext, PromptContext, StorageContext, ToolsContext,
 };
 use crate::services::plans_flexible_service::PlansFlexibleService;
 use crate::pages::plan::shared::session::SessionManager;
@@ -225,8 +224,8 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
     let session_mgr_ctx = use_context::<Arc<SessionManager>>();
     let session_mgr = use_signal_sync(move || session_mgr_ctx.clone());
 
-    // ── 依赖 context ──
-    let storage_resource = use_context::<Resource<Option<Arc<StorageContext>>>>();
+    // ── 依赖 context（启动门保证全部就绪，require_resource 直接返回 Arc）──
+    let storage_ctx = require_resource::<StorageContext>();
     let ai_ctx = require_resource::<AiContext>();
     let tools_ctx = require_resource::<ToolsContext>();
     let prompt_ctx = require_resource::<PromptContext>();
@@ -236,21 +235,14 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
     let ai_ctx_c = ai_ctx.clone();
     let tools_ctx_c = tools_ctx.clone();
     let prompt_ctx_c = prompt_ctx.clone();
-    let storage_resource_c = storage_resource.clone();
+    let storage_ctx_c = storage_ctx.clone();
 
     // ── ChatService 异步初始化 ──
     use_effect(move || {
         if svc.read().is_some() || *svc_started.read() {
             return;
         }
-        let storage = storage_resource_c
-            .read()
-            .as_ref()
-            .and_then(|x| x.as_ref())
-            .cloned();
-        let Some(storage) = storage else {
-            return; // storage 尚未就绪，等下次 re-render 再尝试
-        };
+        let storage = storage_ctx_c.clone();
         svc_started.set(true);
 
         let plan_id = plan_id_c.clone();
@@ -317,44 +309,36 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
     });
 
     // ── 可用模板列表 ──
-    let prompt_resource = use_context::<Resource<Option<Arc<PromptContext>>>>();
+    let prompt_ctx_t = prompt_ctx.clone();
     use_effect(move || {
-        let prompt = prompt_resource
-            .read()
-            .as_ref()
-            .and_then(|x| x.as_ref())
-            .cloned();
-        if let Some(prompt) = prompt {
-            spawn(async move {
-                if let Ok(list) = prompt.manager.list_prompts().await {
-                    let names: Vec<String> = list
-                        .into_iter()
-                        .map(|info| info.name)
-                        .filter(|n| n.starts_with("chat/") || n.starts_with("flexible/"))
-                        .collect();
-                    templates.set(names);
-                }
-            });
-        }
+        let prompt = prompt_ctx_t.clone();
+        spawn(async move {
+            if let Ok(list) = prompt.manager.list_prompts().await {
+                let names: Vec<String> = list
+                    .into_iter()
+                    .map(|info| info.name)
+                    .filter(|n| n.starts_with("chat/") || n.starts_with("flexible/"))
+                    .collect();
+                templates.set(names);
+            }
+        });
     });
 
     // ── 注册子 agent（生命周期方案，避免重复注册与孤儿工具）──
     let registry = tools_ctx.registry.clone();
     use_hook(move || {
-        // flexible_step5：step5 落库回调（storage 就绪时才有；否则 None 仅记日志跳过）
-        let plans_flexible_service = storage_repo(storage_resource, |ctx| {
-            Arc::new(PlansFlexibleService::new(
-                ctx.plans_flexible_repo(),
-                ctx.plan_repo(),
-                ctx.session_repo(),
-                ctx.flexible_state_repo(),
-            ))
-        });
-        // flexible_state：协调器读写「当前会话流程中间状态」的旁路工具（storage 就绪时注册）。
+        // flexible_step5 落库回调 + flexible_state 工具（storage 由启动门保证就绪，始终存在）
+        let plans_flexible_service = Arc::new(PlansFlexibleService::new(
+            storage_ctx.plans_flexible_repo(),
+            storage_ctx.plan_repo(),
+            storage_ctx.session_repo(),
+            storage_ctx.flexible_state_repo(),
+        ));
+        // flexible_state：协调器读写「当前会话流程中间状态」的旁路工具。
         // 按引用借用再 clone，避免 move 掉 plans_flexible_service（下文 step5 回调仍要读它）。
-        if let Some(svc) = plans_flexible_service.as_ref() {
+        {
             let receiver = session_mgr.read().clone().receiver();
-            let executor = FlexibleStateExecutor::new(plan_id.clone(), svc.clone(), receiver);
+            let executor = FlexibleStateExecutor::new(plan_id.clone(), plans_flexible_service.clone(), receiver);
             tools_ctx.register_custom_tool(
                 flexible_state_tool(),
                 vec![ToolCategory::Utility],
@@ -512,13 +496,10 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
             None,
         );
 
-        let step5_callback = plans_flexible_service
-            .as_ref()
-            .map(|svc| {
-                let receiver = session_mgr.read().clone().receiver();
-                create_step5_callback(plan_id.clone(), svc.clone(), receiver)
-            })
-            .flatten();
+        let step5_callback = {
+            let receiver = session_mgr.read().clone().receiver();
+            create_step5_callback(plan_id.clone(), plans_flexible_service.clone(), receiver)
+        };
         register_sub_agent(
             &ai_ctx,
             &tools_ctx,

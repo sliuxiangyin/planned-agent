@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 
-use crate::context::{storage_repo, InitStatus, ModuleState, StorageContext};
+use crate::context::StorageContext;
 
 use super::components::active_plans::ActivePlans;
 use super::components::agent_insights::AgentInsightsPanel;
@@ -30,8 +30,8 @@ pub enum PageRoute {
 
 #[component]
 pub fn HomePage(on_navigate: EventHandler<PageRoute>) -> Element {
-    let init_status = use_context::<Memo<InitStatus>>();
-    let storage = use_context::<Resource<Option<Arc<StorageContext>>>>();
+    let storage: Arc<StorageContext> = use_context();
+    // 所有服务已就绪（启动门保证），进入本页即为 ready
 
     // ── 弹窗状态 ──
     let mut show_create_modal = use_signal(|| false);
@@ -40,12 +40,13 @@ pub fn HomePage(on_navigate: EventHandler<PageRoute>) -> Element {
     let mut plans = use_signal(Vec::new);
     let mut plans_loaded = use_signal(|| false);
 
-    // 当 storage 就绪时加载 plans
+    // 当 storage 就绪时加载 plans（storage 由启动门保证就绪，这里仅防重复触发）
+    let storage_effect = storage.clone();
     use_effect(move || {
-        if let Some(repo) = storage_repo(storage, |ctx| ctx.plan_repo()) {
-            if !*plans_loaded.read() {
-                plans_loaded.set(true);
-                spawn(async move {
+        if !*plans_loaded.read() {
+            let repo = storage_effect.plan_repo();
+            plans_loaded.set(true);
+            spawn(async move {
                     match repo.find_all().await {
                         Ok(list) => {
                             let meta_list: Vec<PlanMeta> = list
@@ -78,7 +79,6 @@ pub fn HomePage(on_navigate: EventHandler<PageRoute>) -> Element {
                     }
                 });
             }
-        }
     });
 
     let insights = use_signal(mock_insights);
@@ -87,12 +87,11 @@ pub fn HomePage(on_navigate: EventHandler<PageRoute>) -> Element {
     // hover 的计划 id（用于高亮轨道节点）
     let mut hovered_plan = use_signal(|| None::<String>);
 
-    // 状态指示器
-    let ai_ready = init_status.read().ai.state == ModuleState::Ready;
-    let mcp_ready = init_status.read().mcp.state == ModuleState::Ready;
-    let prompt_ready = init_status.read().prompt.state == ModuleState::Ready;
-
-    let all_ready = ai_ready && mcp_ready && prompt_ready;
+    // 状态指示器：进入本页时全部服务已由启动门保证就绪，恒为 ready
+    let ai_ready = true;
+    let mcp_ready = true;
+    let prompt_ready = true;
+    let all_ready = true;
 
     // 计划数量统计
     let pending_count = plans
@@ -111,20 +110,17 @@ pub fn HomePage(on_navigate: EventHandler<PageRoute>) -> Element {
         let storage = storage.clone();
         let on_navigate = on_navigate.clone();
         move |data: CreatePlanData| {
-            if let Some(repo) = storage_repo(storage, |ctx| ctx.plan_repo()) {
-                spawn(async move {
-                    match repo.create(&data.name, &data.mode).await {
-                        Ok(plan_model) => {
-                            on_navigate.call(PageRoute::Plan(Some(plan_model.id)));
-                        }
-                        Err(e) => {
-                            tracing::error!("创建计划失败: {}", e);
-                        }
+            let repo = storage.plan_repo();
+            spawn(async move {
+                match repo.create(&data.name, &data.mode).await {
+                    Ok(plan_model) => {
+                        on_navigate.call(PageRoute::Plan(Some(plan_model.id)));
                     }
-                });
-            } else {
-                tracing::warn!("Storage 未就绪，无法创建计划");
-            }
+                    Err(e) => {
+                        tracing::error!("创建计划失败: {}", e);
+                    }
+                }
+            });
             show_create_modal.set(false);
         }
     };

@@ -22,7 +22,7 @@ use dioxus_primitives::alert_dialog::{
 };
 use planned_agent_mcp_rmcp::storage::{LastStatus, ServerStatus};
 
-use crate::context::{McpChangeNotifier, McpContext, ToolsContext};
+use crate::context::{McpChangeNotifier, McpContext, ToolsContext, require_resource};
 
 /// 单个 MCP server 卡片的运行时状态
 #[derive(Debug, Clone)]
@@ -83,23 +83,14 @@ fn view_to_card_status(view: &planned_agent_mcp_rmcp::McpServerView) -> Option<C
 
 #[component]
 pub fn McpListPage(on_edit: EventHandler<String>, on_add: EventHandler<()>) -> Element {
-    // ── 获取 contexts（先取 ctx，以便 use_signal 闭包捕获） ──
-    let mcp_resource = use_context::<Resource<Option<std::sync::Arc<McpContext>>>>();
-    let tools_resource = use_context::<Resource<Option<std::sync::Arc<ToolsContext>>>>();
-
-    let mcp_ctx = mcp_resource.read().as_ref().and_then(|x| x.clone());
-    let tools_ctx = tools_resource.read().as_ref().and_then(|x| x.clone());
+    // ── 获取 contexts（启动门保证就绪） ──
+    let mcp_ctx = require_resource::<McpContext>();
+    let tools_ctx = require_resource::<ToolsContext>();
 
     // ── 统一视图信号（bundle.load_servers() 一次性拿到 config + status 已 join 的视图） ──
-    // 冷启动即从 KV / 文件中加载历史状态，无需手动按 name 配对
     let mut views = use_signal({
         let mcp_ctx = mcp_ctx.clone();
-        move || {
-            mcp_ctx
-                .as_ref()
-                .map(|c| c.load_servers())
-                .unwrap_or_default()
-        }
+        move || mcp_ctx.load_servers()
     });
 
     // 变更通知器：保存/刷新/删除完成时 bump()（本组件已在各操作内部直接 reload 视图）
@@ -235,25 +226,20 @@ pub fn McpListPage(on_edit: EventHandler<String>, on_add: EventHandler<()>) -> E
                                                 views.set(cur);
 
                                                 spawn(async move {
-                                                    if let (Some(mgr), Some(tctx)) = (m, t) {
-                                                        match mgr.refresh_tools(&srv, &tctx.registry).await {
-                                                                Ok((_, count)) => {
-                                                                    tracing::info!("刷新完成: {} → {} tools", srv, count);
-                                                                    // bundle 已写 status (Ready(n))，reload 视图
-                                                                    views.set(mgr.load_servers());
-                                                                }
-                                                                Err((e, _conn_err)) => {
-                                                                    // bundle 已自动 record_failure，无需 UI 再调
-                                                                    tracing::warn!("刷新失败: {} → {}", srv, e);
-                                                                    views.set(mgr.load_servers());
-                                                                }
+                                                    match m.refresh_tools(&srv, &t.registry).await {
+                                                            Ok((_, count)) => {
+                                                                tracing::info!("刷新完成: {} → {} tools", srv, count);
+                                                                // bundle 已写 status (Ready(n))，reload 视图
+                                                                views.set(m.load_servers());
                                                             }
-                                                        // 通知其他监听者（如 list_page 其他实例、settings 等）
-                                                        notif.bump();
-                                                    } else {
-                                                        // ctx 不可用，清空视图
-                                                        views.set(Vec::new());
-                                                    }
+                                                            Err((e, _conn_err)) => {
+                                                                // bundle 已自动 record_failure，无需 UI 再调
+                                                                tracing::warn!("刷新失败: {} → {}", srv, e);
+                                                                views.set(m.load_servers());
+                                                            }
+                                                        }
+                                                    // 通知其他监听者（如 list_page 其他实例、settings 等）
+                                                    notif.bump();
                                                 });
                                             }
                                         },
@@ -269,20 +255,17 @@ pub fn McpListPage(on_edit: EventHandler<String>, on_add: EventHandler<()>) -> E
                                     }
                                     button {
                                         class: "settings-mcp-action-btn settings-mcp-action-btn--danger",
-                                        disabled: mcp_ctx.is_none(),
                                         onclick: {
                                             let server_name = server_name.clone();
                                             let mcp_ctx = mcp_ctx.clone();
                                             let notifier = notifier;
                                             move |_| {
-                                                if let Some(c) = mcp_ctx.as_ref() {
-                                                    // 走 McpContext::delete_server 包装，自动联动清理 status
-                                                    if c.delete_server(&server_name).is_ok() {
-                                                        // 通知所有监听者重新加载
-                                                        notifier.bump();
-                                                        // 立即本地更新（不等 use_effect）
-                                                        views.set(c.load_servers());
-                                                    }
+                                                // 走 McpContext::delete_server 包装，自动联动清理 status
+                                                if mcp_ctx.delete_server(&server_name).is_ok() {
+                                                    // 通知所有监听者重新加载
+                                                    notifier.bump();
+                                                    // 立即本地更新（不等 use_effect）
+                                                    views.set(mcp_ctx.load_servers());
                                                 }
                                             }
                                         },
@@ -386,19 +369,17 @@ pub fn McpListPage(on_edit: EventHandler<String>, on_add: EventHandler<()>) -> E
                                             views.set(cur);
 
                                             spawn(async move {
-                                                if let (Some(mgr), Some(tctx)) = (m, t) {
-                                                    match mgr.refresh_tools(&s, &tctx.registry).await {
-                                                        Ok((_, _count)) => {
-                                                            // bundle 已写 status，reload 视图
-                                                            views.set(mgr.load_servers());
-                                                        }
-                                                        Err((_e, _conn_err)) => {
-                                                            // bundle 已自动 record_failure，reload 视图
-                                                            views.set(mgr.load_servers());
-                                                        }
+                                                match m.refresh_tools(&s, &t.registry).await {
+                                                    Ok((_, _count)) => {
+                                                        // bundle 已写 status，reload 视图
+                                                        views.set(m.load_servers());
                                                     }
-                                                    notif.bump();
+                                                    Err((_e, _conn_err)) => {
+                                                        // bundle 已自动 record_failure，reload 视图
+                                                        views.set(m.load_servers());
+                                                    }
                                                 }
+                                                notif.bump();
                                             });
                                         }
                                     },

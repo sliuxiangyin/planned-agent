@@ -1,0 +1,148 @@
+/* 启动门（Splash 加载动画 + 启动失败错误页） */
+
+html, body {
+    height: 100%;
+}
+
+/* ── Splash 加载动画 ── */
+.boot-splash {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(160deg, #0b1020 0%, #111a33 55%, #0d1526 100%);
+    color: #e6ecff;
+    font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.boot-splash__card {
+    width: 360px;
+    padding: 40px 36px;
+    border-radius: 20px;
+    background: rgba(20, 28, 55, 0.75);
+    border: 1px solid rgba(120, 150, 255, 0.18);
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+    text-align: center;
+}
+
+.boot-splash__spinner {
+    width: 52px;
+    height: 52px;
+    margin: 0 auto 22px;
+    border-radius: 50%;
+    border: 4px solid rgba(120, 150, 255, 0.22);
+    border-top-color: #6ea8ff;
+    animation: boot-spin 0.9s linear infinite;
+}
+
+@keyframes boot-spin {
+    to { transform: rotate(360deg); }
+}
+
+.boot-splash__title {
+    margin: 0 0 6px;
+    font-size: 20px;
+    font-weight: 600;
+}
+
+.boot-splash__subtitle {
+    margin: 0 0 20px;
+    font-size: 13px;
+    color: #9fb0d6;
+}
+
+.boot-splash__list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    text-align: left;
+}
+
+.boot-splash__item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 6px;
+    font-size: 14px;
+    color: #9fb0d6;
+}
+
+.boot-splash__item.done {
+    color: #cfe0ff;
+}
+
+.boot-splash__check {
+    color: #3ddc97;
+    font-weight: 700;
+}
+
+.boot-splash__dot {
+    color: #5b6b96;
+}
+
+/* ── 启动失败错误页 ── */
+.boot-error {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(160deg, #140b0b 0%, #2a1518 55%, #1a0f12 100%);
+    color: #ffe9e9;
+    font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.boot-error__card {
+    width: 480px;
+    max-width: 90vw;
+    padding: 34px 32px;
+    border-radius: 18px;
+    background: rgba(55, 22, 28, 0.8);
+    border: 1px solid rgba(255, 120, 120, 0.25);
+}
+
+.boot-error__icon {
+    font-size: 44px;
+    text-align: center;
+    margin-bottom: 10px;
+}
+
+.boot-error__title {
+    margin: 0 0 10px;
+    text-align: center;
+    font-size: 22px;
+    font-weight: 700;
+}
+
+.boot-error__desc {
+    font-size: 14px;
+    color: #f0c9c9;
+    margin: 0 0 16px;
+}
+
+.boot-error__item {
+    margin-bottom: 8px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: #ffd6d6;
+    word-break: break-all;
+}
+
+.boot-error__retry {
+    margin-top: 18px;
+    width: 100%;
+    padding: 11px 0;
+    border: none;
+    border-radius: 10px;
+    background: #e05c5c;
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.boot-error__retry:hover {
+    background: #f06c6c;
+}
