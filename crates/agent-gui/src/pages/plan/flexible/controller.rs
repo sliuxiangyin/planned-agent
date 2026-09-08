@@ -33,10 +33,10 @@ use crate::context::{
     ToolsContext,
 };
 use crate::services::plans_flexible_service::PlansFlexibleService;
+use crate::pages::plan::shared::session::SessionManager;
 
 use super::chat_service_factory::{ChatServiceFactory, ChatSvc};
 use super::flexible_state_tool::{flexible_state_tool, FlexibleStateExecutor};
-use super::session_slot::SessionSlot;
 use super::step2_callback::create_step2_callback;
 use super::step5_callback::create_step5_callback;
 
@@ -60,9 +60,11 @@ pub(crate) struct FlexibleController {
     factory: Signal<Option<ChatServiceFactory>, SyncStorage>,
     /// 当前活跃会话 id（service 就绪后必有值；UI 响应式展示来源）
     session_id: Signal<String, SyncStorage>,
-    /// 共享"当前会话"槽（tokio watch：承载当前 session 最新值；供 step5 callback 等
-    /// `'static` 旁路经 `receiver()` 读当前值）
-    session_slot: Signal<Arc<SessionSlot>, SyncStorage>,
+    /// 会话状态管理中心（plan 级共享单例，经 dioxus context 注入）。
+    ///
+    /// watch 侧承载「当前 session 最新值」，供 step5 callback 等 `'static` 旁路经
+    /// `receiver()` 读当前值；dioxus 侧供 UI（drawer 高亮等）读当前 id。
+    session_mgr: Signal<Arc<SessionManager>, SyncStorage>,
     /// 初始化是否已尝试（防止重复 spawn）
     #[allow(dead_code)] // 由 hook 内闭包写入，跨 render 保持
     svc_started: Signal<bool, SyncStorage>,
@@ -137,7 +139,7 @@ impl FlexibleController {
 
         // 在与应用初始化一致的运行时（dioxus spawn）里构造目标 session 的新 ChatService
         // 并启动 driver、挂载；svc 变化会触发 history/subscription effect 对新 service 重跑。
-        let slot = self.session_slot.read().clone();
+        let slot = self.session_mgr.read().clone();
         let mut session_id_sig = self.session_id;
         let mut svc = self.svc;
         let mut initialized = self.initialized;
@@ -155,8 +157,8 @@ impl FlexibleController {
                 tracing::error!("灵活模式切换会话: ChatService driver 启动失败: {}", e);
                 return;
             }
-            // 记录当前会话：UI 信号 + step5 共享槽
-            slot.set(target_session.clone());
+            // 广播当前会话到共享管理中心：UI 信号 + step5 共享 watch 一并更新
+            slot.set_active(target_session.clone());
             session_id_sig.set(target_session);
             initialized.set(false);
             svc.set(Some(Arc::new(service)));
@@ -217,9 +219,11 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
     let mut svc_started = use_signal_sync(|| false);
     let mut initialized = use_signal_sync(|| false);
     let mut templates = use_signal_sync(|| Vec::<String>::new());
-    // 当前活跃会话 id（service 就绪后必有值）与其共享槽（供 step5 callback 读取）
+    // 当前活跃会话 id（service 就绪后必有值）与其共享管理中心（step5 callback / UI 读取当前会话）
     let session_id = use_signal_sync(|| String::new());
-    let session_slot = use_signal_sync(|| Arc::new(SessionSlot::new()));
+    // plan 级共享单例（PlanPage 已注入 context）；controller 仅取用同一实例并广播切换
+    let session_mgr_ctx = use_context::<Arc<SessionManager>>();
+    let session_mgr = use_signal_sync(move || session_mgr_ctx.clone());
 
     // ── 依赖 context ──
     let storage_resource = use_context::<Resource<Option<Arc<StorageContext>>>>();
@@ -253,7 +257,7 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
         let ai_ctx = ai_ctx_c.clone();
         let tools_ctx = tools_ctx_c.clone();
         let prompt_ctx = prompt_ctx_c.clone();
-        let slot = session_slot.read().clone();
+        let slot = session_mgr.read().clone();
         let mut session_id_sig = session_id;
         spawn(async move {
             let built = async {
@@ -281,9 +285,9 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
                         tracing::error!("ChatService driver 启动失败: {}", e);
                         return;
                     }
-                    // 记录当前会话：共享槽（step5 callback 读取）+
-                    // UI 信号（service 就绪后必有值）
-                    slot.set(session_id.clone());
+                    // 广播当前会话到共享管理中心：watch（step5 读取）+
+                    // dioxus 信号（UI 读取，service 就绪后必有值）
+                    slot.set_active(session_id.clone());
                     session_id_sig.set(session_id);
                     factory.set(Some(factory_obj));
                     svc.set(Some(Arc::new(service)));
@@ -349,7 +353,7 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
         // flexible_state：协调器读写「当前会话流程中间状态」的旁路工具（storage 就绪时注册）。
         // 按引用借用再 clone，避免 move 掉 plans_flexible_service（下文 step5 回调仍要读它）。
         if let Some(svc) = plans_flexible_service.as_ref() {
-            let receiver = session_slot.read().clone().receiver();
+            let receiver = session_mgr.read().clone().receiver();
             let executor = FlexibleStateExecutor::new(plan_id.clone(), svc.clone(), receiver);
             tools_ctx.register_custom_tool(
                 flexible_state_tool(),
@@ -511,7 +515,7 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
         let step5_callback = plans_flexible_service
             .as_ref()
             .map(|svc| {
-                let receiver = session_slot.read().clone().receiver();
+                let receiver = session_mgr.read().clone().receiver();
                 create_step5_callback(plan_id.clone(), svc.clone(), receiver)
             })
             .flatten();
@@ -575,7 +579,7 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
         svc,
         factory,
         session_id,
-        session_slot,
+        session_mgr,
         svc_started,
         initialized,
     }

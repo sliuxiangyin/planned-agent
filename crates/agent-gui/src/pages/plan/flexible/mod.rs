@@ -8,7 +8,6 @@ pub(crate) mod controller;
 pub(crate) mod flexible_state_tool;
 pub(crate) mod json_extract;
 pub(crate) mod page;
-pub(crate) mod session_slot;
 pub(crate) mod step2_callback;
 pub(crate) mod step5_callback;
 

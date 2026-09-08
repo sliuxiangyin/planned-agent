@@ -18,6 +18,7 @@ use crate::context::{storage_repo, StorageContext};
 use super::left_panel::PlanLeftPanel;
 use super::flexible::FlexiblePage;
 use super::shared::load_plan_data::load_plan_data as load_plan_data_shared;
+use super::shared::session::use_provide_session_manager;
 use super::states::PlanState;
 use super::types::{ParamDef, PlanInfo};
 
@@ -30,6 +31,9 @@ const RESIZABLE_CSS: Asset = asset!("/assets/resizable_panel.css");
 pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
     // ── 全局 Context ──
     let storage = use_context::<Resource<Option<Arc<StorageContext>>>>();
+
+    // ── 会话状态管理中心：plan 级共享单例，注入到 context，供 flexible / 会话抽屉等订阅当前会话切换 ──
+    use_provide_session_manager();
 
     // ── 计划信息（从 DB 异步加载） ──
     let plan_info = use_signal_sync(|| None::<PlanInfo>);
