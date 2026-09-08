@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use planned_agent::chat::{ResultDecision, SubAgentResultCallback};
 use planned_agent_core::mcp::types::ToolResult;
 
@@ -16,8 +17,9 @@ use planned_agent_core::mcp::types::ToolResult;
 /// `result.content` 为 `extract_last_assistant_text` 的文本（即子 agent 最终输出）。
 pub struct FlexibleStep2Callback;
 
+#[async_trait]
 impl SubAgentResultCallback for FlexibleStep2Callback {
-    fn on_result(&self, agent_name: &str, result: &ToolResult) -> ResultDecision {
+    async fn on_result(&self, agent_name: &str, result: &ToolResult) -> ResultDecision {
         tracing::info!(
             "[flexible_step2] 子 agent '{}' 完成, content_len={}, is_error={}",
             agent_name,

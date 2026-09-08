@@ -1,5 +1,6 @@
 //! 子 agent 结果回调：trait 定义 + 决策枚举。
 
+use async_trait::async_trait;
 use planned_agent_core::mcp::types::ToolResult;
 
 /// 子 agent 结果处理决策。
@@ -25,6 +26,11 @@ pub enum ResultDecision {
 }
 
 /// 子 agent 结果回调：完成后可获取最终 tool result（用于外部解析/提取）。
+///
+/// `on_result` 为 **async**：它在触发方的异步上下文（`collect_until_outcome`）中被
+/// `await`，回调实现因此可以直接 `await` 持久化等异步副作用，无需自行 `tokio::spawn`
+/// （这是之前同步签名的权宜）。通过 [`async_trait`] 实现，返回的 future 需 `Send`。
+#[async_trait]
 pub trait SubAgentResultCallback: Send + Sync {
     /// 子 agent 完成后触发。
     ///
@@ -35,5 +41,5 @@ pub trait SubAgentResultCallback: Send + Sync {
     /// - `Accept`：接受结果
     /// - `Transform(text)`：替换 content
     /// - `Retry(msg)`：发送纠正消息给子 agent，重试后再次回调
-    fn on_result(&self, agent_name: &str, result: &ToolResult) -> ResultDecision;
+    async fn on_result(&self, agent_name: &str, result: &ToolResult) -> ResultDecision;
 }

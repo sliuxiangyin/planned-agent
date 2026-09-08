@@ -6,11 +6,14 @@
 //! 同一 session 内多次产出覆盖该行（version 不变），新 session 首次产出才新增一条（version 递增）。
 //! `session_id` 必填，on_result 时从共享会话槽动态读取当前会话。
 //!
-//! 纯旁路持久化：回调返回 `Accept`，原始 JSON 原样流回父 agent / GUI，不影响展示。
+//! `on_result` 为 async：直接在回调上下文内 `await save_snapshot` 落库（无需自行
+//! `tokio::spawn`）。纯旁路持久化：回调返回 `Accept`，原始 JSON 原样流回父 agent / GUI，
+//! 不影响展示；落库失败仅 loud 报错，不改变流向。
 
 use std::sync::Arc;
 use tokio::sync::watch;
 
+use async_trait::async_trait;
 use planned_agent::chat::{ResultDecision, SubAgentResultCallback};
 use planned_agent_core::mcp::types::ToolResult;
 use serde_json::Value;
@@ -39,11 +42,9 @@ impl FlexibleStep5Callback {
     }
 }
 
+#[async_trait]
 impl SubAgentResultCallback for FlexibleStep5Callback {
-    fn on_result(&self, agent_name: &str, result: &ToolResult) -> ResultDecision {
-        let plan_id = self.plan_id.clone();
-        let service = self.service.clone();
-
+    async fn on_result(&self, agent_name: &str, result: &ToolResult) -> ResultDecision {
         // 解析输出 JSON。失败或非 JSON 时 Retry，让子 agent 重新生成严格 JSON。
         let parsed: Option<Value> = result.content.as_str().and_then(|text| {
             // 优先整条解析；失败则从混有思考/解释文本的内容中提取最后一个 JSON 对象
@@ -123,39 +124,40 @@ impl SubAgentResultCallback for FlexibleStep5Callback {
         let steps = take_or_default(&json, "steps", "[]");
         let execution_plan = take_or_default(&json, "execution_plan", "[]");
 
-        let plan_id2 = plan_id.clone();
-        let service2 = service.clone();
-        // 同步读当前会话 id（watch 承载 latest 值；controller set 后任何回调都能拿到，无订阅时序竞态）
-        let session_id = self.session_rx.borrow().clone();
-        tokio::spawn(async move {
-            let Some(session_id) = session_id else {
-                // 不应到达：step5 只在 ChatService 就绪后运行，此时 controller 必已写入会话槽。
-                // 走到这里说明会话时序/注册不变量被破坏，loud 报错，本次跳过落库以免丢坏数据。
-                tracing::error!(
-                    "[flexible_step5] 当前会话 id 缺失（不变量破坏），跳过 plans_flexible 写入（plan_id={plan_id2}）"
-                );
-                return;
-            };
-            match service2
-                .save_snapshot(
-                    &plan_id2,
-                    &session_id,
-                    &input_schema,
-                    &output,
-                    &steps,
-                    &execution_plan,
-                )
-                .await
-            {
-                Ok(model) => tracing::info!(
-                    "[flexible_step5] 已保存 plans_flexible: id={}, plan_id={}, version={}",
-                    model.id,
-                    model.plan_id,
-                    model.version
-                ),
-                Err(e) => tracing::error!("[flexible_step5] 保存 plans_flexible 失败: {}", e),
-            }
-        });
+        // 读取当前会话 id。watch `borrow()` 返回的 guard 非 Send，故在此 clone 成 String
+        // 后立即结束 guard，避免其跨 await（`on_result` 现为 async，可直接 await 落库）。
+        let Some(session_id) = self.session_rx.borrow().clone() else {
+            // 不应到达：step5 只在 ChatService 就绪后运行，此时 controller 必已写入会话槽。
+            // 走到这里说明会话时序/注册不变量被破坏，loud 报错，本次跳过落库以免丢坏数据。
+            tracing::error!(
+                "[flexible_step5] 当前会话 id 缺失（不变量破坏），跳过 plans_flexible 写入（plan_id={}）",
+                self.plan_id
+            );
+            return ResultDecision::Accept;
+        };
+
+        // 在回调自身的 async 上下文内直接 await 落库（不再需要 tokio::spawn，无竞速）。
+        // 旁路持久化：失败仅 loud 报错，不改变原始 JSON 原样流回父 agent / GUI。
+        match self
+            .service
+            .save_snapshot(
+                &self.plan_id,
+                &session_id,
+                &input_schema,
+                &output,
+                &steps,
+                &execution_plan,
+            )
+            .await
+        {
+            Ok(model) => tracing::info!(
+                "[flexible_step5] 已保存 plans_flexible: id={}, plan_id={}, version={}",
+                model.id,
+                model.plan_id,
+                model.version
+            ),
+            Err(e) => tracing::error!("[flexible_step5] 保存 plans_flexible 失败: {}", e),
+        }
 
         // 原始结果原样返回，由父 agent / GUI 继续消费
         ResultDecision::Accept

@@ -94,7 +94,7 @@ pub(super) async fn collect_until_outcome(
                         is_error: false,
                         content: Value::String(last_text.clone()),
                     };
-                    match cb.on_result(&stream.tool_name(), &probe) {
+                    match cb.on_result(&stream.tool_name(), &probe).await {
                         ResultDecision::Accept => break last_text,
                         ResultDecision::Transform(new) => break new,
                         ResultDecision::Retry(msg) if attempts < max_retries => {
