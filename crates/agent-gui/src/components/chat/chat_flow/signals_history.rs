@@ -48,17 +48,25 @@ impl ChatSignals {
                 if tc.is_sub_agent {
                     if let Some(av) = views.get_mut(&tc.tool_call_id) {
                         let text = match &tc.result {
-                            Some(v) => {
-                                v.as_str().map(String::from)
-                                    .or_else(|| v.get("content").and_then(|c| c.as_str()).map(String::from))
-                                    .unwrap_or_else(|| serde_json::to_string_pretty(v).unwrap_or_default())
-                            }
+                            Some(v) => v
+                                .as_str()
+                                .map(String::from)
+                                .or_else(|| {
+                                    v.get("content").and_then(|c| c.as_str()).map(String::from)
+                                })
+                                .unwrap_or_else(|| {
+                                    serde_json::to_string_pretty(v).unwrap_or_default()
+                                }),
                             None => String::new(),
                         };
                         if !text.is_empty() && av.events.is_empty() {
                             av.events.push(AgentEvent::TextDelta(text));
                         }
-                        av.phase = if tc.is_error { ToolCallPhase::Error } else { ToolCallPhase::Completed };
+                        av.phase = if tc.is_error {
+                            ToolCallPhase::Error
+                        } else {
+                            ToolCallPhase::Completed
+                        };
                     }
                 }
             }

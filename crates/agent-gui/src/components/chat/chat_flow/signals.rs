@@ -41,7 +41,10 @@ pub struct ChatSignals {
 ///   `request_user_action` 的 Tool 消息：主 agent → 追加到 assistant 气泡文本；
 ///   子 agent → 追加到 `agent_views` 对应条目的 events
 /// - 其他（System 等）→ 忽略
-pub fn build_bubbles(messages: &[StoreMessage], mut agent_views: Option<&mut HashMap<String, AgentViewData>>) -> Vec<Bubble> {
+pub fn build_bubbles(
+    messages: &[StoreMessage],
+    mut agent_views: Option<&mut HashMap<String, AgentViewData>>,
+) -> Vec<Bubble> {
     let mut bubbles: Vec<Bubble> = Vec::new();
     let mut tool_index: HashMap<String, (usize, usize)> = HashMap::new();
     let mut ui_action_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -66,7 +69,8 @@ pub fn build_bubbles(messages: &[StoreMessage], mut agent_views: Option<&mut Has
                 last_is_agent_tool = sm.is_agent_tool;
                 last_agent_tool_id = if sm.is_agent_tool {
                     sm.message.tool_calls.as_ref().and_then(|tcs| {
-                        tcs.iter().find(|tc| tc.function.name != "request_user_action")
+                        tcs.iter()
+                            .find(|tc| tc.function.name != "request_user_action")
                             .map(|tc| tc.id.clone())
                     })
                 } else {
@@ -116,19 +120,24 @@ pub fn build_bubbles(messages: &[StoreMessage], mut agent_views: Option<&mut Has
                         if let Some(choice) = extract_choice(&sm.message) {
                             if last_is_agent_tool {
                                 // 子 agent 的 request_user_action → 追加到 agent_views
-                                if let (Some(views), Some(ref agent_id)) = (agent_views.as_deref_mut(), &last_agent_tool_id) {
+                                if let (Some(views), Some(ref agent_id)) =
+                                    (agent_views.as_deref_mut(), &last_agent_tool_id)
+                                {
                                     if let Some(av) = views.get_mut(agent_id) {
-                                        av.events.push(AgentEvent::TextDelta(
-                                            format!("\n\n---\n\n**{}**\n\n", choice)
-                                        ));
+                                        av.events.push(AgentEvent::TextDelta(format!(
+                                            "\n\n---\n\n**{}**\n\n",
+                                            choice
+                                        )));
                                     }
                                 }
                             } else {
                                 // 主 agent → 追加到父 assistant 气泡文本
-                                if let Some(last_asst) = bubbles.iter_mut().rfind(|b| b.is_assistant) {
-                                    last_asst.text.push_str(&format!(
-                                        "\n\n---\n\n**{}**\n\n", choice
-                                    ));
+                                if let Some(last_asst) =
+                                    bubbles.iter_mut().rfind(|b| b.is_assistant)
+                                {
+                                    last_asst
+                                        .text
+                                        .push_str(&format!("\n\n---\n\n**{}**\n\n", choice));
                                 }
                             }
                         }

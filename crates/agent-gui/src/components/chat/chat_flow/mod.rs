@@ -13,6 +13,6 @@ pub mod bridge;
 pub mod reduce;
 pub mod view;
 
-pub use controller::{send_message, ensure_subscription, handle_user_action};
+pub use controller::{ensure_subscription, handle_user_action, send_message};
 pub use signals::ChatSignals;
 pub use types::{AgentEvent, AgentViewData, Bubble, PendingUI, ToolCallPhase, ToolViewData};
