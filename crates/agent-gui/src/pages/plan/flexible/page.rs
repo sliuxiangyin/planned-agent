@@ -12,6 +12,7 @@ use crate::components::chat::ChatPanel;
 use crate::components::page_header::PageHeader;
 
 use super::controller::use_flexible_controller;
+use super::session_boot::FlexBoot;
 
 use dioxus_icons::lucide::Trash2;
 
@@ -25,12 +26,26 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
     let ctl = use_flexible_controller(props.plan_id.clone());
 
     // ChatService 未就绪 → 占位（controller 内异步初始化完成后会自动 re-render）
-    let Some(service) = ctl.service() else {
-        return rsx! {
-            div { class: "p-4 text-muted-foreground", "灵活模式初始化中…" }
-        };
+    let ready_session = match ctl.boot_phase() {
+        FlexBoot::Loading(_) => {
+            return rsx! {
+                div { class: "p-4 text-muted-foreground", "灵活模式初始化中…" }
+            };
+        }
+        FlexBoot::Failed(errors) => {
+            return rsx! {
+                div { class: "p-4 text-destructive", "灵活模式初始化失败：" }
+                ul {
+                    for (module, err) in &errors {
+                        li { "{module}: {err}" }
+                    }
+                }
+            };
+        }
+        FlexBoot::Ready(session) => session,
     };
 
+    let service = ready_session.svc.clone();
     let busy = ctl.is_busy();
     let current_template = ctl.template();
     let template_label =

@@ -22,20 +22,18 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use dioxus::prelude::*;
 use planned_agent::chat::{ChatConfig, SubscriptionGuard};
-use planned_agent_core::prompt::PromptManager;
 use planned_agent_core::tool_registry::ToolCategory;
 
-use crate::components::chat::chat_flow::{
-    ensure_subscription, handle_user_action, Bubble, ChatSignals, PendingUI,
-};
+use crate::components::chat::chat_flow::{handle_user_action, Bubble, ChatSignals, PendingUI};
 use crate::context::{
     register_sub_agent, require_resource, AiContext, PromptContext, StorageContext, ToolsContext,
 };
-use crate::services::plans_flexible_service::PlansFlexibleService;
 use crate::pages::plan::shared::session::SessionManager;
+use crate::services::plans_flexible_service::PlansFlexibleService;
 
-use super::chat_service_factory::{ChatServiceFactory, ChatSvc};
+use super::chat_service_factory::ChatSvc;
 use super::flexible_state_tool::{flexible_state_tool, FlexibleStateExecutor};
+use super::session_boot::{boot_flexible_session, FlexBoot, OnBootPhase};
 use super::step2_callback::create_step2_callback;
 use super::step5_callback::create_step5_callback;
 
@@ -52,30 +50,24 @@ pub(crate) struct FlexibleController {
     template: Signal<Option<String>, SyncStorage>,
     /// 可用模板列表
     templates: Signal<Vec<String>, SyncStorage>,
-    /// ChatService（初始化完成后 Some）
-    svc: Signal<Option<Arc<ChatSvc>>, SyncStorage>,
-    /// ChatService 创建工厂（storage 就绪后由初始化填充，供 switch_session 复用）
-    #[allow(dead_code)] // 待"历史翻回"UI 接线 switch_session 后读取
-    factory: Signal<Option<ChatServiceFactory>, SyncStorage>,
-    /// 当前活跃会话 id（service 就绪后必有值；UI 响应式展示来源）
-    session_id: Signal<String, SyncStorage>,
-    /// 会话状态管理中心（plan 级共享单例，经 dioxus context 注入）。
+    /// 会话启动状态机：Loading(进度) → Ready(ReadySession) / Failed。
     ///
-    /// watch 侧承载「当前 session 最新值」，供 step5 callback 等 `'static` 旁路经
-    /// `receiver()` 读当前值；dioxus 侧供 UI（drawer 高亮等）读当前 id。
-    session_mgr: Signal<Arc<SessionManager>, SyncStorage>,
-    /// 初始化是否已尝试（防止重复 spawn）
-    #[allow(dead_code)] // 由 hook 内闭包写入，跨 render 保持
-    svc_started: Signal<bool, SyncStorage>,
-    /// 历史/订阅是否已执行过一次
-    #[allow(dead_code)] // 由 hook 内闭包写入，跨 render 保持
-    initialized: Signal<bool, SyncStorage>,
+    /// 取代旧的多份分散 signal（svc / svc_started / initialized / session_mgr）。
+    boot: Signal<FlexBoot, SyncStorage>,
 }
 
 impl FlexibleController {
-    /// 就绪后的 ChatService；初始化完成前为 None。
+    /// 就绪后的 ChatService；未就绪/失败时为 None。
     pub(crate) fn service(&self) -> Option<Arc<ChatSvc>> {
-        self.svc.read().clone()
+        match self.boot.read().as_ref() {
+            FlexBoot::Ready(session) => Some(session.svc.clone()),
+            _ => None,
+        }
+    }
+
+    /// 当前会话启动状态（供页面按 Loading / Failed / Ready 分支渲染）。
+    pub(crate) fn boot_phase(&self) -> FlexBoot {
+        self.boot.read().clone()
     }
 
     // ── 只读访问器 ────────────────────────────────────────────────
@@ -90,11 +82,6 @@ impl FlexibleController {
     }
     pub(crate) fn template(&self) -> String {
         self.template.read().clone().unwrap_or_default()
-    }
-    /// 当前活跃会话 id（service 就绪前为空串）。
-    #[allow(dead_code)] // 预留：供 UI 展示 / 历史翻回等读取
-    pub(crate) fn session_id(&self) -> String {
-        self.session_id.read().clone()
     }
     pub(crate) fn templates(&self) -> Vec<String> {
         self.templates.read().clone()
@@ -120,49 +107,17 @@ impl FlexibleController {
         handle_user_action(&mut chat, &svc, choice, pending);
     }
 
-    /// 切换到指定 session：停掉旧对话并退订，为它新建一个绑该 session store 的
-    /// ChatService，并复位 `initialized` 使下方的历史/订阅 effect 对新 service 重跑
-    /// （自动加载该 session 历史现场）。供外部（如历史版本翻回）直接调用。
+    /// 切换到指定 session（多会话并行改造前的占位）。
+    ///
+    /// 原实现会停掉旧对话、为它新建一个绑目标 session store 的 ChatService 并重放
+    /// 历史；该逻辑依赖已移除的 `ChatServiceFactory` struct 且在并发切换下有硬伤
+    /// （切走即 stop 当前会话）。多会话架构就位后将改为「切走不 stop、后台继续跑」。
     #[allow(dead_code)] // 预留 API：待"历史翻回"UI 接线后使用
-    pub(crate) fn switch_session(&self, session_id: String) -> anyhow::Result<()> {
-        let Some(factory) = self.factory.read().clone() else {
-            return Err(anyhow!("ChatServiceFactory 尚未就绪，无法切换会话"));
-        };
-        // 停掉旧对话并退订旧订阅（guard 一 drop 即自动退订）
-        if let Some(old) = self.service() {
-            old.stop();
-        }
-        let mut chat = self.chat;
-        chat.subscription.set(None);
-        chat.clear();
-
-        // 在与应用初始化一致的运行时（dioxus spawn）里构造目标 session 的新 ChatService
-        // 并启动 driver、挂载；svc 变化会触发 history/subscription effect 对新 service 重跑。
-        let slot = self.session_mgr.read().clone();
-        let mut session_id_sig = self.session_id;
-        let mut svc = self.svc;
-        let mut initialized = self.initialized;
-        let target_session = session_id.clone();
-        spawn(async move {
-            // 为目标 session 构造绑该 store 的新 ChatService
-            let service = match factory.build_for_session(&target_session).await {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!("灵活模式切换会话: 构造 ChatService 失败: {}", e);
-                    return;
-                }
-            };
-            if let Err(e) = service.start_driver() {
-                tracing::error!("灵活模式切换会话: ChatService driver 启动失败: {}", e);
-                return;
-            }
-            // 广播当前会话到共享管理中心：UI 信号 + step5 共享 watch 一并更新
-            slot.set_active(target_session.clone());
-            session_id_sig.set(target_session);
-            initialized.set(false);
-            svc.set(Some(Arc::new(service)));
-        });
-        Ok(())
+    pub(crate) fn switch_session(&self, _session_id: String) -> anyhow::Result<()> {
+        // TODO(多会话并行): ChatServiceFactory struct 已移除；此处改为直接持有依赖
+        // （storage/ai/tools/prompt）按需构造新会话 ChatService，并在多会话架构就位后
+        // 改为「切走不 stop、后台继续跑」。现临时占位，避免误用单会话重建逻辑。
+        Err(anyhow!("switch_session 尚未就绪：待多会话并行改造完成后接入"))
     }
 
     /// 切换系统提示模板（切换即停当前会话并重置）。
@@ -197,7 +152,7 @@ impl FlexibleController {
 /// 创建/复用 flexible 页面控制器。组件须在顶层无条件调用。
 pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
     // ── 纯内存聊天状态 ──
-    let mut chat = ChatSignals {
+    let chat = ChatSignals {
         bubbles: use_signal_sync(Vec::<Bubble>::new),
         active: use_signal_sync(Vec::<Bubble>::new),
         agent_views: use_signal_sync(|| HashMap::new()),
@@ -212,17 +167,14 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
     let temperature = use_signal_sync(|| "0.7".to_string());
     let template = use_signal_sync(|| Some("flexible/flexible_step1".to_string()));
 
-    // ── ChatService：signal 存储；异步初始化（storage ready → ensure session → 建绑会话 store）──
-    let mut svc = use_signal_sync(|| None::<Arc<ChatSvc>>);
-    let mut factory = use_signal_sync(|| None::<ChatServiceFactory>);
-    let mut svc_started = use_signal_sync(|| false);
-    let mut initialized = use_signal_sync(|| false);
+    // ── 会话启动状态机（boot.rs 风格）：Loading → Ready / Failed ──
+    let mut boot = use_signal_sync(|| FlexBoot::Loading(Vec::new()));
     let mut templates = use_signal_sync(|| Vec::<String>::new());
-    // 当前活跃会话 id（service 就绪后必有值）与其共享管理中心（step5 callback / UI 读取当前会话）
-    let session_id = use_signal_sync(|| String::new());
-    // plan 级共享单例（PlanPage 已注入 context）；controller 仅取用同一实例并广播切换
+    // plan 级共享单例（PlanPage 已注入 context）；flexible_state/step5 旁路与 boot 广播用
     let session_mgr_ctx = use_context::<Arc<SessionManager>>();
     let session_mgr = use_signal_sync(move || session_mgr_ctx.clone());
+    // boot 幂等门：仅首次 render 触发一次异步启动
+    let mut boot_started = use_signal_sync(|| false);
 
     // ── 依赖 context（启动门保证全部就绪，require_resource 直接返回 Arc）──
     let storage_ctx = require_resource::<StorageContext>();
@@ -230,82 +182,63 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
     let tools_ctx = require_resource::<ToolsContext>();
     let prompt_ctx = require_resource::<PromptContext>();
 
-    // ── 供异步初始化闭包捕获的 owned clone ──
+    // ── 供异步 boot 闭包捕获的 owned clone ──
     let plan_id_c = plan_id.clone();
     let ai_ctx_c = ai_ctx.clone();
     let tools_ctx_c = tools_ctx.clone();
     let prompt_ctx_c = prompt_ctx.clone();
     let storage_ctx_c = storage_ctx.clone();
 
-    // ── ChatService 异步初始化 ──
+    // ── 会话异步启动（一次）：建 session → new_chat_service → driver → 历史 → 订阅 ──
     use_effect(move || {
-        if svc.read().is_some() || *svc_started.read() {
+        if *boot_started.read() {
             return;
         }
-        let storage = storage_ctx_c.clone();
-        svc_started.set(true);
+        boot_started.set(true);
 
+        let storage = storage_ctx_c.clone();
         let plan_id = plan_id_c.clone();
         let ai_ctx = ai_ctx_c.clone();
         let tools_ctx = tools_ctx_c.clone();
         let prompt_ctx = prompt_ctx_c.clone();
         let slot = session_mgr.read().clone();
-        let mut session_id_sig = session_id;
-        spawn(async move {
-            let built = async {
-                let session = storage.ensure_current_session(&plan_id).await?;
-                let session_id = session.id.clone();
-                let factory_obj = ChatServiceFactory::new(
-                    storage.clone(),
-                    plan_id.clone(),
-                    ai_ctx.clone(),
-                    tools_ctx.clone(),
-                    prompt_ctx.clone(),
-                );
-                let service = factory_obj.build_for_session(&session.id).await?;
-                Ok::<(String, ChatServiceFactory, ChatSvc), anyhow::Error>((
-                    session_id,
-                    factory_obj,
-                    service,
-                ))
-            }
-            .await;
-
-            match built {
-                Ok((session_id, factory_obj, service)) => {
-                    if let Err(e) = service.start_driver() {
-                        tracing::error!("ChatService driver 启动失败: {}", e);
-                        return;
-                    }
-                    // 广播当前会话到共享管理中心：watch（step5 读取）+
-                    // dioxus 信号（UI 读取，service 就绪后必有值）
-                    slot.set_active(session_id.clone());
-                    session_id_sig.set(session_id);
-                    factory.set(Some(factory_obj));
-                    svc.set(Some(Arc::new(service)));
-                }
-                Err(e) => tracing::error!("灵活模式 ChatService 初始化失败: {}", e),
+        // ChatSignals 是 Copy：把句柄副本交给 boot 异步填充历史/订阅
+        let chat_boot = chat;
+        let boot_done = boot;
+        let boot_progress = boot;
+        // 进度回调：把已完成阶段名累积进 boot Loading（对齐全局 boot.rs 的 on_progress）
+        let progress_cb: OnBootPhase = Arc::new(move |name: &'static str| {
+            let done = if let FlexBoot::Loading(d) = boot_progress.read().clone() {
+                d
+            } else {
+                return;
+            };
+            if !done.contains(&name) {
+                let mut d = done;
+                d.push(name);
+                boot_progress.set(FlexBoot::Loading(d));
             }
         });
-    });
-
-    // ── 事件订阅 + 历史加载：service ready 后执行一次 ──
-    use_effect(move || {
-        if *initialized.read() || svc.read().is_none() {
-            return;
-        }
-        initialized.set(true);
-        let Some(service) = svc.read().clone() else {
-            return;
-        };
-        // 从服务端 store 恢复历史
-        let history = service.history_store();
-        if !history.is_empty() {
-            tracing::info!("灵活模式: 从服务端加载 {} 条历史消息", history.len());
-            chat.load_from_history(&history);
-        }
-        // 注册事件订阅（guard 存入 chat.subscription signal，跨 re-render 存活）
-        ensure_subscription(&mut chat, &service);
+        spawn(async move {
+            match boot_flexible_session(
+                storage,
+                plan_id,
+                ai_ctx,
+                tools_ctx,
+                prompt_ctx,
+                chat_boot,
+                slot,
+                progress_cb,
+            )
+            .await
+            {
+                Ok(session) => boot_done.set(FlexBoot::Ready(Arc::new(session))),
+                Err(errors) => {
+                    tracing::error!("灵活模式会话启动失败: {:?}", errors);
+                    boot_done.set(FlexBoot::Failed(errors));
+                }
+            }
+        });
     });
 
     // ── 可用模板列表 ──
@@ -338,7 +271,11 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
         // 按引用借用再 clone，避免 move 掉 plans_flexible_service（下文 step5 回调仍要读它）。
         {
             let receiver = session_mgr.read().clone().receiver();
-            let executor = FlexibleStateExecutor::new(plan_id.clone(), plans_flexible_service.clone(), receiver);
+            let executor = FlexibleStateExecutor::new(
+                plan_id.clone(),
+                plans_flexible_service.clone(),
+                receiver,
+            );
             tools_ctx.register_custom_tool(
                 flexible_state_tool(),
                 vec![ToolCategory::Utility],
@@ -557,11 +494,6 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
         temperature,
         template,
         templates,
-        svc,
-        factory,
-        session_id,
-        session_mgr,
-        svc_started,
-        initialized,
+        boot,
     }
 }
