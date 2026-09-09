@@ -10,7 +10,6 @@ use std::sync::Arc;
 use dioxus::prelude::*;
 
 pub mod ai;
-pub mod boot;
 pub mod kv;
 pub mod mcp;
 pub mod prompt;
@@ -20,7 +19,6 @@ pub mod sub_agent;
 pub mod tools;
 
 pub use ai::AiContext;
-pub use boot::{BootPhase, ReadyServices, bootstrap};
 pub use kv::KvContext;
 pub use mcp::{McpChangeNotifier, McpContext};
 pub use prompt::PromptContext;

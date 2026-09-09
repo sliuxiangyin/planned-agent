@@ -1,13 +1,17 @@
+mod boot;
 mod cache;
 mod components;
 mod config;
 mod context;
 mod pages;
 mod services;
+mod shared;
 mod storage;
 
+use boot::{ReadyServices, bootstrap};
 use config::GuiConfig;
-use context::{BootPhase, McpChangeNotifier, ReadyServices, bootstrap};
+use context::McpChangeNotifier;
+use shared::{BootPhase, BootReporter};
 use dioxus::{desktop::Config, prelude::*};
 use pages::home::{HomePage, PageRoute};
 use pages::plan::PlanPage;
@@ -15,6 +19,9 @@ use pages::settings::SettingsPage;
 use std::sync::{Arc, OnceLock};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
+
+/// 全局启动门的就绪载荷特化：`BootPhase` 泛型化后，全局 bootstrap 用 `ReadyServices`。
+type AppBootPhase = BootPhase<ReadyServices>;
 
 /// `ReadyServices` 的组件 prop 包装：Dioxus 组件 prop 需 `PartialEq`，
 /// 而 `Arc<ReadyServices>` 本身不实现，故用恒等比较的轻量包装。
@@ -98,7 +105,7 @@ fn app() -> Element {
 #[component]
 fn BootGate() -> Element {
     // 状态机：Loading(已完成模块名) → Ready / Failed
-    let mut phase = use_signal_sync(|| BootPhase::Loading(Vec::new()));
+    let mut phase = use_signal_sync(|| AppBootPhase::Loading(Vec::new()));
     // 触发重试的计数器：递增后重新跑 bootstrap
     let mut attempt = use_signal_sync(|| 0i32);
     // 幂等守卫：本次 attempt 是否已启动过 bootstrap
@@ -112,31 +119,15 @@ fn BootGate() -> Element {
         boot_started_for.set(n);
 
         let cfg = APP_CONFIG.get().cloned().unwrap_or_default();
-        // Signal 是 Copy：复制进异步任务，独立推进 Loading 进度
-        let mut phase_p = phase;
-        let progress_cb = {
-            let phase_cb = phase;
-            Arc::new(move |name: &'static str| {
-                let mut phase_cb = phase_cb;
-                let mut done = if let BootPhase::Loading(d) = phase_cb.read().clone() {
-                    d
-                } else {
-                    return;
-                };
-                if !done.contains(&name) {
-                    done.push(name);
-                    phase_cb.set(BootPhase::Loading(done));
-                }
-            }) as Arc<dyn Fn(&'static str) + Send + Sync>
-        };
+        // 进度/结果写回器：把「累积进度 + 写 Ready/Failed」的 signal 样板收口
+        // （见 `BootReporter`，与灵活模式会话启动共用同一套逻辑）。
+        let reporter = BootReporter::new(phase);
         spawn(async move {
-            match bootstrap(&cfg, progress_cb).await {
-                Ok(services) => {
-                    phase_p.set(BootPhase::Ready(Arc::new(services)));
-                }
+            match bootstrap(&cfg, reporter.on_progress()).await {
+                Ok(services) => reporter.finish(services),
                 Err(errors) => {
                     tracing::error!("启动失败: {:?}", errors);
-                    phase_p.set(BootPhase::Failed(errors));
+                    reporter.fail(errors);
                 }
             }
         });
@@ -144,21 +135,21 @@ fn BootGate() -> Element {
 
     let boot_phase = phase.read().clone();
     match boot_phase {
-        BootPhase::Loading(done) => rsx! {
+        AppBootPhase::Loading(done) => rsx! {
             document::Stylesheet { href: BOOT_CSS }
             BootSplash { done }
         },
-        BootPhase::Failed(errors) => rsx! {
+        AppBootPhase::Failed(errors) => rsx! {
             document::Stylesheet { href: BOOT_CSS }
             BootError {
                 errors,
                 on_retry: move |_| {
-                    phase.set(BootPhase::Loading(Vec::new()));
+                    phase.set(AppBootPhase::Loading(Vec::new()));
                     attempt.set(attempt() + 1);
                 },
             }
         },
-        BootPhase::Ready(services) => rsx! {
+        AppBootPhase::Ready(services) => rsx! {
             ReadyShell { services: BootServices(services) }
         },
     }

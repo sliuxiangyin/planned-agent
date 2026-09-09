@@ -29,12 +29,13 @@ use crate::components::chat::chat_flow::{handle_user_action, Bubble, ChatSignals
 use crate::context::{
     register_sub_agent, require_resource, AiContext, PromptContext, StorageContext, ToolsContext,
 };
+use crate::shared::BootReporter;
 use crate::pages::plan::shared::session::SessionManager;
 use crate::services::plans_flexible_service::PlansFlexibleService;
 
 use super::chat_service_factory::ChatSvc;
 use super::flexible_state_tool::{flexible_state_tool, FlexibleStateExecutor};
-use super::session_boot::{boot_flexible_session, FlexBoot, OnBootPhase};
+use super::session_boot::{boot_flexible_session, FlexBoot};
 use super::step2_callback::create_step2_callback;
 use super::step5_callback::create_step5_callback;
 
@@ -207,23 +208,9 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
         let slot = session_mgr.read().clone();
         // ChatSignals 是 Copy：把句柄副本交给 boot 异步填充历史/订阅
         let chat_boot = chat;
-        let mut boot_done = boot;
-        let boot_progress = boot;
-        // 进度回调：把已完成阶段名累积进 boot Loading（对齐全局 boot.rs 的 on_progress）。
-        // boot_progress 是 Copy 句柄，底层共享；Fn 闭包内不能可变借用捕获项，故拷贝出局部 mut handle 再 set。
-        let progress_cb: OnBootPhase = Arc::new(move |name: &'static str| {
-            let done = if let FlexBoot::Loading(d) = boot_progress.read().clone() {
-                d
-            } else {
-                return;
-            };
-            if !done.contains(&name) {
-                let mut d = done;
-                d.push(name);
-                let mut progress = boot_progress;
-                progress.set(FlexBoot::Loading(d));
-            }
-        });
+        // 进度/结果写回器：把「累积进度 + 写 Ready/Failed」的 signal 样板收口
+        // （见 `BootReporter`，与全局 bootstrap 共用同一套逻辑）。
+        let reporter = BootReporter::new(boot);
         spawn(async move {
             match boot_flexible_session(
                 storage,
@@ -233,14 +220,14 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
                 prompt_ctx,
                 chat_boot,
                 slot,
-                progress_cb,
+                reporter.on_progress(),
             )
             .await
             {
-                Ok(session) => boot_done.set(FlexBoot::Ready(Arc::new(session))),
+                Ok(session) => reporter.finish(session),
                 Err(errors) => {
                     tracing::error!("灵活模式会话启动失败: {:?}", errors);
-                    boot_done.set(FlexBoot::Failed(errors));
+                    reporter.fail(errors);
                 }
             }
         });

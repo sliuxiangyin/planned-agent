@@ -1,4 +1,4 @@
-//! 灵活模式「会话启动门」—— 仿 `context/boot.rs` 的一次会话就绪流程。
+//! 灵活模式「会话启动门」—— 仿 `crate::boot` 的一次会话就绪流程。
 //!
 //! 目的：把 `use_flexible_controller` 里原本靠多个 `use_effect` + signal 值互相串联
 //! 才拼起来的初始化（ensure_current_session → new_chat_service → start_driver →
@@ -18,23 +18,15 @@ use std::sync::Arc;
 
 use crate::components::chat::chat_flow::{ensure_subscription, ChatSignals};
 use crate::context::{AiContext, PromptContext, StorageContext, ToolsContext};
+use crate::shared::{BootPhase, OnProgress};
 use crate::pages::plan::shared::session::SessionManager;
 
 use super::chat_service_factory::{new_chat_service, ChatSvc};
 
-/// 启动进度回调：与全局 `boot.rs` 的 `OnProgress` 同款（可经 signal 回写进度）。
-pub(crate) type OnBootPhase = Arc<dyn Fn(&'static str) + Send + Sync>;
-
-/// 灵活模式会话启动状态机（页面控制器持有）。
-#[derive(Clone)]
-pub(crate) enum FlexBoot {
-    /// 仍在启动；携带已完成的阶段名列表，供 UI 展示进度。
-    Loading(Vec<&'static str>),
-    /// 就绪：持有会话启动产物。
-    Ready(Arc<ReadySession>),
-    /// 失败：携带「阶段名 + 错误信息」清单。
-    Failed(Vec<(String, String)>),
-}
+/// 灵活模式会话启动状态机：复用全局 `BootPhase`，`Ready` 载荷为 `ReadySession`。
+///
+/// 保留 `FlexBoot` 名称以最小化调用点改动（`FlexBoot::Loading` 等仍是合法变体路径）。
+pub(crate) type FlexBoot = BootPhase<ReadySession>;
 
 /// 一次会话启动的就绪产物。
 #[derive(Clone)]
@@ -56,7 +48,7 @@ pub(crate) async fn boot_flexible_session(
     prompt: Arc<PromptContext>,
     mut chat: ChatSignals,
     session_mgr: Arc<SessionManager>,
-    on_phase: OnBootPhase,
+    on_phase: OnProgress,
 ) -> Result<ReadySession, Vec<(String, String)>> {
     // 1. 定位/新建该 plan 的当前会话
     on_phase("session");

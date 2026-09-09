@@ -9,9 +9,10 @@ use std::sync::Arc;
 
 use crate::config::GuiConfig;
 
-use super::{
+use crate::context::{
     AiContext, KvContext, McpContext, PromptContext, RagContext, StorageContext, ToolsContext,
 };
+use crate::shared::OnProgress;
 
 /// 就绪后持有全部服务实例的句柄。
 ///
@@ -28,19 +29,6 @@ pub struct ReadyServices {
     pub rag: Option<Arc<RagContext>>,
     pub storage: Arc<StorageContext>,
 }
-
-/// 启动阶段的视图状态。
-#[derive(Clone)]
-pub enum BootPhase {
-    /// 仍在初始化；携带「已完成模块名」列表，供 Splash 展示加载进度
-    Loading(Vec<&'static str>),
-    /// 就绪：持有可注入的服务句柄
-    Ready(Arc<ReadyServices>),
-    /// 失败：携带「模块名 + 错误信息」清单
-    Failed(Vec<(String, String)>),
-}
-
-type OnProgress = Arc<dyn Fn(&'static str) + Send + Sync>;
 
 /// 顺序执行全部服务初始化，每完成一个回调 `on_progress(模块名)`。
 ///
