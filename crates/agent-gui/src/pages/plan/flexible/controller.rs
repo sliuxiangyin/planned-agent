@@ -22,6 +22,7 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use dioxus::prelude::*;
 use planned_agent::chat::{ChatConfig, SubscriptionGuard};
+use planned_agent_core::prompt::PromptManager;
 use planned_agent_core::tool_registry::ToolCategory;
 
 use crate::components::chat::chat_flow::{handle_user_action, Bubble, ChatSignals, PendingUI};
@@ -59,7 +60,7 @@ pub(crate) struct FlexibleController {
 impl FlexibleController {
     /// 就绪后的 ChatService；未就绪/失败时为 None。
     pub(crate) fn service(&self) -> Option<Arc<ChatSvc>> {
-        match self.boot.read().as_ref() {
+        match self.boot.read().clone() {
             FlexBoot::Ready(session) => Some(session.svc.clone()),
             _ => None,
         }
@@ -117,7 +118,9 @@ impl FlexibleController {
         // TODO(多会话并行): ChatServiceFactory struct 已移除；此处改为直接持有依赖
         // （storage/ai/tools/prompt）按需构造新会话 ChatService，并在多会话架构就位后
         // 改为「切走不 stop、后台继续跑」。现临时占位，避免误用单会话重建逻辑。
-        Err(anyhow!("switch_session 尚未就绪：待多会话并行改造完成后接入"))
+        Err(anyhow!(
+            "switch_session 尚未就绪：待多会话并行改造完成后接入"
+        ))
     }
 
     /// 切换系统提示模板（切换即停当前会话并重置）。
@@ -168,7 +171,7 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
     let template = use_signal_sync(|| Some("flexible/flexible_step1".to_string()));
 
     // ── 会话启动状态机（boot.rs 风格）：Loading → Ready / Failed ──
-    let mut boot = use_signal_sync(|| FlexBoot::Loading(Vec::new()));
+    let boot = use_signal_sync(|| FlexBoot::Loading(Vec::new()));
     let mut templates = use_signal_sync(|| Vec::<String>::new());
     // plan 级共享单例（PlanPage 已注入 context）；flexible_state/step5 旁路与 boot 广播用
     let session_mgr_ctx = use_context::<Arc<SessionManager>>();
@@ -204,9 +207,10 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
         let slot = session_mgr.read().clone();
         // ChatSignals 是 Copy：把句柄副本交给 boot 异步填充历史/订阅
         let chat_boot = chat;
-        let boot_done = boot;
+        let mut boot_done = boot;
         let boot_progress = boot;
-        // 进度回调：把已完成阶段名累积进 boot Loading（对齐全局 boot.rs 的 on_progress）
+        // 进度回调：把已完成阶段名累积进 boot Loading（对齐全局 boot.rs 的 on_progress）。
+        // boot_progress 是 Copy 句柄，底层共享；Fn 闭包内不能可变借用捕获项，故拷贝出局部 mut handle 再 set。
         let progress_cb: OnBootPhase = Arc::new(move |name: &'static str| {
             let done = if let FlexBoot::Loading(d) = boot_progress.read().clone() {
                 d
@@ -216,7 +220,8 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
             if !done.contains(&name) {
                 let mut d = done;
                 d.push(name);
-                boot_progress.set(FlexBoot::Loading(d));
+                let mut progress = boot_progress;
+                progress.set(FlexBoot::Loading(d));
             }
         });
         spawn(async move {

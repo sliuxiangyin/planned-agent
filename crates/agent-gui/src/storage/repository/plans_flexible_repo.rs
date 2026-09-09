@@ -101,4 +101,23 @@ impl PlansFlexibleRepo {
             .await?;
         Ok(model.map(|m| m.version))
     }
+
+    /// 按 plan_id 列出该计划下全部快照的 (session_id, version) 映射。
+    ///
+    /// 供"会话/版本列表"抽屉一次性取到每个已产出会话对应的版本号，
+    /// 避免对每个 session 单独查询。一个 session 至多一条快照，故此集合无重复 session。
+    pub async fn list_versions_by_plan(
+        &self,
+        plan_id: &str,
+    ) -> StorageResult<Vec<(String, i32)>> {
+        let rows = plans_flexible::Entity::find()
+            .filter(plans_flexible::Column::PlanId.eq(plan_id))
+            .order_by_desc(plans_flexible::Column::Version)
+            .all(&self.db)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|m| (m.session_id, m.version))
+            .collect())
+    }
 }
