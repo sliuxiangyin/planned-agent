@@ -117,9 +117,6 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
         document::Stylesheet { href: RESIZABLE_CSS }
         div { class: "plan-page",
             ResizablePanel {
-                initial_left_percent: 70.0,
-                min_left_percent: 25.0,
-                max_left_percent: 75.0,
                 left: rsx! {
                     PlanLeftPanel {
                         plan_id: plan_id.clone(),
@@ -128,6 +125,7 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
                         on_delete: on_delete_plan,
                     }
                 },
+                center: render_center_panel_placeholder(),
                 right: {
                     let mode = plan.mode();
                     if mode == "flexible" {
@@ -171,6 +169,19 @@ fn render_chat_panel_placeholder() -> Element {
             div {
                 style: "display: flex; align-items: center; justify-content: center; flex: 1; color: var(--text-secondary, #999); font-size: 14px;",
                 "聊天功能开发中…"
+            }
+        }
+    }
+}
+
+/// 渲染中间面板占位（预留）：内容待接入。
+fn render_center_panel_placeholder() -> Element {
+    rsx! {
+        div {
+            class: "center-panel",
+            div {
+                style: "display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-secondary, #999); font-size: 13px;",
+                "预留面板"
             }
         }
     }

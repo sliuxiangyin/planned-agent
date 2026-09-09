@@ -7,6 +7,7 @@
     width: 100%;
     height: 100%;
     overflow: hidden;
+    position: relative;
 }
 
 .resizable-panel__left {
@@ -37,11 +38,17 @@
     background-color: var(--primary-color-6);
 }
 
+.resizable-panel__center {
+    height: 100%;
+    overflow: hidden;
+    flex-shrink: 0;
+}
+
 .resizable-panel__right {
-    flex: 1;
     height: 100%;
     overflow: hidden;
     min-width: 0;
+    flex-shrink: 1;
 }
 
 .resizable-panel__overlay {
@@ -52,4 +59,37 @@
     height: 100%;
     z-index: 9999;
     cursor: col-resize;
+}
+
+/* ═══ 边缘悬浮展开按钮 ═══ */
+.resizable-panel__edge-btn {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 22px;
+    height: 64px;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--primary-color-6, #666);
+    background: var(--primary-color-3, rgba(0, 0, 0, 0.08));
+    border: none;
+    cursor: pointer;
+    transition: background-color 150ms, color 150ms;
+}
+
+.resizable-panel__edge-btn--left {
+    left: 0;
+    border-radius: 0 6px 6px 0;
+}
+
+.resizable-panel__edge-btn--right {
+    right: 0;
+    border-radius: 6px 0 0 6px;
+}
+
+.resizable-panel__edge-btn:hover {
+    color: var(--primary-color-1, #fff);
+    background-color: var(--primary-color-7);
 }
