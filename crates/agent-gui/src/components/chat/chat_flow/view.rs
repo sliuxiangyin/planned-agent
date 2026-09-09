@@ -1,15 +1,12 @@
 //! `ChatView` —— 聊天会话的不可变 UI 投影（单一数据源）。
 //!
-//! 目标：把原 `ChatSignals` 中散落在 6 个 signal 里的会话状态（`bubbles` /
-//! `active` / `agent_views` / `pending_ui` / `pending_tool_call_id`）收敛为**一个**
-//! 可整体读写的值类型，配合 `reduce.rs` 的纯 reducer 与 `bridge.rs` 的
-//! `ChatBridge`（持有 `Signal<ChatView>`）完成「事件 → 视图」的翻译。
+//! 目标：把会话状态（`bubbles` / `active` / `agent_views` / `pending_ui` /
+//! `pending_tool_call_id`）收敛为**一个**可整体读写的值类型，配合 `reduce.rs`
+//! 的纯 reducer 与 `bridge.rs` 的 `ChatBridge`（持有 `Signal<ChatView>`）
+//! 完成「事件 → 视图」的翻译。
 //!
 //! 本文件只承载「值操作方法」（对 `&mut self` 直接改字段）与「只读查询方法」，
 //! 不含任何 dioxus signal 依赖——`ChatView` 是纯值类型，可脱离 dioxus 单测。
-//!
-//! 与原 `signals_*.rs` 的差异仅一处机械变换：`self.xxx.write()/read()/set()` →
-//! `self.xxx`（直接字段读写）。
 
 use std::collections::HashMap;
 
@@ -45,7 +42,7 @@ fn assistant_placeholder() -> Bubble {
     }
 }
 
-// ── turn 生命周期（原 signals_turn.rs）────────────────────────────────────
+// ── turn 生命周期 ──────────────────────────────────────
 
 impl ChatView {
     /// 用户发送：push user 气泡 + assistant 占位气泡到 `active`。
@@ -89,7 +86,7 @@ impl ChatView {
     }
 }
 
-// ── 流式更新（原 signals_streaming.rs）────────────────────────────────────
+// ── 流式更新 ──────────────────────────────────────
 
 impl ChatView {
     /// 追加文本到 `active` 内最后一条 streaming 气泡。
@@ -121,7 +118,7 @@ impl ChatView {
     }
 }
 
-// ── Tool 调用管理（原 signals_tool.rs）────────────────────────────────────
+// ── Tool 调用管理 ──────────────────────────────────────
 
 impl ChatView {
     /// `ToolCallStart`：在最后 streaming 气泡上创建 `ToolViewData`（Pending）；
@@ -230,7 +227,7 @@ impl ChatView {
     }
 }
 
-// ── PendingUI / 子 agent 事件（原 signals_pending.rs）─────────────────────
+// ── PendingUI / 子 agent 事件 ───────────────────────
 
 impl ChatView {
     pub fn set_pending(&mut self, state: PendingUI) {
@@ -255,9 +252,41 @@ impl ChatView {
             av.is_streaming = false;
         }
     }
+
+    /// 子 agent 内部发起一次工具调用（`SubChat` 里的 `ToolCallStart`）。
+    ///
+    /// 作为 `AgentEvent::ToolCall` 按时间顺序插入 `events` 流（与文本混排）。
+    pub fn push_agent_tool_call(&mut self, agent_id: &str, inner_id: &str, name: &str) {
+        if let Some(av) = self.agent_views.get_mut(agent_id) {
+            av.events.push(AgentEvent::ToolCall {
+                id: inner_id.to_string(),
+                name: name.to_string(),
+                phase: ToolCallPhase::Pending,
+            });
+        }
+    }
+
+    /// 就地更新子 agent 内部某次工具调用的阶段（`ToolCallComplete` → Running / `ToolExecuted` → 终态）。
+    pub fn update_agent_tool_call(
+        &mut self,
+        agent_id: &str,
+        inner_id: &str,
+        phase: ToolCallPhase,
+    ) {
+        if let Some(av) = self.agent_views.get_mut(agent_id) {
+            for ev in av.events.iter_mut() {
+                if let AgentEvent::ToolCall { id, phase: p, .. } = ev {
+                    if id.as_str() == inner_id {
+                        *p = phase.clone();
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
 
-// ── 重置（原 signals_history.rs 的 clear）─────────────────────────────────
+// ── 重置 ───────────────────────────────────
 
 impl ChatView {
     /// 清空全部会话投影（保留结构，值归零）。
@@ -270,7 +299,7 @@ impl ChatView {
     }
 }
 
-// ── 状态查询（原 signals_status.rs）───────────────────────────────────────
+// ── 状态查询 ─────────────────────────────────────────
 
 impl ChatView {
     /// 是否正在流式输出（`active` 中任一气泡 `is_streaming=true`）。

@@ -50,7 +50,7 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
         FlexBoot::Ready(session) => session,
     };
 
-    let service = ready_session.svc.clone();
+    let bridge = ready_session.bridge.clone();
     let busy = ctl.is_busy();
     let current_template = ctl.template();
     let template_label =
@@ -84,8 +84,9 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
             }
 
             ChatPanel {
-                chat: ctl.chat,
-                chat_service: service,
+                view: ctl.view,
+                input_text: ctl.input_text,
+                bridge,
                 on_user_action: move |(choice, pending)| {
                     ctl.on_user_action(choice, pending);
                 },

@@ -15,9 +15,9 @@
 //! # `Signal` 是 `Copy`、`write()` 是 `&mut self`
 //!
 //! dioxus 0.7 中 `Signal::write()` / `set()` 的接收者是 `&mut self`（`WritableExt`），
-//! 但 `Signal` 本身 `Copy`。故此处与旧 `controller.rs` 一致：把 `view` 拷贝成
-//! `mut` 局部变量再 `write()`，闭包也保持 `Fn`（只按值拷贝 `view`，不对捕获变量
-//! 做 `&mut` 借用），满足 `on_chat_with_guard` 的 `Fn + Send + Sync + 'static` 约束。
+//! 但 `Signal` 本身 `Copy`。故把 `view` 拷贝成 `mut` 局部变量再 `write()`，
+//! 闭包也保持 `Fn`（只按值拷贝 `view`，不对捕获变量做 `&mut` 借用），
+//! 满足 `on_chat_with_guard` 的 `Fn + Send + Sync + 'static` 约束。
 
 use std::sync::Arc;
 
@@ -63,7 +63,7 @@ impl ChatBridge {
         self.view
     }
 
-    /// 发送用户消息：push user turn + `send_text` 入队（原 `send_message`）。
+    /// 发送用户消息：push user turn + `send_text` 入队。
     pub fn send(&self, text: String) {
         // 1. 改 view（短暂持有写锁）
         {
@@ -81,7 +81,7 @@ impl ChatBridge {
         }
     }
 
-    /// 用户提交 `request_user_action` / 子 agent 挂起卡片（原 `handle_user_action`）。
+    /// 用户提交 `request_user_action` / 子 agent 挂起卡片。
     ///
     /// 按 `pending.run_id` 区分子 agent（`resume_sub_agent`）与主 agent（`confirm_user_action`）路径。
     pub fn confirm(&self, choice: String, pending: PendingUI) {
@@ -121,5 +121,20 @@ impl ChatBridge {
             v.append_to_last_assistant(&format!("\n\n*交互提交失败: {}*", e));
             v.stop_streaming();
         }
+    }
+
+    /// 停止当前对话（转发 `svc.stop()`）。
+    pub fn stop(&self) {
+        self.svc.stop();
+    }
+
+    /// 设置系统提示模板（转发 `svc.set_system_prompt_template`）。
+    pub fn set_system_prompt_template(&self, template: Option<String>) {
+        self.svc.set_system_prompt_template(template);
+    }
+
+    /// 重置服务端会话（转发 `svc.reset_session`）。
+    pub fn reset_session(&self) -> anyhow::Result<()> {
+        self.svc.reset_session()
     }
 }

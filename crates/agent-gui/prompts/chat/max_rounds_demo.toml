@@ -1,5 +1,5 @@
 [name]
-description = "轮次上限（max_tool_rounds）触顶复现测试助手 —— 持续调用简单工具直到被强制结束，用于核验触顶时前端实时 vs 回显是否一致"
+description = "（max_tool轮次上限_rounds）触顶复现测试助手 —— 持续调用简单工具直到被强制结束，用于核验触顶时前端实时 vs 回显是否一致"
 
 [content]
 text = """

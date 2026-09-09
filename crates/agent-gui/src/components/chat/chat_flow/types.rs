@@ -73,12 +73,24 @@ impl PartialEq for ToolViewData {
 // ── 子 Agent ────────────────────────────────────────────────────────────
 
 /// 子 agent 流式事件（从 `SubChat` 事件攒入，供 AgentView 渲染）。
+///
+/// 文本与工具调用按时间顺序混排在同一个 `events` 里，保证 `AgentView`
+/// 按消息流顺序渲染（工具调用穿插在文本之间，而非堆积在底部）。
 #[derive(Clone, Debug, PartialEq)]
 pub enum AgentEvent {
     /// 文本增量
     TextDelta(String),
     /// 推理内容增量
     ReasoningDelta(String),
+    /// 子 agent 内部一次工具调用（轻量：只展示工具名 + 状态，`phase` 就地更新）。
+    ToolCall {
+        /// 工具调用的 tool_call_id
+        id: String,
+        /// 工具名（如 "builtin_read_documentation"）
+        name: String,
+        /// 执行阶段
+        phase: ToolCallPhase,
+    },
 }
 
 /// 子 agent 的流式输出状态（事件攒入 + 当前 phase）。
@@ -90,7 +102,7 @@ pub struct AgentViewData {
     pub name: String,
     /// 当前执行阶段
     pub phase: ToolCallPhase,
-    /// 攒入的流式事件
+    /// 攒入的流式事件（文本与工具调用按时间顺序混排）
     pub events: Vec<AgentEvent>,
     /// 子 agent 是否还在输出
     pub is_streaming: bool,

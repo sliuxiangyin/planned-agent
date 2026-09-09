@@ -11,15 +11,10 @@
 chat/
 ├── mod.rs                    # 模块入口，pub use ChatPanel / AgentView
 ├── chat_flow/                # 消息流转（数据层 + 业务编排）
-│   ├── types.rs              #   纯数据类型：Bubble / ToolViewData / AgentViewData / PendingUI
-│   ├── signals.rs            #   ChatSignals 结构体定义 + build_bubbles 纯函数
-│   ├── signals_status.rs     #   状态查询：is_streaming / has_pending / is_busy
-│   ├── signals_turn.rs       #   Turn 生命周期：push_user_turn / finish_turn
-│   ├── signals_streaming.rs  #   流式更新：append_streaming_text / stop_streaming
-│   ├── signals_pending.rs    #   PendingUI + 子 Agent 事件攒入
-│   ├── signals_history.rs    #   重置 / 历史加载：clear / load_from_history
-│   ├── signals_tool.rs       #   Tool 调用管理：tool_call_start / tool_call_executed
-│   └── controller.rs         #   事件消费 / 发送消息 / 用户操作回调
+│   ├── types.rs              #   纯数据类型：Bubble / ToolViewData / AgentViewData / PendingUI / AgentEvent
+│   ├── view.rs               #   ChatView 值类型 + 值操作方法 + 状态查询
+│   ├── reduce.rs             #   纯 reducer：reduce（增量）+ view_from_history（全量）
+│   └── bridge.rs             #   ChatBridge：唯一接触 ChatService 的桥接层
 ├── agent_view/               # 子 agent 输出的嵌入式卡片
 │   ├── component.rs          #   AgentView 组件（Bot 图标 + 渐变线 + Markdown 渲染）
 │   └── style.css
@@ -33,38 +28,44 @@ chat/
 
 | 模块 | 职责 | 关键导出 |
 |---|---|---|
-| `chat_flow` | 气泡状态、事件消费 | `ChatSignals`、`send_message`、`ensure_subscription`、`handle_user_action` |
-| `chat_flow::signals_*` | ChatSignals impl 按职责分离 | 状态查询 / turn / 流式 / pending / 历史 / 工具 |
+| `chat_flow::view` | 会话 UI 投影值类型 + 值操作/查询 | `ChatView` |
+| `chat_flow::reduce` | 事件/历史 → `ChatView` 的纯翻译 | `reduce`、`view_from_history` |
+| `chat_flow::bridge` | `ChatService` ↔ `Signal<ChatView>` 唯一接线点 | `ChatBridge` |
+| `chat_flow::types` | 纯数据类型（无逻辑） | `Bubble`、`PendingUI`、`ToolViewData` 等 |
 | `agent_view` | 子 agent 输出渲染 | `AgentView` |
 | `chat_panel` | 纯 UI 布局，不持有业务逻辑 | `ChatPanel`、`template_label` |
 | `chat_ui_actions_view` | `request_user_action` 交互卡片 | `ChatUIActionsView` |
 | `reasoning_view` | 推理内容折叠面板 | `ReasoningView` |
 | `tool_view` | 工具调用折叠卡片 | `ToolView` |
 
-**分层原则**：`chat_flow` 只操作 `Signal` 状态、不渲染；`chat_panel` 只渲染、不碰服务；页面层（如 `pages/plan/flexible/page.rs`）负责构造 `ChatService`、从 `service.history()` 加载历史、把事件处理函数传入 `ChatPanel`。
+**分层原则**：`chat_flow` 只操作 `ChatView` 值、不渲染；`chat_panel` 只渲染、不碰服务；页面层（如 `pages/plan/flexible/`）负责构造 `ChatService`、`ChatBridge`，把 `Signal<ChatView>` 与桥传入 `ChatPanel`。
+
+**单一订阅桥**：组件层不直接 `import ChatService`，只依赖 `ChatBridge` + `Signal<ChatView>`。事件由桥内部的唯一订阅回调 `reduce` 进 `view`，UI 只读这一个投影。
 
 ---
 
 ## 2. 数据模型
 
-### 2.1 `ChatSignals`（signals.rs）
+### 2.1 `ChatView`（view.rs）
 
-单一气泡源，拆成「历史 + 活跃 + 子 agent」三个 Signal：
+单一会话 UI 投影，把原先散落在 6 个 `Signal` 里的会话状态收敛为**一个可整体读写的值类型**：
 
 ```rust
-pub struct ChatSignals {
-    pub bubbles: Signal<Vec<Bubble>, SyncStorage>,   // 历史气泡（已完成的 turn）
-    pub active:  Signal<Vec<Bubble>, SyncStorage>,   // 当前 turn 气泡组（流式增量更新）
-    pub agent_views: Signal<HashMap<String, AgentViewData>, SyncStorage>, // 子 agent 流式数据
-    pub pending_ui: Signal<Option<PendingUI>, SyncStorage>, // 交互卡片
-    pub input_text: Signal<String, SyncStorage>,            // composer 输入框
-    pub pending_tool_call_id: Signal<Option<String>, SyncStorage>, // request_user_action 的 tool_call_id
-    pub subscription: Signal<Option<SubscriptionGuard>, SyncStorage>, // 事件订阅 guard
+#[derive(Clone, PartialEq, Default)]
+pub struct ChatView {
+    pub bubbles: Vec<Bubble>,                          // 历史气泡（已完成的 turn）
+    pub active: Vec<Bubble>,                           // 当前 turn 气泡组（流式增量更新）
+    pub agent_views: HashMap<String, AgentViewData>,   // 子 agent 流式数据（key = tool_call_id）
+    pub pending_ui: Option<PendingUI>,                 // 交互卡片
+    pub pending_tool_call_id: Option<String>,          // request_user_action 的 tool_call_id
 }
 ```
 
-**核心设计**：流式事件只增量更新 `active`（O(当前 turn 轮数)），`Done` 时整组并入 `bubbles`。
-`active` 通常只有 1~3 条气泡，历史 `bubbles` 完全不动——这就是性能优化的本质。
+**不含** `input_text`（输入框文本，组件局部 UI 态，由 `chat_panel` 自己维护）与 `subscription`（事件订阅 guard，由 `ChatBridge` 持有）。
+
+**核心设计**：流式事件只增量更新 `active`（O(当前 turn 轮数)），`Done` 时整组并入 `bubbles`。`active` 通常只有 1~3 条气泡，历史 `bubbles` 完全不动——这就是性能优化的本质。
+
+`ChatView` 是纯值类型（无 dioxus signal 依赖），可脱离 dioxus 单测。值操作方法（`push_user_turn` / `append_streaming_text` / `tool_call_start` …）与只读查询方法（`is_streaming` / `is_busy` …）都定义在 `impl ChatView` 上。
 
 **持久化由服务端 `History` + `ChatHistoryStore` 处理**——GUI 不再持有 `messages`、`sequence_order` 等持久化相关字段。
 
@@ -84,8 +85,7 @@ pub struct Bubble {
 
 ### 2.3 工具相关：`ToolViewData`（单一数据源）
 
-`ToolViewData` 现在是**唯一**工具数据源，`name`/`arguments`/`phase`/`result`/`is_error`
-全部内聚，事件直接驱动（`tool_call_start` 建、`append_args`/`complete`/`executed` 就地更新）：
+`ToolViewData` 是**唯一**工具数据源，`name`/`arguments`/`phase`/`result`/`is_error`/`is_sub_agent` 全部内聚，事件直接驱动（`tool_call_start` 建、`append_args`/`complete`/`executed` 就地更新）：
 
 ```rust
 pub struct ToolViewData {
@@ -95,6 +95,7 @@ pub struct ToolViewData {
     pub phase: ToolCallPhase,         // Pending / Running / Completed / Error
     pub result: Option<serde_json::Value>,
     pub is_error: bool,
+    pub is_sub_agent: bool,           // true → 渲染 AgentView 而非 ToolView
 }
 ```
 
@@ -120,7 +121,7 @@ pub struct UIQuestion {
     pub question: String,        // 问题全文
     pub options: Vec<UIOption>,  // 用户可点的选项（2..5 个）
     pub multi: bool,             // false=单选（默认）；true=多选，前端自动补「提交」
-    pub allow_input: bool,       // 默认 true=带「自定义回答」输入框（每题默认带，勿漏）；options 已穷尽时才 false 隐藏
+    pub allow_input: bool,       // 默认 true=带「自定义回答」输入框
 }
 pub struct UIOption {
     pub label: String,            // 人看的文本
@@ -148,7 +149,7 @@ pub struct UIOption {
   ├─ RoundEnd → stop_streaming（active 内全部 is_streaming=false）
   │   （下一轮 RoundStart → 再 push 一条 assistant 占位气泡）
   │
-  └─ Done → finish_turn()：bubbles.extend(active)，active.clear()
+  └─ Done → finish_turn()：bubbles.append(active)，active.clear()
 ```
 
 关键点：
@@ -156,27 +157,33 @@ pub struct UIOption {
 - **`tool` 不是独立气泡**，作为工具面板挂在「发起它的 assistant 气泡」里。
 - **组内是多条 assistant 气泡**（每轮 tool 调用后开一条），不是一整条。
 
+这些值操作方法（`push_user_turn` / `push_assistant_placeholder` / `finish_turn` / `stop_streaming` …）定义在 `ChatView` 上，由 `reduce`（增量）或 `bridge.send`（发送时预建 turn）调用。
+
 ---
 
-## 4. 事件 → 状态消费（controller.rs `handle_event`）
+## 4. 事件 → 状态消费（reduce.rs `reduce`）
 
-| 服务端事件 | ChatSignals 动作 | 说明 |
+`reduce(view: &mut ChatView, ev: &ServiceChatEvent)` 是唯一的事件翻译入口，由 `ChatBridge::connect` 的订阅回调调用（`reduce(&mut *view.write(), &ev)`）。
+
+| 服务端事件 | ChatView 动作 | 说明 |
 |---|---|---|
 | `Chat(TextDelta)` | `append_streaming_text` | 追加到 `active` 最后一条 streaming 气泡 |
 | `Chat(ReasoningDelta)` | `append_streaming_reasoning` | 同上，追加 reasoning |
-| `Chat(RoundStart)` | 若未 streaming 则 `push_assistant_placeholder` | 防御性（send_message 已预建占位） |
+| `Chat(RoundStart)` | 若未 streaming 则 `push_assistant_placeholder` | 防御性（send 已预建占位） |
 | `Chat(ToolCallStart)` | `tool_call_start(id, name, is_sub_agent)` | 建 `ToolViewData`；`is_sub_agent` 时同时建 `AgentViewData` |
 | `Chat(ToolCallArgsDelta)` | `tool_call_append_args` | 追加 `arguments` |
 | `Chat(ToolCallComplete)` | `tool_call_complete` | `arguments` 覆写 + `phase=Running` |
-| `Chat(ToolExecuted)` | `tool_call_executed` + `finish_agent_view` | `phase=Completed/Error` + `result`；若为子 agent 则同步更新 `AgentView` |
+| `Chat(ToolExecuted)` | `tool_call_executed` + `finish_agent_view` | `phase=Completed/Error` + `result`；子 agent 同步更新 `AgentView` |
 | `Chat(SubChat)` | `push_agent_event` | 子 agent 流式事件（TextDelta/ReasoningDelta）攒入 `agent_views` |
 | `Chat(RoundEnd)` | `stop_streaming` | 轮次结束 |
 | `Chat(UIActionRequest)` | `set_pending` | 弹出交互卡片 |
 | `Done` | `stop_streaming` + **`finish_turn`** + `clear_pending` | turn 收尾并入历史 |
-| `Error(e)` | `stop_streaming` + **`finish_turn`** + `clear_pending` | 收尾 |
+| `Error(e)` | `render_error` + `stop_streaming` + **`finish_turn`** + `clear_pending` | 收尾 |
 | `HistoryUpdated` | `reconcile_with_snapshot` | 保持注释（启用时用快照校准 bubbles） |
 
-**发送链路**（`send_message`）：`clear_pending` → `push_user_turn`（push User + 预建 streaming Assistant 占位）→ `chat_svc.send_text(text)`。
+**发送链路**（`bridge.send`）：`clear_pending` → `push_user_turn`（push User + 预建 streaming Assistant 占位）→ `svc.send_text(text)`。
+
+`reduce` 是纯函数（只改 `&mut ChatView`，不触碰 dioxus signal），可脱离 dioxus 单测。
 
 ---
 
@@ -185,19 +192,21 @@ pub struct UIOption {
 ### 5.1 总览
 
 ```
-ChatSignals.bubbles (历史气泡)  +  ChatSignals.active (当前 turn 气泡)
-        │                                   │
-        └────────── bubbles.iter().chain(active.iter()) ──────────┐
-                                                                  ▼
-                                              render_assistant_bubble / render_user_bubble
-                                                                  │
-                                                                  ▼
-                                    ┌─ ToolViewData.is_sub_agent ─┼─ false → ToolView
-                                    └─ true → AgentView（读 agent_views[tool_call_id]）
+Signal<ChatView>（组件 read 一次）
+        │
+        ├─ view.bubbles (历史气泡)  +  view.active (当前 turn 气泡)
+        │        └────────── bubbles.iter().chain(active.iter()) ──────────┐
+        │                                                                   ▼
+        │                                              render_assistant_bubble / render_user_bubble
+        │                                                                   │
+        │                                                                   ▼
+        │                                    ┌─ ToolViewData.is_sub_agent ─┼─ false → ToolView
+        │                                    └─ true → AgentView（读 view.agent_views[tool_call_id]）
+        └─ view.pending_ui (交互卡片，输入框上方渲染 ChatUIActionsView)
                                     + ReasoningView + Markdown(text) + 光标
 ```
 
-组件只读三个 Signal（bubbles + active + agent_views），不做任何构建。
+组件对 `view` 做一次 `read()`，再借出 `bubbles` / `active` / `agent_views` / `pending_ui` 字段，不做任何构建。发送/停止通过 `bridge.send()` / `bridge.stop()`；输入框文本由独立的 `input_text: Signal<String>` 维护。
 
 ### 5.2 单条 assistant 气泡渲染顺序（与 ChatGPT/Claude 一致）
 
@@ -214,7 +223,7 @@ ChatSignals.bubbles (历史气泡)  +  ChatSignals.active (当前 turn 气泡)
 
 - `Textarea`：Enter 发送（Shift+Enter 换行），busy 时禁用
 - 工具栏：模板选择、思考模式、温度选择
-- 发送/停止按钮：busy → 停止（`svc.stop()`）；空闲 → 发送
+- 发送/停止按钮：busy → 停止（`bridge.stop()`）；空闲 → 发送（`bridge.send()`）
 
 ---
 
@@ -239,10 +248,10 @@ ChatSignals.bubbles (历史气泡)  +  ChatSignals.active (当前 turn 气泡)
   └─ 其余           → Chat(SubChat { tool_call_id, event })
                           │
                           ▼
-                    controller.rs: push_agent_event(tool_call_id, AgentEvent)
+                    reduce.rs: view.push_agent_event(tool_call_id, AgentEvent)
                           │
                           ▼
-                    agent_views[tool_call_id].events += AgentEvent::TextDelta/ReasoningDelta
+                    view.agent_views[tool_call_id].events += AgentEvent::TextDelta/ReasoningDelta
                           │
                           ▼
                     AgentView 组件读取并渲染 Markdown
@@ -254,7 +263,7 @@ ChatSignals.bubbles (历史气泡)  +  ChatSignals.active (当前 turn 气泡)
 子 agent 完成 → collect_until_outcome 返回 Done
   → SubAgentToolExecutor 返回 ToolResult
   → 父 agent run_conversation emit Chat(ToolExecuted { id, is_error })
-  → controller.rs: finish_agent_view(id, Completed/Error)
+  → reduce.rs: view.finish_agent_view(id, Completed/Error)
   → AgentView 状态更新为 Completed/Error，停止 streaming
 ```
 
@@ -273,8 +282,7 @@ History::push_assistant(msg)
 **加载链路**：
 ```
 store.load → StoreMessage.is_agent_tool = true
-  → build_bubbles → ToolViewData.is_sub_agent = true
-  → load_from_history → 为 is_sub_agent 工具创建 AgentViewData
+  → view_from_history → 为 is_sub_agent 工具创建 AgentViewData
   → AgentView 回显（嵌入式卡片 + 最终文本）
 ```
 
@@ -282,12 +290,12 @@ store.load → StoreMessage.is_agent_tool = true
 
 ---
 
-## 6. Tool 调用生命周期（完整时序）
+## 7. Tool 调用生命周期（完整时序）
 
 以"列目录 → 读文件"为例：
 
 ```
-send_message → active: [user, assistant#1(streaming)]
+bridge.send → active: [user, assistant#1(streaming)]
 TextDelta:  "目录下共发现 3 个文件：…"   → assistant#1.text += chunk
 ToolCallStart(id="call_x", name="builtin_read_file")
   → assistant#1.tool_calls += ToolViewData{Pending}
@@ -324,79 +332,80 @@ Done             → finish_turn()：bubbles += [user, assistant#1, assistant#2]
 - **ArgsDelta 先于 ToolCallStart**：服务端已修复（accumulator 缓冲 + Start 后 flush）；气泡侧 find 不到即丢弃
 - **Complete 缺失 Start**：`tool_call_complete` 用事件自带 `name` 补建 `ToolViewData{Running}`
 - **Executed 缺失 Start/Complete**：`tool_call_executed` 补建到 `active` 最后 assistant 气泡
-- **`request_user_action`（UI 工具）**：GUI 刻意跳过其 Start/Complete，由交互卡片替代，Executed 时补建
+- **`request_user_action`（UI 工具）**：GUI 刻意跳过其 Start/Complete，由交互卡片替代，Executed 时文本化
 - **`ToolExecuted` 迟到**：遍历 `active` 全部气泡（非 streaming 也可命中）
 
 ---
 
-## 7. 历史加载与快照校准
+## 8. 历史加载与快照校准
 
-### 7.1 全量重建（`build_bubbles`，signals.rs 纯函数）
+### 8.1 全量重建（`view_from_history`，reduce.rs）
 
-`build_bubbles(&[Message]) -> Vec<Bubble>` 从服务端 `Message` 重建气泡，仅用于
-`load_from_history` / `reconcile_with_snapshot`（低频、全量）：
+`view_from_history(&[StoreMessage]) -> ChatView` 从服务端历史快照重建完整投影（低频、全量），是唯一的历史翻译入口，替代旧的 `build_bubbles` + `load_from_history` 两段：
 
 | 消息角色 | 行为 |
 |---|---|
 | `User` | 独立 user 气泡 |
 | `Assistant` | 独立 assistant 气泡（reasoning + text + tool_calls，phase 默认 Completed） |
-| `Tool` | 不产生气泡；按 `tool_call_id` 回填对应 `ToolViewData.result` |
+| `Tool` | 正常工具按 `tool_call_id` 回填对应 `ToolViewData.result`；`request_user_action` 的 Tool 文本化进气泡/agent_views |
 | 其他（System 等） | 忽略 |
 
-维护 `tool_index: HashMap<tool_call_id, (bubble_idx, tool_idx)>`，Tool 消息精确回填。
+内部维护 `tool_index: HashMap<tool_call_id, (bubble_idx, tool_idx)>`，Tool 消息精确回填；同时从 `is_agent_tool` 消息提取子 agent 骨架（`AgentViewData`）。
 
-### 7.2 GUI 侧历史加载
+### 8.2 GUI 侧历史加载
 
 ```
-page.rs:
+session_boot.rs (boot_flexible_session):
   1. 构造 ChatMessageStore(plan_id, repo)
   2. 注入 ChatService → 服务端 History 自动 load()
-  3. service.history() 获取已恢复的 Vec<Message>
-  4. chat.load_from_history(&history) → bubbles = build_bubbles(history); active.clear()
+  3. service.history() 获取已恢复的 Vec<StoreMessage>
+  4. *view.write() = view_from_history(&history)
+  5. bridge = ChatBridge::connect(service, view)
 ```
 
-### 7.3 `HistoryUpdated` 事件（展示校准，当前保持注释）
+### 8.3 `HistoryUpdated` 事件（展示校准，当前保持注释）
 
-仅在破坏性操作（pop/clean/rollback/clear）后 emit。启用时 `reconcile_with_snapshot`：
-`bubbles = build_bubbles(snapshot)`，`active` 保留不动——正在 streaming 的气泡物理隔离在
-`active`，天然受保护，无需再按 seq 做差集（相比旧实现的简化点）。
+仅在破坏性操作（pop/clean/rollback/clear）后 emit。启用时用快照重建 `view` 的 `bubbles`，`active` 保留不动——正在 streaming 的气泡物理隔离在 `active`，天然受保护，无需再按 seq 做差集。
 
 ---
 
-## 8. 交互卡片流程（request_user_action）
+## 9. 交互卡片流程（request_user_action）
 
 ```
 LLM 调用 request_user_action
   → 服务端 emit UIActionRequest { message, questions, session_id }
-  → handle_event: set_pending(PendingUI { tool_call_id, run_id, message, questions })
+  → reduce: view.set_pending(PendingUI { tool_call_id, run_id, message, questions })
   → ChatPanel 在输入框上方渲染 ChatUIActionsView（并列 questions 问题卡）
   → 用户作答 on_user_action((String, PendingUI))  // 回传文本形如 `header => answer`（每问一行）
-  → handle_user_action:
-      1. choice 文本追加到 active 最后一条 assistant 气泡
-      2. push 新 assistant 占位气泡
+  → bridge.confirm(choice, pending):
+      1. choice 文本追加到 view（主 agent → 气泡；子 agent → agent_views）
+      2. 主 agent 再 push 新 assistant 占位气泡
       3. run_id 非空 → resume_sub_agent；否则 confirm_user_action
 ```
 
 ---
 
-## 9. 关键设计决策
+## 10. 关键设计决策
 
 | 决策 | 原因 |
 |---|---|
-| **单一气泡源 `bubbles` + `active`** | 流式事件 O(当前 turn) 增量更新，历史完全不动，消除全量遍历 |
+| **单一订阅桥 `ChatBridge`** | UI 只依赖一个桥 + 一个 `Signal<ChatView>`，事件、发送、确认、停止都收口到桥，组件不直接碰 `ChatService` |
+| **`ChatView` 单一值类型** | 把 6 个散落 signal 收敛为一个可整体读写的投影，配合纯 reducer 可脱离 dioxus 单测 |
+| **单一数据源 `bubbles` + `active`** | 流式事件 O(当前 turn) 增量更新，历史完全不动，消除全量遍历 |
 | **`Bubble` 扁平化** | 删除 `Message`/`ChatMessage`/`RenderMessage`/`RenderBubble` 多层，一次成型 |
 | **`ToolViewData` 单一数据源** | 消除 name/arguments 与 phase/result 双源同步错位 |
 | **`finish_turn` 在 `Done`/`Error` 时并入历史** | turn 原子性，`ToolExecuted` 迟到回填有明确边界 |
+| **锁序约定（先改 view 再调 svc）** | `send`/`confirm` 先改 view、释放写锁再调 svc，避免与 svc 事件回调的 `view.write()` 嵌套锁 |
 | 工具按 `tool_call_id` 精确路由 | 曾按 name/顺序匹配，多工具并发时参数/结果串台 |
 | 每条 Assistant 独立气泡、text 全保留 | 曾把含 tool_calls 的 assistant 当纯工具消息，text 丢失 |
 | 文本在工具面板之前渲染 | 与 ChatGPT/Claude/Cursor 一致 |
 | **持久化上移服务端**（`ChatHistoryStore` trait） | 单一数据源——服务端 `History` 在每次写入/清理时同步 store，GUI 不再自行持久化 |
-| **`Arc<ChatService>` 直接传递**（不用 Signal） | 构造后服务指针稳定不变，Signal 追踪"一次初始化"是多余开销 |
+| **`Arc<ChatService>` 由桥持有** | 构造后服务指针稳定不变，桥即唯一持有者，组件无需关心 |
 | **事件处理函数抽离出 rsx!** | rsx! 只负责布局，业务逻辑在组件体中定义为闭包/函数 |
 
 ---
 
-## 10. 已知限制
+## 11. 已知限制
 
 - **同一 assistant 气泡内无法区分"工具前文本"与"工具后文本"**：文本统一放在工具面板之前（主流模型先说后调，可接受近似）
 - **历史加载后工具错误态（is_error）无法还原**：`Message` 未持久化该字段，加载后统一显示为 Completed

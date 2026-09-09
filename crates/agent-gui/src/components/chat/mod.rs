@@ -14,5 +14,4 @@ pub mod chat_ui_actions_view;
 pub mod reasoning_view;
 pub mod tool_view;
 
-pub use agent_view::AgentView;
 pub use chat_panel::ChatPanel;

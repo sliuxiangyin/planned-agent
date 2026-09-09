@@ -7,9 +7,9 @@
 //! - Composer 工具栏（模板选择、思考模式、温度选择）
 //! - 清空会话二次确认弹窗
 //!
-//! 业务逻辑（ChatFlow、ChatService 初始化）由调用方在页面层处理。
-//! 气泡数据由 `ChatSignals` 维护（`bubbles` 历史 + `active` 当前 turn），
-//! 本组件只读、只渲染。
+//! 业务逻辑（ChatBridge、ChatService 初始化）由调用方在页面层处理。
+//! 气泡数据由 `ChatView`（`Signal<ChatView>`）维护（`bubbles` 历史 + `active` 当前 turn），
+//! 本组件只读、只渲染；发送/停止经 `ChatBridge`，输入框文本由独立的 `input_text` 维护。
 
 use dioxus::prelude::*;
 
@@ -20,7 +20,7 @@ use crate::components::alert_dialog::{
     AlertDialogTitle,
 };
 use crate::components::button::{Button, ButtonSize, ButtonVariant};
-use crate::components::chat::chat_flow::{send_message, AgentViewData, Bubble, ChatSignals, PendingUI, ToolCallPhase};
+use crate::components::chat::chat_flow::{AgentViewData, Bubble, ChatBridge, ChatView, PendingUI, ToolCallPhase};
 use crate::components::chat::chat_ui_actions_view::ChatUIActionsView;
 use crate::components::chat::reasoning_view::ReasoningView;
 use crate::components::chat::tool_view::ToolView;
@@ -33,8 +33,6 @@ use dioxus_primitives::tooltip::{
     Tooltip as TooltipPrim, TooltipContent as TooltipContentPrim,
     TooltipTrigger as TooltipTriggerPrim,
 };
-use planned_agent::ChatService;
-use planned_agent_prompt_manager::FilePromptManager;
 use std::sync::Arc;
 
 #[css_module("/src/components/chat/chat_panel/style.css")]
@@ -45,8 +43,9 @@ struct Styles;
 /// 完整聊天面板 Props。
 #[derive(Props, Clone)]
 pub struct ChatPanelProps {
-    pub chat: ChatSignals,
-    pub chat_service: Arc<ChatService<FilePromptManager>>,
+    pub view: Signal<ChatView, SyncStorage>,
+    pub input_text: Signal<String, SyncStorage>,
+    pub bridge: Arc<ChatBridge>,
     pub on_user_action: EventHandler<(String, PendingUI)>,
     #[props(default = String::new())]
     pub template_label: String,
@@ -71,8 +70,8 @@ pub struct ChatPanelProps {
 /// 用指针相等性判断（同一实例即相等）。
 impl PartialEq for ChatPanelProps {
     fn eq(&self, other: &Self) -> bool {
-        self.chat == other.chat
-            && Arc::ptr_eq(&self.chat_service, &other.chat_service)
+        self.view == other.view
+            && Arc::ptr_eq(&self.bridge, &other.bridge)
             && self.template_label == other.template_label
             && self.templates == other.templates
             && self.thinking == other.thinking
@@ -86,12 +85,13 @@ impl PartialEq for ChatPanelProps {
 /// 完整聊天面板组件。
 #[component]
 pub fn ChatPanel(props: ChatPanelProps) -> Element {
-    let chat = props.chat;
-    let svc = props.chat_service.clone();
+    let view = props.view;
+    let input_text = props.input_text;
+    let bridge = props.bridge.clone();
 
     let mut show_clear_dialog = use_signal_sync(|| false);
 
-    let busy = chat.is_busy();
+    let busy = view.read().is_busy();
 
     let apply_template = {
         let on_template_change = props.on_template_change.clone();
@@ -106,20 +106,22 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
     };
 
     use_effect(move || {
-        let _len = chat.bubbles.read().len();
-        let _active = chat.active.read().len();
-        let _has_pending = chat.pending_ui.read().is_some();
+        let v = view.read();
+        let _len = v.bubbles.len();
+        let _active = v.active.len();
+        let _has_pending = v.pending_ui.is_some();
         // 订阅子 agent 流式数据：每次 agent 事件进来都要重跑，才能让
         // agent_view 卡片内部滚动容器跟着最新输出自动滚到底。
-        let _av = chat.agent_views.read();
+        let _av = v.agent_views.len();
         let _ = document::eval(
             "setTimeout(() => { const el = document.getElementById('chat-scroll'); if (el) el.scrollTop = el.scrollHeight; document.querySelectorAll('[data-agent-streaming=\"true\"]').forEach(el => el.scrollTop = el.scrollHeight); }, 100);"
         );
     });
 
-    let bubbles = chat.bubbles.read();
-    let active = chat.active.read();
-    let agent_views = chat.agent_views.read();
+    let v = view.read();
+    let bubbles = &v.bubbles;
+    let active = &v.active;
+    let agent_views = &v.agent_views;
 
     // 把同一 user turn 内连续相邻的 assistant 归并成「回复组」，渲染成一个连续气泡块
     // （遇 user 气泡即断开新组）。仅涉及视图层，数据 / 事件 / 回显结构不变。
@@ -146,11 +148,11 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
                         for group in groups {
                             if group[0].is_assistant {
                                 if group.len() == 1 {
-                                    { render_assistant_bubble(group[0], &agent_views) }
+                                    { render_assistant_bubble(group[0], agent_views) }
                                 } else {
                                     div { class: Styles::chat_message__group,
                                         for b in group {
-                                            { render_assistant_bubble(b, &agent_views) }
+                                            { render_assistant_bubble(b, agent_views) }
                                         }
                                     }
                                 }
@@ -167,7 +169,7 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
             // ═══════════════════════════════════════════════════════
             // 交互卡片（固定在输入框上方）
             // ═══════════════════════════════════════════════════════
-            if let Some(pending) = chat.pending_ui.read().as_ref() {
+            if let Some(pending) = v.pending_ui.as_ref() {
                 {
                     let p = pending.clone();
                     let on_action = props.on_user_action.clone();
@@ -189,7 +191,7 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
             // 输入区
             // ═══════════════════════════════════════════════════════
             { render_composer(
-                busy, chat, svc.clone(),
+                busy, input_text, bridge.clone(),
                 &props.template_label, props.templates.clone(),
                 props.thinking, props.temperature.clone(), props.temperatures.clone(),
                 props.on_thinking_change.clone(), props.on_temperature_change.clone(),
@@ -300,8 +302,8 @@ fn render_user_bubble(bubble: &Bubble) -> Element {
 /// 渲染 composer。所有 Props 数据由调用方 clone 后传入，避免引用逃逸到闭包。
 fn render_composer(
     busy: bool,
-    mut chat: ChatSignals,
-    svc: Arc<ChatService<FilePromptManager>>,
+    input_text: Signal<String, SyncStorage>,
+    bridge: Arc<ChatBridge>,
     template_label: &str,
     templates: Vec<String>,
     thinking: bool,
@@ -311,26 +313,32 @@ fn render_composer(
     on_temperature_change: Option<EventHandler<String>>,
     apply_template: impl Fn(String) + Clone + 'static,
 ) -> Element {
-    let svc_send = svc.clone();
-    let svc_stop = svc.clone();
-    let svc_key = svc.clone();
+    let bridge_send = bridge.clone();
+    let bridge_stop = bridge.clone();
+    let bridge_key = bridge.clone();
     rsx! {
         div { class: Styles::chat_composer,
             Textarea {
                 class: Styles::chat_composer__textarea,
                 placeholder: "输入消息...",
-                value: "{chat.input_text}",
+                value: "{input_text}",
                 disabled: busy,
-                oninput: move |e: FormEvent| chat.input_text.set(e.value()),
-                onkeydown: move |e: KeyboardEvent| {
-                    if e.data.key() == keyboard_types::Key::Enter
-                        && !e.data.modifiers().shift()
-                    {
-                        e.prevent_default();
-                        if !busy {
-                            let text = chat.input_text.read().trim().to_string();
-                            if !text.is_empty() {
-                                send_message(&mut chat, &svc_key, text);
+                oninput: {
+                    let mut it = input_text;
+                    move |e: FormEvent| it.set(e.value())
+                },
+                onkeydown: {
+                    let it = input_text;
+                    move |e: KeyboardEvent| {
+                        if e.data.key() == keyboard_types::Key::Enter
+                            && !e.data.modifiers().shift()
+                        {
+                            e.prevent_default();
+                            if !busy {
+                                let text = it.read().trim().to_string();
+                                if !text.is_empty() {
+                                    bridge_key.send(text);
+                                }
                             }
                         }
                     }
@@ -431,10 +439,13 @@ fn render_composer(
                         variant: ButtonVariant::Primary,
                         size: ButtonSize::Icon,
                         title: "发送",
-                        onclick: move |_| {
-                            let text = chat.input_text.read().trim().to_string();
-                            if !text.is_empty() {
-                                send_message(&mut chat, &svc_send, text);
+                        onclick: {
+                            let it = input_text;
+                            move |_| {
+                                let text = it.read().trim().to_string();
+                                if !text.is_empty() {
+                                    bridge_send.send(text);
+                                }
                             }
                         },
                         ArrowUp { size: "18" }
@@ -446,7 +457,7 @@ fn render_composer(
                         size: ButtonSize::Icon,
                         title: "停止",
                         onclick: move |_| {
-                            svc_stop.stop();
+                            bridge_stop.stop();
                         },
                         Square { size: "16" }
                     }

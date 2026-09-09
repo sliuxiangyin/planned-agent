@@ -12,20 +12,19 @@
 //! 让 `FlexiblePage` 组件退化为「状态 → 视图」的纯渲染层。
 //!
 //! 设计要点：
-//! - `ChatSignals` 是 `Copy`（内部全为 `Signal`），controller 可直接持有副本；
-//!   需要 `&mut ChatSignals` 的方法用 `let mut chat = self.chat;` 拷贝一份再调用（状态经信号共享）。
+//! - `Signal<ChatView>` 是 `Copy`，controller 直接持有 `view` / `input_text` 句柄副本；
+//!   需要 `&mut ChatView` 的方法用 `view.write()` 拿到写 guard 就地更新（状态经信号共享）。
 //! - 所有 `use_*` 在该 hook 内无条件、顺序稳定调用（遵守 rules of hooks）。
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::anyhow;
 use dioxus::prelude::*;
-use planned_agent::chat::{ChatConfig, SubscriptionGuard};
+use planned_agent::chat::ChatConfig;
 use planned_agent_core::prompt::PromptManager;
 use planned_agent_core::tool_registry::ToolCategory;
 
-use crate::components::chat::chat_flow::{handle_user_action, Bubble, ChatSignals, PendingUI};
+use crate::components::chat::chat_flow::{ChatBridge, ChatView, PendingUI};
 use crate::context::{
     register_sub_agent, require_resource, AiContext, PromptContext, StorageContext, ToolsContext,
 };
@@ -33,7 +32,6 @@ use crate::shared::BootReporter;
 use crate::pages::plan::shared::session::SessionManager;
 use crate::services::plans_flexible_service::PlansFlexibleService;
 
-use super::chat_service_factory::ChatSvc;
 use super::flexible_state_tool::{flexible_state_tool, FlexibleStateExecutor};
 use super::session_boot::{boot_flexible_session, FlexBoot};
 use super::step2_callback::create_step2_callback;
@@ -42,8 +40,10 @@ use super::step5_callback::create_step5_callback;
 /// 灵活模式控制器：持有全部状态 signal 与 ChatService，并提供事件处理方法。
 #[derive(Clone, Copy)]
 pub(crate) struct FlexibleController {
-    /// 纯内存聊天状态（展示缓冲；持久化由服务端 store 负责）。
-    pub chat: ChatSignals,
+    /// 单一订阅桥的 UI 投影（展示缓冲；持久化由服务端 store 负责）。
+    pub view: Signal<ChatView, SyncStorage>,
+    /// 输入框文本（组件局部 UI 态，独立于 ChatView）。
+    pub input_text: Signal<String, SyncStorage>,
     /// 是否启用思考模式
     thinking: Signal<bool, SyncStorage>,
     /// 温度值
@@ -60,9 +60,10 @@ pub(crate) struct FlexibleController {
 
 impl FlexibleController {
     /// 就绪后的 ChatService；未就绪/失败时为 None。
-    pub(crate) fn service(&self) -> Option<Arc<ChatSvc>> {
+    /// 就绪后的单一订阅桥；未就绪/失败时为 None。
+    pub(crate) fn bridge(&self) -> Option<Arc<ChatBridge>> {
         match self.boot.read().clone() {
-            FlexBoot::Ready(session) => Some(session.svc.clone()),
+            FlexBoot::Ready(session) => Some(session.bridge.clone()),
             _ => None,
         }
     }
@@ -74,7 +75,7 @@ impl FlexibleController {
 
     // ── 只读访问器 ────────────────────────────────────────────────
     pub(crate) fn is_busy(&self) -> bool {
-        self.chat.is_busy()
+        self.view.read().is_busy()
     }
     pub(crate) fn thinking(&self) -> bool {
         *self.thinking.read()
@@ -92,21 +93,20 @@ impl FlexibleController {
     // ── 事件处理方法 ─────────────────────────────────────────────
     /// 清空会话（停止 + 重置服务端会话 + 清空气泡）。
     pub(crate) fn clear_session(&self) {
-        if let Some(svc) = self.service() {
-            svc.stop();
-            if let Err(e) = svc.reset_session() {
+        if let Some(bridge) = self.bridge() {
+            bridge.stop();
+            if let Err(e) = bridge.reset_session() {
                 tracing::error!("清空会话重置失败: {}", e);
             }
         }
-        let mut chat = self.chat;
-        chat.clear();
+        let mut view = self.view;
+        view.write().clear();
     }
 
     /// 用户提交 request_user_action / 子 agent 卡片后的回调。
     pub(crate) fn on_user_action(&self, choice: String, pending: PendingUI) {
-        let Some(svc) = self.service() else { return };
-        let mut chat = self.chat;
-        handle_user_action(&mut chat, &svc, choice, pending);
+        let Some(bridge) = self.bridge() else { return };
+        bridge.confirm(choice, pending);
     }
 
     /// 切换到指定 session（多会话并行改造前的占位）。
@@ -129,16 +129,17 @@ impl FlexibleController {
         if name.is_empty() {
             return;
         }
-        if let Some(svc) = self.service() {
-            svc.stop();
-            svc.set_system_prompt_template(Some(name.clone()));
-            if let Err(e) = svc.reset_session() {
+        if let Some(bridge) = self.bridge() {
+            bridge.stop();
+            bridge.set_system_prompt_template(Some(name.clone()));
+            if let Err(e) = bridge.reset_session() {
                 tracing::error!("重置会话失败: {}", e);
             }
         }
-        let mut chat = self.chat;
-        chat.clear_pending();
-        chat.pending_tool_call_id.set(None);
+        let mut view = self.view;
+        let mut v = view.write();
+        v.clear_pending();
+        v.pending_tool_call_id = None;
         let mut template = self.template;
         template.set(Some(name));
     }
@@ -155,16 +156,9 @@ impl FlexibleController {
 
 /// 创建/复用 flexible 页面控制器。组件须在顶层无条件调用。
 pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
-    // ── 纯内存聊天状态 ──
-    let chat = ChatSignals {
-        bubbles: use_signal_sync(Vec::<Bubble>::new),
-        active: use_signal_sync(Vec::<Bubble>::new),
-        agent_views: use_signal_sync(|| HashMap::new()),
-        pending_ui: use_signal_sync(|| None::<PendingUI>),
-        input_text: use_signal_sync(String::new),
-        pending_tool_call_id: use_signal_sync(|| None::<String>),
-        subscription: use_signal_sync(|| None::<SubscriptionGuard>),
-    };
+    // ── 纯内存聊天状态（单一订阅桥的 UI 投影 + 独立输入框态）──
+    let view = use_signal_sync(ChatView::default);
+    let input_text = use_signal_sync(String::new);
 
     // ── option 栏状态 ──
     let thinking = use_signal_sync(|| true);
@@ -206,8 +200,8 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
         let tools_ctx = tools_ctx_c.clone();
         let prompt_ctx = prompt_ctx_c.clone();
         let slot = session_mgr.read().clone();
-        // ChatSignals 是 Copy：把句柄副本交给 boot 异步填充历史/订阅
-        let chat_boot = chat;
+        // ChatView 是 Copy：把句柄副本交给 boot 异步填充历史/建立订阅桥
+        let view_boot = view;
         // 进度/结果写回器：把「累积进度 + 写 Ready/Failed」的 signal 样板收口
         // （见 `BootReporter`，与全局 bootstrap 共用同一套逻辑）。
         let reporter = BootReporter::new(boot);
@@ -218,7 +212,7 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
                 ai_ctx,
                 tools_ctx,
                 prompt_ctx,
-                chat_boot,
+                view_boot,
                 slot,
                 reporter.on_progress(),
             )
@@ -296,6 +290,32 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
             ChatConfig {
                 system_prompt_template: Some("chat/sub_agent_rua_demo".into()),
                 allowed_tools: Some(vec!["request_user_action".to_string()]),
+                ..Default::default()
+            },
+            1, // depth
+            2, // max_depth
+            None,
+        );
+        register_sub_agent(
+            &ai_ctx,
+            &tools_ctx,
+            &prompt_ctx,
+            "flexible_step_max_rounds_demo",
+            "子 agent max_tool_rounds 触顶复现测试：被调用后在子 agent 内持续调用 builtin_read_documentation 直到轮次上限触顶（用于在 GUI 验证子 agent 触顶时「是否继续」卡的挂起/恢复/回显）。",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "user_message": {
+                        "type": "string",
+                        "description": "来自协调器的测试指令（一般无需传业务内容）"
+                    }
+                },
+                "required": []
+            }),
+            ChatConfig {
+                system_prompt_template: Some("chat/sub_agent_max_rounds_demo".into()),
+                allowed_tools: Some(vec!["builtin_read_documentation".to_string()]),
+                max_tool_rounds: 2,
                 ..Default::default()
             },
             1, // depth
@@ -481,7 +501,8 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
     });
 
     FlexibleController {
-        chat,
+        view,
+        input_text,
         thinking,
         temperature,
         template,

@@ -110,6 +110,31 @@
     padding: 4px 0;
 }
 
+/* ── 子 agent 内部工具调用行（轻量，穿插在正文流里） ── */
+.agent-view__tool {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.75em;
+    color: var(--secondary-color-3);
+    padding: 2px 0;
+    margin: 2px 0;
+}
+
+.agent-view__tool-icon {
+    flex-shrink: 0;
+    width: 12px;
+    height: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.agent-view__tool-name {
+    font-family: ui-monospace, "SF Mono", "Consolas", "Monaco", monospace;
+    color: var(--secondary-color-3);
+}
+
 /* ── Pending 脉冲动画 ── */
 .agent-view--pending {
     animation: agent-pulse 1.4s ease-in-out infinite;

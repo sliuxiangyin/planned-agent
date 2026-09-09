@@ -1,13 +1,12 @@
 //! 纯 reducer —— 把 `ChatEvent` / 历史快照翻译为 `ChatView`。
 //!
-//! 与旧 `controller.rs::handle_event`（增量）+ `signals.rs::build_bubbles`（全量）
-//! 两套平行逻辑不同，本模块收敛为**唯一**的翻译入口：
+//! 把「增量事件」与「全量历史」两套翻译逻辑收敛为**唯一**的翻译入口：
 //!
 //! - [`reduce`]：事件 → 就地更新 `ChatView`（增量路径）。
 //! - [`view_from_history`]：历史快照 → 构造完整 `ChatView`（全量路径）。
 //!
 //! 两者共享同一套辅助函数（[`fmt_choice`] / [`REQUEST_USER_ACTION`]），
-//! 消除旧代码中「request_user_action 文本化 / 子 agent 关联」两处重复实现。
+//! 消除「request_user_action 文本化 / 子 agent 关联」两处重复实现。
 //!
 //! `reduce` 是纯函数（只改 `&mut ChatView`，不触碰任何 dioxus signal），
 //! 可脱离 dioxus 单测。
@@ -28,16 +27,14 @@ const REQUEST_USER_ACTION: &str = "request_user_action";
 
 /// 统一「用户选择 / request_user_action 文本」的渲染格式。
 ///
-/// 旧代码在 `controller.rs` 与 `build_bubbles` 中各自硬编码 `\n\n---\n\n**{}**\n\n`，
-/// 此处收口为唯一实现。
+/// 「用户选择 / request_user_action 文本」的渲染格式，收口为唯一实现。
 pub fn fmt_choice(choice: &str) -> String {
     format!("\n\n---\n\n**{}**\n\n", choice)
 }
 
 /// 消费单个 `ChatEvent`，就地更新 `ChatView`。
 ///
-/// 与旧 `handle_event` 行为等价，差异仅一处机械变换：
-/// 对 signal 的读写改为对 `ChatView` 字段的直接读写。
+/// 事件 → `ChatView` 字段的直接读写。
 pub fn reduce(view: &mut ChatView, ev: &ServiceChatEvent) {
     match ev {
         ServiceChatEvent::Chat(ChatEvent::TextDelta(chunk)) => {
@@ -146,6 +143,21 @@ pub fn reduce(view: &mut ChatView, ev: &ServiceChatEvent) {
                 ChatEvent::ReasoningDelta(ref text) => {
                     view.push_agent_event(tool_call_id, AgentEvent::ReasoningDelta(text.clone()));
                 }
+                // 子 agent 内部工具调用：轻量渲染（工具名 + 状态），不展开参数/结果
+                ChatEvent::ToolCallStart { id, name, .. } => {
+                    view.push_agent_tool_call(tool_call_id, id, name);
+                }
+                ChatEvent::ToolCallComplete { id, .. } => {
+                    view.update_agent_tool_call(tool_call_id, id, ToolCallPhase::Running);
+                }
+                ChatEvent::ToolExecuted { id, is_error, .. } => {
+                    let phase = if *is_error {
+                        ToolCallPhase::Error
+                    } else {
+                        ToolCallPhase::Completed
+                    };
+                    view.update_agent_tool_call(tool_call_id, id, phase);
+                }
                 _ => {}
             }
         }
@@ -174,7 +186,7 @@ pub fn reduce(view: &mut ChatView, ev: &ServiceChatEvent) {
     }
 }
 
-/// 从服务端历史快照构造完整 `ChatView`（合并旧 `load_from_history` + `build_bubbles`）。
+/// 从服务端历史快照构造完整 `ChatView`。
 pub fn view_from_history(history: &[StoreMessage]) -> ChatView {
     // 1. 先创建 AgentViewData 骨架（从 is_agent_tool 的 assistant 消息的 tool_calls 提取 id/name）
     let mut views: HashMap<String, AgentViewData> = HashMap::new();
@@ -236,7 +248,7 @@ pub fn view_from_history(history: &[StoreMessage]) -> ChatView {
 
 /// 从 `StoreMessage` 序列重建气泡（纯函数）。
 ///
-/// 消息序列规则（与旧 `signals.rs::build_bubbles` 一致）：
+/// 消息序列规则：
 /// - User → 独立 user 气泡
 /// - Assistant → 独立 assistant 气泡（reasoning + text + tool_calls）
 /// - Tool → 正常工具按 `tool_call_id` 回填对应 `ToolViewData.result`；
@@ -609,6 +621,92 @@ mod tests {
         );
         assert_eq!(view.agent_views["sub_1"].phase, ToolCallPhase::Completed);
         assert_eq!(view.agent_views["sub_1"].is_streaming, false);
+    }
+
+    #[test]
+    fn sub_agent_inner_tool_calls_interleave_with_text() {
+        let mut view = ChatView::default();
+        round_start(&mut view);
+
+        // 建立子 agent 的 AgentViewData
+        reduce(
+            &mut view,
+            &ServiceChatEvent::Chat(ChatEvent::ToolCallStart {
+                id: "sub_1".to_string(),
+                name: "flexible_step_max_rounds_demo".to_string(),
+                source: Some(ToolSource::SubAgent {
+                    agent_id: "sub_1".to_string(),
+                }),
+            }),
+        );
+
+        // 文本 → 工具 → 文本：验证工具调用按消息流顺序混排进 events（而非堆在底部）
+        reduce(
+            &mut view,
+            &ServiceChatEvent::Chat(ChatEvent::SubChat {
+                tool_call_id: "sub_1".to_string(),
+                event: Box::new(ChatEvent::TextDelta("开始".to_string())),
+            }),
+        );
+        reduce(
+            &mut view,
+            &ServiceChatEvent::Chat(ChatEvent::SubChat {
+                tool_call_id: "sub_1".to_string(),
+                event: Box::new(ChatEvent::ToolCallStart {
+                    id: "inner_1".to_string(),
+                    name: "builtin_read_documentation".to_string(),
+                    source: None,
+                }),
+            }),
+        );
+        reduce(
+            &mut view,
+            &ServiceChatEvent::Chat(ChatEvent::SubChat {
+                tool_call_id: "sub_1".to_string(),
+                event: Box::new(ChatEvent::TextDelta("结束".to_string())),
+            }),
+        );
+
+        let events = &view.agent_views["sub_1"].events;
+        assert_eq!(events.len(), 3);
+        assert!(matches!(&events[0], AgentEvent::TextDelta(t) if t == "开始"));
+        assert!(matches!(&events[1], AgentEvent::ToolCall { name, phase: ToolCallPhase::Pending, .. } if name == "builtin_read_documentation"));
+        assert!(matches!(&events[2], AgentEvent::TextDelta(t) if t == "结束"));
+
+        // ToolCallComplete → Running
+        reduce(
+            &mut view,
+            &ServiceChatEvent::Chat(ChatEvent::SubChat {
+                tool_call_id: "sub_1".to_string(),
+                event: Box::new(ChatEvent::ToolCallComplete {
+                    id: "inner_1".to_string(),
+                    name: "builtin_read_documentation".to_string(),
+                    arguments: json!({ "name": "request_user_action" }),
+                }),
+            }),
+        );
+        assert!(matches!(
+            &view.agent_views["sub_1"].events[1],
+            AgentEvent::ToolCall { phase: ToolCallPhase::Running, .. }
+        ));
+
+        // ToolExecuted（is_error=false）→ Completed
+        reduce(
+            &mut view,
+            &ServiceChatEvent::Chat(ChatEvent::SubChat {
+                tool_call_id: "sub_1".to_string(),
+                event: Box::new(ChatEvent::ToolExecuted {
+                    id: "inner_1".to_string(),
+                    name: "builtin_read_documentation".to_string(),
+                    is_error: false,
+                    content: json!({ "name": "request_user_action", "content": "..." }),
+                }),
+            }),
+        );
+        assert!(matches!(
+            &view.agent_views["sub_1"].events[1],
+            AgentEvent::ToolCall { phase: ToolCallPhase::Completed, .. }
+        ));
     }
 
     // ── reduce：UI 交互 / 生命周期 ────────────────────────────────────────
