@@ -10,6 +10,7 @@
 //!   分配逻辑由 repo 层保证单调递增。
 //! - `status` 表达定稿态：`active`（进行中/未定稿）→ `produced`（已定稿可回看/可执行）/
 //!   `abandoned`（被弃）。
+//! - `is_default` 标记该会话是否为 plan 的默认会话。
 //! - 定稿产物四件套（input_schema / output / steps / execution_plan）为**可空列**，
 //!   仅在 `status → produced` 定稿时写入；未定稿会话这几列为 NULL。
 //! - `title` 为该版本会话标题。
@@ -59,6 +60,13 @@ impl MigrationTrait for Migration {
                             .string()
                             .not_null()
                             .default("active"),
+                    )
+                    // 是否为默认计划
+                    .col(
+                        ColumnDef::new(PlansFlexibleSessions::IsDefault)
+                            .boolean()
+                            .not_null()
+                            .default(false),
                     )
                     // 定稿产物四件套（可空，produced 时写入）
                     .col(ColumnDef::new(PlansFlexibleSessions::InputSchema).string().null())
@@ -148,6 +156,7 @@ enum PlansFlexibleSessions {
     Title,
     Version,
     Status,
+    IsDefault,
     InputSchema,
     Output,
     Steps,

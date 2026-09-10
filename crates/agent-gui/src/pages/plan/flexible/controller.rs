@@ -2,7 +2,7 @@
 //!
 //! 把原本散落在 `page.rs` 组件体里的：
 //! - 聊天/选项栏 signal
-//! - ChatService 异步初始化（storage ready → ensure_current_session → 绑会话 store）
+//! - ChatService 异步初始化（按传入的 session_id → 绑会话 store）
 //! - 历史加载 + 事件订阅
 //! - 可用模板列表加载
 //! - 子 agent 注册 / 注销
@@ -28,9 +28,9 @@ use crate::components::chat::chat_flow::{ChatBridge, ChatView, PendingUI};
 use crate::context::{
     register_sub_agent, require_resource, AiContext, PromptContext, StorageContext, ToolsContext,
 };
-use crate::shared::BootReporter;
 use crate::pages::plan::shared::session::SessionManager;
 use crate::services::plans_flexible_service::PlansFlexibleService;
+use crate::shared::BootReporter;
 
 use super::flexible_state_tool::{flexible_state_tool, FlexibleStateExecutor};
 use super::session_boot::{boot_flexible_session, FlexBoot};
@@ -155,7 +155,10 @@ impl FlexibleController {
 }
 
 /// 创建/复用 flexible 页面控制器。组件须在顶层无条件调用。
-pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
+pub(crate) fn use_flexible_controller(
+    plan_id: String,
+    session_id: Signal<String>,
+) -> FlexibleController {
     // ── 纯内存聊天状态（单一订阅桥的 UI 投影 + 独立输入框态）──
     let view = use_signal_sync(ChatView::default);
     let input_text = use_signal_sync(String::new);
@@ -168,17 +171,16 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
     // ── 会话启动状态机（boot.rs 风格）：Loading → Ready / Failed ──
     let boot = use_signal_sync(|| FlexBoot::Loading(Vec::new()));
     let mut templates = use_signal_sync(|| Vec::<String>::new());
-    // plan 级共享单例（PlanPage 已注入 context）；flexible_state/step5 旁路与 boot 广播用
-    let session_mgr_ctx = use_context::<Arc<SessionManager>>();
-    let session_mgr = use_signal_sync(move || session_mgr_ctx.clone());
-    // boot 幂等门：仅首次 render 触发一次异步启动
-    let mut boot_started = use_signal_sync(|| false);
 
     // ── 依赖 context（启动门保证全部就绪，require_resource 直接返回 Arc）──
     let storage_ctx = require_resource::<StorageContext>();
     let ai_ctx = require_resource::<AiContext>();
     let tools_ctx = require_resource::<ToolsContext>();
     let prompt_ctx = require_resource::<PromptContext>();
+
+    // plan 级共享单例（PlanPage 已注入 context）；flexible_state / step5 旁路读「当前会话」用
+    let session_mgr_ctx = use_context::<Arc<SessionManager>>();
+    let session_mgr = use_signal_sync(move || session_mgr_ctx.clone());
 
     // ── 供异步 boot 闭包捕获的 owned clone ──
     let plan_id_c = plan_id.clone();
@@ -189,17 +191,17 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
 
     // ── 会话异步启动（一次）：建 session → new_chat_service → driver → 历史 → 订阅 ──
     use_effect(move || {
-        if *boot_started.read() {
-            return;
-        }
-        boot_started.set(true);
-
         let storage = storage_ctx_c.clone();
         let plan_id = plan_id_c.clone();
         let ai_ctx = ai_ctx_c.clone();
         let tools_ctx = tools_ctx_c.clone();
         let prompt_ctx = prompt_ctx_c.clone();
-        let slot = session_mgr.read().clone();
+
+        // 无会话（plan 数据未就绪 / props 传空）时不启动，避免用空 id 去 boot
+        let session_id = session_id.read().clone();
+        if session_id.is_empty() {
+            return;
+        }
         // ChatView 是 Copy：把句柄副本交给 boot 异步填充历史/建立订阅桥
         let view_boot = view;
         // 进度/结果写回器：把「累积进度 + 写 Ready/Failed」的 signal 样板收口
@@ -213,7 +215,7 @@ pub(crate) fn use_flexible_controller(plan_id: String) -> FlexibleController {
                 tools_ctx,
                 prompt_ctx,
                 view_boot,
-                slot,
+                session_id.clone(),
                 reporter.on_progress(),
             )
             .await

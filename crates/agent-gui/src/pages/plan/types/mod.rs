@@ -4,7 +4,7 @@
 //! 本模块只保留不持有 `Signal` 的类型。
 //!
 //! 内部只有一个子文件：
-//! - `plan` — 计划元数据（`ParamDef` / `PlanInfo`）
+//! - `plan` — 计划参数定义（`ParamDef`）
 //!
 //! 子文件内项声明为 `pub(crate)`（re-export 提级到 `plan` 可见的必要条件，
 //! 且 `plan` 模块本身是私有 `mod`，crate 外不可达，封装不受影响），
@@ -12,4 +12,4 @@
 
 mod plan;
 
-pub(super) use plan::{ParamDef, PlanInfo};
+pub(super) use plan::ParamDef;

@@ -720,3 +720,61 @@
     to   { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 
+/* ── 进入 Plan 页的加载动画（plan_resource 加载中显示） ─────────────── */
+.plan-loading {
+    width: 100%;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    background: var(--primary-color-3);
+}
+
+.plan-loading__spinner {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    border: 4px solid var(--primary-color-6);
+    border-top-color: var(--secondary-color-2);
+    animation: plan-loading-spin 0.9s linear infinite;
+}
+
+@keyframes plan-loading-spin {
+    to { transform: rotate(360deg); }
+}
+
+.plan-loading__text {
+    color: var(--secondary-color-4);
+    font-size: 0.875rem;
+}
+
+/* ── 进入 Plan 页加载失败（plan_resource 返回 Err） ─────────────────── */
+.plan-error {
+    width: 100%;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 24px;
+    text-align: center;
+    background: var(--primary-color-3);
+}
+
+.plan-error__title {
+    color: var(--secondary-color-4);
+    font-size: 1rem;
+    font-weight: 600;
+}
+
+.plan-error__detail {
+    color: var(--secondary-color-4);
+    font-size: 0.8125rem;
+    opacity: 0.8;
+    max-width: 480px;
+    word-break: break-word;
+}
+

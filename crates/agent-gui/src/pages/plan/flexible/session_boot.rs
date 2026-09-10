@@ -1,7 +1,7 @@
 //! 灵活模式「会话启动门」—— 仿 `crate::boot` 的一次会话就绪流程。
 //!
 //! 目的：把 `use_flexible_controller` 里原本靠多个 `use_effect` + signal 值互相串联
-//! 才拼起来的初始化（ensure_current_session → new_chat_service → start_driver →
+//! 才拼起来的初始化（new_chat_service → start_driver →
 //! view_from_history → ChatBridge::connect），收敛成一段**顺序的 async 直线代码**，
 //! 就地报错并聚合成 `Vec<(模块, 错误)>`，与全局启动门同一心智模型。
 //!
@@ -21,7 +21,6 @@ use dioxus::prelude::*;
 use crate::components::chat::chat_flow::{view_from_history, ChatBridge, ChatView};
 use crate::context::{AiContext, PromptContext, StorageContext, ToolsContext};
 use crate::shared::{BootPhase, OnProgress};
-use crate::pages::plan::shared::session::SessionManager;
 
 use super::chat_service_factory::new_chat_service;
 
@@ -33,8 +32,6 @@ pub(crate) type FlexBoot = BootPhase<ReadySession>;
 /// 一次会话启动的就绪产物。
 #[derive(Clone)]
 pub(crate) struct ReadySession {
-    /// 已就绪会话 id（service 已绑该 session 的 store）。
-    pub session_id: String,
     /// 单一订阅桥：事件 → `reduce` → `view`，guard 随桥存活。
     /// `ChatBridge` 内部持有 `Arc<ChatService>`，会话管理操作（stop/reset/template）经桥转发。
     pub bridge: Arc<ChatBridge>,
@@ -50,34 +47,24 @@ pub(crate) async fn boot_flexible_session(
     tools: Arc<ToolsContext>,
     prompt: Arc<PromptContext>,
     mut view: Signal<ChatView, SyncStorage>,
-    session_mgr: Arc<SessionManager>,
+    session_id: String,
     on_phase: OnProgress,
 ) -> Result<ReadySession, Vec<(String, String)>> {
-    // 1. 定位/新建该 plan 的当前会话
-    on_phase("session");
-    let session = storage
-        .ensure_current_session(&plan_id)
-        .await
-        .map_err(|e| vec![("定位当前会话".to_string(), e.to_string())])?;
-    let session_id = session.id.clone();
-    // 尽早广播当前会话到共享管理中心（flexible_state/step5 等旁路经 watch 定位）
-    session_mgr.set_active(session_id.clone());
-
-    // 2. 构造绑该会话 store 的 ChatService（未 start_driver），并 Arc 化（订阅/广播需 Arc）
+    // 1. 构造绑该会话 store 的 ChatService（未 start_driver），并 Arc 化（订阅/广播需 Arc）
     on_phase("service");
     let service = Arc::new(
-        new_chat_service(storage, plan_id, session_id.clone(), ai, tools, prompt)
+        new_chat_service(storage, plan_id, session_id, ai, tools, prompt)
             .await
             .map_err(|e| vec![("构造 ChatService".to_string(), e.to_string())])?,
     );
 
-    // 3. 启动后台 driver
+    // 2. 启动后台 driver
     on_phase("driver");
     service
         .start_driver()
         .map_err(|e| vec![("启动 ChatService driver".to_string(), e.to_string())])?;
 
-    // 4. 从服务端 store 恢复历史气泡
+    // 3. 从服务端 store 恢复历史气泡
     on_phase("history");
     let history = service.history_store();
     if !history.is_empty() {
@@ -85,12 +72,9 @@ pub(crate) async fn boot_flexible_session(
         *view.write() = view_from_history(&history);
     }
 
-    // 5. 建立单一订阅桥（事件 → reduce → view），guard 随 bridge 存活
+    // 4. 建立单一订阅桥（事件 → reduce → view），guard 随 bridge 存活
     on_phase("subscribe");
     let bridge = Arc::new(ChatBridge::connect(service, view));
 
-    Ok(ReadySession {
-        session_id,
-        bridge,
-    })
+    Ok(ReadySession { bridge })
 }

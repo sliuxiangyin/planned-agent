@@ -1,4 +1,4 @@
-//! 计划元数据：参数定义、DB 基本信息。
+//! 计划元数据：参数定义。
 
 /// 固化的计划参数定义（来自清晰度检查阶段 multi_select 勾选）。
 ///
@@ -12,12 +12,4 @@ pub(crate) struct ParamDef {
     pub description: String,
     /// 本次固化的示例值（选项 label 中 "=" 右侧，如 "安仁乡"）
     pub example: String,
-}
-
-/// 计划基本信息（从 `plans` 表加载）。
-#[derive(Clone)]
-pub(crate) struct PlanInfo {
-    pub(crate) name: String,
-    pub(crate) mode: String,
-    pub(crate) status: String,
 }

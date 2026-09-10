@@ -5,7 +5,8 @@ use sea_orm::*;
 use uuid::Uuid;
 
 use crate::storage::entities::plan;
-use crate::storage::error::StorageResult;
+use crate::storage::error::{StorageError, StorageResult};
+use crate::storage::repository::PlansFlexibleSessionsRepo;
 
 /// plans 表仓库
 pub struct PlanRepo {
@@ -95,6 +96,28 @@ impl PlanRepo {
         .update(&self.db)
         .await?;
         Ok(())
+    }
+
+    /// 初始化 plan 的当前会话（首次生成进入 plan 时调用）。
+    ///
+    /// 若 `current_session_id` 已存在，直接返回该会话 id；否则新建一个
+    /// 「未命名会话」（title = "未命名会话"），把它写回 `current_session_id`
+    /// 并返回新会话 id（即 `plans_flexible_sessions.id`）。
+    pub async fn init_session(&self, plan_id: &str) -> StorageResult<String> {
+        let plan = self
+            .find_by_id(plan_id)
+            .await?
+            .ok_or_else(|| StorageError::NotFound(format!("plan '{plan_id}' not found")))?;
+        // 已有当前会话指针 → 直接复用
+        if let Some(session_id) = plan.current_session_id {
+            return Ok(session_id);
+        }
+        // 无 → 新建默认会话并写回指针
+        let session_repo = PlansFlexibleSessionsRepo::new(self.db.clone());
+        let session = session_repo.create(plan_id, "未命名会话").await?;
+        self.update_current_session_id(plan_id, Some(session.id.clone()))
+            .await?;
+        Ok(session.id)
     }
 
     /// 删除计划（接口预留，暂不调用）

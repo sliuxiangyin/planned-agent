@@ -6,7 +6,7 @@ use crate::components::dropdown_menu::{
 use crate::components::page_header::PageHeader;
 use dioxus::prelude::*;
 
-use crate::pages::plan::types::PlanInfo;
+use crate::storage::entities::plan;
 
 use super::dialogs::DeletePlanDialog;
 use super::history::HistoryView;
@@ -21,7 +21,7 @@ const LEFT_PANEL_CSS: Asset = asset!("/assets/plan-left-panel.css");
 pub fn PlanLeftPanel(
     plan_id: String,
     on_back: EventHandler<()>,
-    plan_info: Signal<Option<PlanInfo>, SyncStorage>,
+    plan_info: Option<plan::Model>,
     on_delete: EventHandler<()>,
 ) -> Element {
     // ── 删除确认弹窗 ──
@@ -29,12 +29,10 @@ pub fn PlanLeftPanel(
 
     // ── 计划元数据派生（模式 / 状态 label 与 chip class） ──
     let plan_name = plan_info
-        .read()
         .as_ref()
         .map(|p| p.name.clone())
         .unwrap_or_else(|| format!("计划 {}", plan_id));
     let plan_mode_label = plan_info
-        .read()
         .as_ref()
         .map(|p| match p.mode.as_str() {
             "thorough" => "周密模式".to_string(),
@@ -42,7 +40,6 @@ pub fn PlanLeftPanel(
         })
         .unwrap_or_default();
     let plan_status_label = plan_info
-        .read()
         .as_ref()
         .map(|p| match p.status.as_str() {
             "generated" => "已生成".to_string(),
@@ -50,7 +47,6 @@ pub fn PlanLeftPanel(
         })
         .unwrap_or_default();
     let status_chip_class = plan_info
-        .read()
         .as_ref()
         .map(|p| match p.status.as_str() {
             "generated" => "header-chip--status--generated",

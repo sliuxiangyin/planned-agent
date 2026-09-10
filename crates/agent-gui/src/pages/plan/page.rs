@@ -14,14 +14,12 @@ use crate::components::resizable_panel::ResizablePanel;
 use dioxus::prelude::*;
 
 use crate::context::StorageContext;
+use crate::storage::entities::plan;
 
-use super::left_panel::PlanLeftPanel;
 use super::flexible::FlexiblePage;
+use super::left_panel::PlanLeftPanel;
 use super::sessions_panel::SessionPanel;
-use super::shared::load_plan_data::load_plan_data as load_plan_data_shared;
 use super::shared::session::use_provide_session_manager;
-use super::states::PlanState;
-use super::types::{ParamDef, PlanInfo};
 
 /// 本页面专属样式（按需加载）。
 const PLAN_CSS: Asset = asset!("/assets/plan.css");
@@ -36,41 +34,34 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
     // ── 会话状态管理中心：plan 级共享单例，注入到 context，供 flexible / 会话抽屉等订阅当前会话切换 ──
     use_provide_session_manager();
 
-    // ── 计划信息（从 DB 异步加载） ──
-    let plan_info = use_signal_sync(|| None::<PlanInfo>);
-
-    // ── 计划模式（从 DB 加载后固定） ──
-    let plan_mode = use_signal_sync(|| None::<String>);
-
-    // ── 计划版本号（成功保存后递增，通知 PlanTodoView 重新加载） ──
-    let plan_version = use_signal_sync(|| 0u32);
-
-    // ── 已固化的参数定义（清晰度检查勾选后暂存，确认生成时随事件落库） ──
-    let plan_params = use_signal_sync(Vec::<ParamDef>::new);
-
     // ── 清除消息确认弹窗 ──
     let mut show_clear_dialog = use_signal_sync(|| false);
 
-    let mut plan = PlanState {
-        plan_info,
-        plan_mode,
-        plan_version,
-        plan_params,
-    };
-
-    // ── 加载计划元数据 ──
+    // ── 加载计划元数据（use_resource 异步资源；随 plan_id 变化自动重载并取消旧任务） ──
     let pid = plan_id.clone();
     let plan_repo_for_load = storage.plan_repo();
-    use_effect(move || {
+    let plan_resource = use_resource(move || {
         let pid = pid.clone();
         let plan_repo = plan_repo_for_load.clone();
-        spawn(async move {
-            if let Some(info) = load_plan_data_shared(pid, plan_repo).await {
-                plan.plan_info.set(Some(info.clone()));
-                plan.set_mode(info.mode);
-            }
-        });
+        async move {
+            // 进入 plan 先确保存在当前会话（不存在则新建默认「未命名会话」并写回 current_session_id），
+            // 这样随后取到的 plan 数据即带有 current_session_id，供后续会话/版本逻辑使用。
+            plan_repo.init_session(&pid).await?;
+            plan_repo.find_by_id(&pid).await
+        }
     });
+
+    // ── 直接从 resource 读取（官网风格）：三态 —— Pending / Err / Ready ──
+    // 渲染期读 value 即订阅，资源完成时本组件重渲染，无需再往 signal 中转。
+    let plan_loading = plan_resource.value().read().is_none();
+    let plan_error: Option<String> = match &*plan_resource.value().read_unchecked() {
+        Some(Err(e)) => Some(e.to_string()),
+        _ => None,
+    };
+    let plan_model: Option<plan::Model> = match &*plan_resource.value().read_unchecked() {
+        Some(Ok(Some(model))) => Some(model.clone()),
+        _ => None,
+    };
 
     // ── 获取 plan_repo 用于删除 ──
     let plan_repo = storage.plan_repo();
@@ -116,13 +107,25 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
     rsx! {
         document::Stylesheet { href: PLAN_CSS }
         document::Stylesheet { href: RESIZABLE_CSS }
+        // 三态互斥渲染：加载中 / 加载失败 / 就绪
+        if plan_loading {
+            div { class: "plan-loading",
+                div { class: "plan-loading__spinner" }
+                div { class: "plan-loading__text", "正在进入计划…" }
+            }
+        } else if let Some(err) = plan_error.as_ref() {
+            div { class: "plan-error",
+                div { class: "plan-error__title", "加载计划失败" }
+                div { class: "plan-error__detail", "{err}" }
+            }
+        } else {
         div { class: "plan-page",
             ResizablePanel {
                 left: rsx! {
                     PlanLeftPanel {
                         plan_id: plan_id.clone(),
                         on_back: on_back,
-                        plan_info: plan.plan_info,
+                        plan_info: plan_model.clone(),
                         on_delete: on_delete_plan,
                     }
                 },
@@ -141,14 +144,18 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
                     }
                 },
                 right: {
-                    let mode = plan.mode();
-                    if mode == "flexible" {
-                        rsx! { FlexiblePage { plan_id: plan_id.clone() } }
+                    if plan_model.as_ref().map(|m| m.mode.as_str()) == Some("flexible") {
+                        let session_id = plan_model
+                            .as_ref()
+                            .and_then(|m| m.current_session_id.clone())
+                            .unwrap_or_default();
+                        rsx! { FlexiblePage { plan_id: plan_id.clone(), session_id } }
                     } else {
                         render_chat_panel_placeholder()
                     }
                 },
             }
+        }
         }
 
         // ── 清除消息确认弹窗 ──
@@ -187,4 +194,3 @@ fn render_chat_panel_placeholder() -> Element {
         }
     }
 }
-
