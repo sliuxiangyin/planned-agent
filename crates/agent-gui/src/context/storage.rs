@@ -21,7 +21,8 @@ use crate::storage::{
     error::StorageResult,
     migrations::Migrator,
     repository::{
-        ChatMessageRepo, FlexibleStateRepo, PlanRepo, PlansFlexibleRepo, SessionRepo, TestRepo,
+        ChatMessageRepo, FlexibleStateRepo, PlanRepo, PlansFlexibleRepo, PlansFlexibleSessionsRepo,
+        SessionRepo, TestRepo,
     },
 };
 
@@ -44,6 +45,8 @@ pub struct StorageContext {
     flexible_state_repo: Arc<FlexibleStateRepo>,
     /// sessions 表仓库（灵活模式会话生命周期）
     session_repo: Arc<SessionRepo>,
+    /// plans_flexible_sessions 表仓库（「会话即版本」：会话/版本列表）
+    plans_flexible_sessions_repo: Arc<PlansFlexibleSessionsRepo>,
 }
 
 impl StorageContext {
@@ -53,6 +56,9 @@ impl StorageContext {
     pub fn plans_flexible_repo(&self) -> Arc<PlansFlexibleRepo> { self.plans_flexible_repo.clone() }
     pub fn flexible_state_repo(&self) -> Arc<FlexibleStateRepo> { self.flexible_state_repo.clone() }
     pub fn session_repo(&self) -> Arc<SessionRepo> { self.session_repo.clone() }
+    pub fn plans_flexible_sessions_repo(&self) -> Arc<PlansFlexibleSessionsRepo> {
+        self.plans_flexible_sessions_repo.clone()
+    }
 
     /// 定位/新建该 plan 的当前会话（装配 PlansFlexibleService 后转发）。
     /// 复用点：任何需要"进入某 plan 时的当前会话"的调用方。
@@ -92,6 +98,7 @@ impl StorageContext {
             plans_flexible_repo: Arc::new(PlansFlexibleRepo::new(db.clone())),
             flexible_state_repo: Arc::new(FlexibleStateRepo::new(db.clone())),
             session_repo: Arc::new(SessionRepo::new(db.clone())),
+            plans_flexible_sessions_repo: Arc::new(PlansFlexibleSessionsRepo::new(db.clone())),
         })
     }
 }

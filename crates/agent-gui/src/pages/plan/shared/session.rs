@@ -97,3 +97,31 @@ pub fn use_provide_session_manager() {
     let mgr = use_session_manager();
     use_context_provider(move || mgr.clone());
 }
+
+/// 自定义 hook：把 `SessionManager` 的「当前会话」同步到传入的 `session_id` 信号。
+///
+/// `SessionManager` 的 tokio watch 不驱动重渲染，故订阅其 dioxus 桥 `current()`；
+/// `set()` 会同时写 watch 与该信号，二者保持一致。
+///
+/// 复用点：任何需要「跟随当前会话」的组件（灵活模式主页面 `FlexiblePage`、会话面板
+/// `SessionPanel` 等）。组件自持一个 `Signal<String>`（初值通常来自 props），调用本
+/// hook 后即随 `SessionManager` 的当前会话变化自动更新。
+///
+/// 必须在组件渲染期无条件、顺序稳定地调用（遵守 rules of hooks）。
+pub fn use_listen_session_manager(mut session_id: Signal<String>) {
+    let session_mgr = use_context::<Arc<SessionManager>>();
+    use_effect(move || {
+        let current = session_mgr.current();
+        let value = current.read();
+
+        if let Some(id) = &*value {
+            // Signal::set 不做相等判断，同值写入也会通知订阅者；
+            // 故先比对现值，避免用相同 id 二次触发监听 session_id 的 effect。
+            // 注意用 peek() 读：只取值、不建立对 session_id 的订阅，
+            // 否则本 effect 会反过来依赖 session_id（破坏 effect 间隔离）。
+            if session_id.peek().as_str() != id.as_str() {
+                session_id.set(id.clone());
+            }
+        }
+    });
+}

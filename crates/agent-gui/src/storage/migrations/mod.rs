@@ -18,12 +18,13 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(m20260801_create_tests::Migration),
             Box::new(m20260801_create_plans::Migration),
-            // sessions 先建：chat_messages / plans_flexible 以 session_id 外键依赖它
+            // 旧 sessions 表：plans_flexible 仍以 session_id 外键依赖它
             Box::new(m20260901_create_sessions::Migration),
+            // 新会话表先建：chat_messages / flexible_state 以 session_id 外键依赖它
+            Box::new(m20260910_create_plans_flexible_sessions::Migration),
             Box::new(m20260801_create_plans_flexible::Migration),
             Box::new(m20260801_create_chat_messages::Migration),
             Box::new(m20260904_create_flexible_state::Migration),
-            Box::new(m20260910_create_plans_flexible_sessions::Migration),
         ]
     }
 }

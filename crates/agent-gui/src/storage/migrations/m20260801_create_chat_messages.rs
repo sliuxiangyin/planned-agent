@@ -20,7 +20,7 @@ impl MigrationTrait for Migration {
                             .primary_key(),
                     )
                     .col(ColumnDef::new(ChatMessages::PlanId).string().not_null())
-                    // session_id 关联归属会话；消息必然归属某个会话，非空
+                    // session_id 关联归属会话（plans_flexible_sessions 的会话/版本）；非空
                     .col(ColumnDef::new(ChatMessages::SessionId).string().not_null())
                     .col(ColumnDef::new(ChatMessages::MessageJson).string().not_null())
                     .col(
@@ -52,7 +52,7 @@ impl MigrationTrait for Migration {
                         ForeignKey::create()
                             .name("fk_chat_messages_session_id")
                             .from(ChatMessages::Table, ChatMessages::SessionId)
-                            .to(Sessions::Table, Sessions::Id)
+                            .to(PlansFlexibleSessions::Table, PlansFlexibleSessions::Id)
                             .on_delete(ForeignKeyAction::Cascade),
                     )
                     .to_owned(),
@@ -99,9 +99,9 @@ enum Plans {
     Id,
 }
 
-/// sessions 表名引用（FK 目标）
+/// plans_flexible_sessions 表名引用（FK 目标）
 #[derive(DeriveIden)]
-enum Sessions {
+enum PlansFlexibleSessions {
     Table,
     Id,
 }

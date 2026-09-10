@@ -20,7 +20,7 @@ impl MigrationTrait for Migration {
                             .primary_key(),
                     )
                     .col(ColumnDef::new(FlexibleState::PlanId).string().not_null())
-                    // 状态必然归属某会话，非空
+                    // 状态必然归属某会话（plans_flexible_sessions 的会话/版本），非空
                     .col(ColumnDef::new(FlexibleState::SessionId).string().not_null())
                     .col(
                         ColumnDef::new(FlexibleState::CurrentStep)
@@ -47,7 +47,7 @@ impl MigrationTrait for Migration {
                         ForeignKey::create()
                             .name("fk_flexible_state_session_id")
                             .from(FlexibleState::Table, FlexibleState::SessionId)
-                            .to(Sessions::Table, Sessions::Id)
+                            .to(PlansFlexibleSessions::Table, PlansFlexibleSessions::Id)
                             .on_delete(ForeignKeyAction::Cascade),
                     )
                     .to_owned(),
@@ -83,9 +83,9 @@ enum Plans {
     Id,
 }
 
-/// sessions 表名引用（FK 目标）
+/// plans_flexible_sessions 表名引用（FK 目标）
 #[derive(DeriveIden)]
-enum Sessions {
+enum PlansFlexibleSessions {
     Table,
     Id,
 }

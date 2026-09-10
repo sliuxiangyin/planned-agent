@@ -104,6 +104,12 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
         }
     };
 
+    // ── 会话面板初值：当前会话 id（来自 plan.current_session_id） ──
+    let panel_session_id = plan_model
+        .as_ref()
+        .and_then(|m| m.current_session_id.clone())
+        .unwrap_or_default();
+
     rsx! {
         document::Stylesheet { href: PLAN_CSS }
         document::Stylesheet { href: RESIZABLE_CSS }
@@ -132,24 +138,12 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
                 center: rsx! {
                     SessionPanel {
                         plan_id: plan_id.clone(),
-                        on_select: move |session_id| {
-                            // 会话切换与 ChatService 重建在「会话监听」环节实现，
-                            // 此处先记录，由会话监听/多会话接线后续消费。
-                            tracing::info!("会话列表选中: {session_id}");
-                        },
-                        on_create: move |_| {
-                            // 「新建会话」目前仅搭 UI 上抛；创建新会话/版本由后续接线实现。
-                            tracing::info!("新建会话点击（行为未接线）");
-                        },
+                        session_id: panel_session_id.clone(),
                     }
                 },
                 right: {
                     if plan_model.as_ref().map(|m| m.mode.as_str()) == Some("flexible") {
-                        let session_id = plan_model
-                            .as_ref()
-                            .and_then(|m| m.current_session_id.clone())
-                            .unwrap_or_default();
-                        rsx! { FlexiblePage { plan_id: plan_id.clone(), session_id } }
+                        rsx! { FlexiblePage { plan_id: plan_id.clone(), session_id: panel_session_id.clone() } }
                     } else {
                         render_chat_panel_placeholder()
                     }

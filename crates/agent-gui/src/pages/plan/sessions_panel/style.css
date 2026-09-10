@@ -83,6 +83,14 @@
     opacity: 1;
 }
 
+/* 分组内无数据时的占位（保持分组高度、弱化提示） */
+.group_empty {
+    padding: 0.35rem 0.55rem;
+    color: var(--secondary-color-4);
+    font-size: 0.78rem;
+    opacity: 0.7;
+}
+
 /* 会话行 */
 .row {
     position: relative;
@@ -162,4 +170,34 @@
 .footer {
     flex: none;
     padding: 0.6rem 0.75rem 0.75rem;
+}
+
+/* ── 新建会话弹窗 ── */
+.create_dialog_body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+.create_dialog_field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+
+.create_dialog_label {
+    color: var(--secondary-color-4);
+    font-size: 0.8rem;
+}
+
+.create_dialog_error {
+    color: #e5484d;
+    font-size: 0.78rem;
+}
+
+.create_dialog_footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
 }
