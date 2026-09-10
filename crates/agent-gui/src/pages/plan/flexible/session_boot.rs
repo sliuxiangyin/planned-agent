@@ -67,10 +67,9 @@ pub(crate) async fn boot_flexible_session(
     // 3. 从服务端 store 恢复历史气泡
     on_phase("history");
     let history = service.history_store();
-    if !history.is_empty() {
-        tracing::info!("灵活模式: 从服务端加载 {} 条历史消息", history.len());
-        *view.write() = view_from_history(&history);
-    }
+    tracing::info!("灵活模式: 从服务端加载 {} 条历史消息", history.len());
+    // 无条件按目标会话重载视图：空历史也要清空，避免切到新会话后残留上一个会话的气泡。
+    *view.write() = view_from_history(&history);
 
     // 4. 建立单一订阅桥（事件 → reduce → view），guard 随 bridge 存活
     on_phase("subscribe");

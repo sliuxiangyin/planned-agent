@@ -202,6 +202,8 @@ pub(crate) fn use_flexible_controller(
         if session_id.is_empty() {
             return;
         }
+        println!("session updaye:{}", session_id.clone());
+
         // ChatView 是 Copy：把句柄副本交给 boot 异步填充历史/建立订阅桥
         let view_boot = view;
         // 进度/结果写回器：把「累积进度 + 写 Ready/Failed」的 signal 样板收口
