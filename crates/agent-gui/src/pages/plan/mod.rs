@@ -15,7 +15,7 @@ pub(crate) mod components;
 mod flexible;
 mod left_panel;
 mod page;
-pub(crate) mod sessions;
+pub(crate) mod sessions_panel;
 mod shared;
 mod states;
 mod types;

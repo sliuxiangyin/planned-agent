@@ -8,6 +8,7 @@ mod m20260801_create_plans_flexible;
 mod m20260801_create_tests;
 mod m20260901_create_sessions;
 mod m20260904_create_flexible_state;
+mod m20260910_create_plans_flexible_sessions;
 
 pub struct Migrator;
 
@@ -22,6 +23,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260801_create_plans_flexible::Migration),
             Box::new(m20260801_create_chat_messages::Migration),
             Box::new(m20260904_create_flexible_state::Migration),
+            Box::new(m20260910_create_plans_flexible_sessions::Migration),
         ]
     }
 }

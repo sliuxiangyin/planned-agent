@@ -10,13 +10,10 @@ use dioxus::prelude::*;
 use crate::components::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::chat::ChatPanel;
 use crate::components::page_header::PageHeader;
-use crate::components::sheet::{Sheet, SheetContentClose, SheetHeader, SheetTitle};
 
 use super::controller::use_flexible_controller;
 use super::session_boot::FlexBoot;
-use dioxus_icons::lucide::{History, Trash2};
-
-use crate::pages::plan::sessions::SessionListSheet;
+use dioxus_icons::lucide::Trash2;
 
 #[derive(Props, Clone, PartialEq)]
 pub struct FlexiblePageProps {
@@ -25,9 +22,6 @@ pub struct FlexiblePageProps {
 
 #[component]
 pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
-    // 会话抽屉开关：外壳 Sheet 常驻并受控（负责滑出动画/遮罩/关闭）；内容组件
-    // SessionListSheet 仅在开启时挂载（挂载即 use_resource 拉取，关闭即卸载取消）。
-    let mut sessions_open = use_signal_sync(|| false);
     let ctl = use_flexible_controller(props.plan_id.clone());
 
     // ChatService 未就绪 → 占位（controller 内异步初始化完成后会自动 re-render）
@@ -67,14 +61,6 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
                         variant: ButtonVariant::Ghost,
                         size: ButtonSize::IconSm,
                         disabled: busy,
-                        title: "会话 / 版本列表",
-                        onclick: move |_| sessions_open.set(true),
-                        History { size: "16" }
-                    }
-                    Button {
-                        variant: ButtonVariant::Ghost,
-                        size: ButtonSize::IconSm,
-                        disabled: busy,
                         title: "清空会话",
                         onclick: move |_| ctl.clear_session(),
                         Trash2 { size: "16" }
@@ -104,27 +90,6 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
                     Callback::new(move |v: String| ctl.set_temperature(v)),
                 ),
                 on_clear: move |_| ctl.clear_session(),
-            }
-
-            // 会话/版本抽屉外壳：常驻受控，负责滑出动画、遮罩与关闭按钮。
-            // 内容体仅在开启时挂载；关闭由 close/遮罩/esc 写回 sessions_open。
-            Sheet {
-                open: sessions_open(),
-                on_open_change: move |v: bool| sessions_open.set(v),
-                SheetHeader {
-                    SheetTitle { "会话 / 版本" }
-                    SheetContentClose {}
-                }
-                if sessions_open() {
-                    SessionListSheet {
-                        plan_id: props.plan_id.clone(),
-                        on_select: move |session_id| {
-                            // 挂载方决策：会话切换与 ChatService 重建在「会话监听」环节实现，
-                            // 此处先记录，抽屉保持打开以便查看。
-                            tracing::info!("会话列表选中: {session_id}");
-                        },
-                    }
-                }
             }
         }
     }

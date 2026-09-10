@@ -17,6 +17,7 @@ use crate::context::StorageContext;
 
 use super::left_panel::PlanLeftPanel;
 use super::flexible::FlexiblePage;
+use super::sessions_panel::SessionPanel;
 use super::shared::load_plan_data::load_plan_data as load_plan_data_shared;
 use super::shared::session::use_provide_session_manager;
 use super::states::PlanState;
@@ -125,7 +126,20 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
                         on_delete: on_delete_plan,
                     }
                 },
-                center: render_center_panel_placeholder(),
+                center: rsx! {
+                    SessionPanel {
+                        plan_id: plan_id.clone(),
+                        on_select: move |session_id| {
+                            // 会话切换与 ChatService 重建在「会话监听」环节实现，
+                            // 此处先记录，由会话监听/多会话接线后续消费。
+                            tracing::info!("会话列表选中: {session_id}");
+                        },
+                        on_create: move |_| {
+                            // 「新建会话」目前仅搭 UI 上抛；创建新会话/版本由后续接线实现。
+                            tracing::info!("新建会话点击（行为未接线）");
+                        },
+                    }
+                },
                 right: {
                     let mode = plan.mode();
                     if mode == "flexible" {
@@ -174,15 +188,3 @@ fn render_chat_panel_placeholder() -> Element {
     }
 }
 
-/// 渲染中间面板占位（预留）：内容待接入。
-fn render_center_panel_placeholder() -> Element {
-    rsx! {
-        div {
-            class: "center-panel",
-            div {
-                style: "display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-secondary, #999); font-size: 13px;",
-                "预留面板"
-            }
-        }
-    }
-}
