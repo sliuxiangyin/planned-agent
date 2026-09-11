@@ -13,11 +13,15 @@ use std::sync::Arc;
 
 use planned_agent::chat::{ChatConfig, SystemPrompt};
 use planned_agent::ChatService;
+use planned_agent_core::prompt::{PromptContext as PromptTemplateContext, PromptManager};
 use planned_agent_prompt_manager::FilePromptManager;
 
 use crate::context::{AiContext, PromptContext, StorageContext, ToolsContext};
 
 use super::chat_flexible_message_storage::ChatMessageStore;
+
+/// 协调器 system prompt 模板名（与 PromptManager 中的注册名一致）。
+const FLEXIBLE_GLOBAL_SYSTEM_PROMPT: &str = "flexible/flexible_global_system";
 
 /// 便捷类型：灵活模式所用 ChatService。
 pub(crate) type ChatSvc = ChatService<FilePromptManager>;
@@ -36,15 +40,27 @@ pub(crate) async fn new_chat_service(
     prompt: Arc<PromptContext>,
 ) -> anyhow::Result<ChatSvc> {
     let repo = storage.chat_message_repo();
-    let store = ChatMessageStore::new(plan_id, session_id, repo);
+    let store = ChatMessageStore::new(plan_id, session_id.clone(), repo);
+
+    // 协调器 system prompt：渲染 flexible_global_system 后拼接「会话上下文」(session_id)，
+    // 以 SystemPrompt::Rendered 注入 —— 因为 Template 分支渲染时用空 PromptContext，带不了变量。
+    // 每个会话自己的 config → session_id 天然 per-session 隔离。
+    let base = prompt
+        .manager
+        .render(FLEXIBLE_GLOBAL_SYSTEM_PROMPT, &PromptTemplateContext::new())
+        .await
+        .map_err(|e| anyhow::anyhow!("渲染协调器 system prompt 失败: {e}"))?;
+    let coordinator_system_prompt = format!(
+        "{base}\n\n## 会话上下文\n本会话的 session_id = {session_id}\n\
+         调用 flexible_state / save_flexible_template 时，其 session_id 参数必须原样照抄上面的值，不得改写、不得省略。"
+    );
+
     Ok(ChatService::with_store(
         ai.manager.default()?,
         tools.registry.clone(),
         prompt.manager.clone(),
         ChatConfig {
-            system_prompt: Some(SystemPrompt::Template(
-                "flexible/flexible_global_system".to_string(),
-            )),
+            system_prompt: Some(SystemPrompt::Rendered(coordinator_system_prompt)),
             // 协调器仅做状态机调度，不执行业务：工具层只暴露 5 个 step 子 agent +
             // flexible_state + request_user_action，杜绝误调业务 / 其它子 agent 工具。
             //
