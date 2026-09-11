@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use dioxus::prelude::*;
-use planned_agent::chat::ChatConfig;
+use planned_agent::chat::{ChatConfig, SystemPrompt};
 use planned_agent_core::prompt::PromptManager;
 use planned_agent_core::tool_registry::ToolCategory;
 
@@ -131,7 +131,7 @@ impl FlexibleController {
         }
         if let Some(bridge) = self.bridge() {
             bridge.stop();
-            bridge.set_system_prompt_template(Some(name.clone()));
+            bridge.set_system_prompt(Some(SystemPrompt::Template(name.clone())));
             if let Err(e) = bridge.reset_session() {
                 tracing::error!("重置会话失败: {}", e);
             }
@@ -292,7 +292,7 @@ pub(crate) fn use_flexible_controller(
                 "required": []
             }),
             ChatConfig {
-                system_prompt_template: Some("chat/sub_agent_rua_demo".into()),
+                system_prompt: Some(SystemPrompt::Template("chat/sub_agent_rua_demo".into())),
                 allowed_tools: Some(vec!["request_user_action".to_string()]),
                 ..Default::default()
             },
@@ -317,7 +317,7 @@ pub(crate) fn use_flexible_controller(
                 "required": []
             }),
             ChatConfig {
-                system_prompt_template: Some("chat/sub_agent_max_rounds_demo".into()),
+                system_prompt: Some(SystemPrompt::Template("chat/sub_agent_max_rounds_demo".into())),
                 allowed_tools: Some(vec!["builtin_read_documentation".to_string()]),
                 max_tool_rounds: 2,
                 ..Default::default()
@@ -347,7 +347,7 @@ pub(crate) fn use_flexible_controller(
                 "required": ["user_message"]
             }),
             ChatConfig {
-                system_prompt_template: Some("flexible/flexible_step1".into()),
+                system_prompt: Some(SystemPrompt::Template("flexible/flexible_step1".into())),
                 allowed_tools: Some(vec!["request_user_action".to_string()]),
                 ..Default::default()
             },
@@ -376,7 +376,7 @@ pub(crate) fn use_flexible_controller(
                 "required": ["task_definition"]
             }),
             ChatConfig {
-                system_prompt_template: Some("flexible/flexible_step2".into()),
+                system_prompt: Some(SystemPrompt::Template("flexible/flexible_step2".into())),
                 // step2 是纯业务执行：用 "all" 剔除 Utility/SubAgent（含 flexible_state、兄弟 step 子 agent），
                 // 只暴露业务工具，避免执行 agent 误碰协调层工具。
                 allowed_tools: Some(vec!["all".to_string()]),
@@ -407,7 +407,7 @@ pub(crate) fn use_flexible_controller(
                 "required": ["execution_trace_summary"]
             }),
             ChatConfig {
-                system_prompt_template: Some("flexible/flexible_step3".into()),
+                system_prompt: Some(SystemPrompt::Template("flexible/flexible_step3".into())),
                 allowed_tools: Some(vec!["request_user_action".to_string()]),
                 ..Default::default()
             },
@@ -440,7 +440,7 @@ pub(crate) fn use_flexible_controller(
                 "required": ["execution_trace", "output_format", "field_selection_result"]
             }),
             ChatConfig {
-                system_prompt_template: Some("flexible/flexible_step4".into()),
+                system_prompt: Some(SystemPrompt::Template("flexible/flexible_step4".into())),
                 allowed_tools: Some(vec!["request_user_action".to_string()]),
                 ..Default::default()
             },
@@ -482,7 +482,7 @@ pub(crate) fn use_flexible_controller(
                 "required": ["task_definition", "execution_trace", "field_selection_result", "parameter_confirmation_result"]
             }),
             ChatConfig {
-                system_prompt_template: Some("flexible/flexible_step5".into()),
+                system_prompt: Some(SystemPrompt::Template("flexible/flexible_step5".into())),
                 allowed_tools: Some(vec!["request_user_action".to_string()]),
                 ..Default::default()
             },

@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 
-use planned_agent::chat::{ChatEvent as ServiceChatEvent, SubscriptionGuard};
+use planned_agent::chat::{ChatEvent as ServiceChatEvent, SubscriptionGuard, SystemPrompt};
 use planned_agent::ChatService;
 use planned_agent_prompt_manager::FilePromptManager;
 
@@ -128,9 +128,9 @@ impl ChatBridge {
         self.svc.stop();
     }
 
-    /// 设置系统提示模板（转发 `svc.set_system_prompt_template`）。
-    pub fn set_system_prompt_template(&self, template: Option<String>) {
-        self.svc.set_system_prompt_template(template);
+    /// 设置系统 prompt（转发 `svc.set_system_prompt`）。
+    pub fn set_system_prompt(&self, system_prompt: Option<SystemPrompt>) {
+        self.svc.set_system_prompt(system_prompt);
     }
 
     /// 重置服务端会话（转发 `svc.reset_session`）。

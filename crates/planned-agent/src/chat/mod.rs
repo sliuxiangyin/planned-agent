@@ -51,5 +51,5 @@ mod tools;
 #[cfg(test)]
 mod tests;
 
-pub use service::{ChatConfig, ChatEvent, ChatService, SendTicket, SubscriptionGuard, SubscriptionId};
+pub use service::{ChatConfig, ChatEvent, ChatService, SendTicket, SubscriptionGuard, SubscriptionId, SystemPrompt};
 pub use sub_agent::{ChatSubAgentSession, ResultDecision, SubAgentResultCallback, SubAgentRunner};

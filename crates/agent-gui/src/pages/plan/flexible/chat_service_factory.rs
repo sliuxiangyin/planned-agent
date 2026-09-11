@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use planned_agent::chat::ChatConfig;
+use planned_agent::chat::{ChatConfig, SystemPrompt};
 use planned_agent::ChatService;
 use planned_agent_prompt_manager::FilePromptManager;
 
@@ -42,7 +42,9 @@ pub(crate) async fn new_chat_service(
         tools.registry.clone(),
         prompt.manager.clone(),
         ChatConfig {
-            system_prompt_template: Some("flexible/flexible_global_system".to_string()),
+            system_prompt: Some(SystemPrompt::Template(
+                "flexible/flexible_global_system".to_string(),
+            )),
             // 协调器仅做状态机调度，不执行业务：工具层只暴露 5 个 step 子 agent +
             // flexible_state + request_user_action，杜绝误调业务 / 其它子 agent 工具。
             //

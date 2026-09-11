@@ -21,7 +21,7 @@ use planned_agent_tool_manager::ToolRegistry;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::chat::state::Command;
-use super::config::ChatConfig;
+use super::config::{ChatConfig, SystemPrompt};
 use crate::chat::driver::driver_loop;
 use super::event::{SubscriptionGuard, SubscriptionId, ChatEvent};
 use crate::chat::state::{resolve_ai_client, State};
@@ -267,8 +267,8 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         });
     }
 
-    pub fn set_system_prompt_template(&self, template: Option<String>) {
-        self.state.config.lock().unwrap().system_prompt_template = template;
+    pub fn set_system_prompt(&self, system_prompt: Option<SystemPrompt>) {
+        self.state.config.lock().unwrap().system_prompt = system_prompt;
     }
 
     pub fn set_allowed_tools(&self, allowed: Option<Vec<String>>) {

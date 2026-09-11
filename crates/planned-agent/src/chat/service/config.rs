@@ -4,20 +4,33 @@
 //! 字段与 v1 [`crate::chat::ChatConfig`] 保持一致（不含任何子 agent 概念），
 //! 通过 [`ChatConfig::default`] 获得保守默认后按需修改。
 
+/// system prompt 的来源：模板路径或已渲染好的字符串，二者互不耦合。
+#[derive(Debug, Clone)]
+pub enum SystemPrompt {
+    /// 模板路径，对应 `prompts/` 下某个 toml（相对目录、不含 `.toml` 后缀，
+    /// 例如 `"thorough/thorough_system"`）。运行时由注入的 `PromptManager`
+    /// 渲染（使用空的 `PromptContext`）。
+    Template(String),
+    /// 已经渲染好的 system prompt 字符串，直接作为 system message 注入，
+    /// 不再经过 `PromptManager`。适合调用方自行构建 `PromptContext`、
+    /// 调用 `PromptManager::render(path, &ctx)` 后把结果传进来。
+    Rendered(String),
+}
+
 /// v2 聊天配置。
 #[derive(Debug, Clone)]
 pub struct ChatConfig {
     /// 指定 AI provider 名；`None` 时使用 `AiManager` 注册的默认 provider。
     pub provider: Option<String>,
-    /// system prompt **模板路径**，对应 `prompts/` 下某个 toml：
-    /// - 写法：相对目录、不含 `.toml` 后缀（例如 `"thorough/thorough_system"`）
-    /// - 解析：`ChatService` 通过注入的 `PromptManager::render(path, ctx)`
-    ///   渲染模板（与 v1 / `LlmCoarsePlanner` 相同路径，支持变量替换）
-    /// - `None` 时不注入 system message；调用方需自行保证历史首条合法
+    /// system prompt 来源，二选一（两种来源互不耦合）：
+    /// - [`SystemPrompt::Template`]：传模板 path，内部通过注入的
+    ///   `PromptManager::render(path, ctx)` 渲染（与 v1 / `LlmCoarsePlanner` 同路径）
+    /// - [`SystemPrompt::Rendered`]：传已渲染好的 prompt 字符串，直接注入
+    /// - `None`：不注入 system message；调用方需自行保证历史首条合法
     ///
     /// v2 内部维护 history，system prompt 只在首次 `send` 时注入一次，
     /// 后续 `send` 保留（历史首条已是 System 时不再重复注入）。
-    pub system_prompt_template: Option<String>,
+    pub system_prompt: Option<SystemPrompt>,
     /// 采样温度。`None` 表示由 provider 默认值决定。
     pub temperature: Option<f32>,
     /// 最大生成 token 数。`None` 表示由 provider 默认值决定。
@@ -48,8 +61,6 @@ pub struct ChatConfig {
     /// - 全量基础上再补回整个 Utility 与 SubAgent 类（≈ 等价 `None`，但显式）：
     ///   `Some(["all","Utility","SubAgent"])`
     pub allowed_tools: Option<Vec<String>>,
-    /// system prompt 的 `{{ context }}` 变量值（`None` 或空串时渲染为空）。
-    pub context: Option<String>,
     /// 本次执行的唯一标识（run_id）。
     ///
     /// - `None`：主 agent（UI 交互走 `BlockAndConfirm` 阻塞确认）
@@ -66,13 +77,14 @@ impl Default for ChatConfig {
     fn default() -> Self {
         Self {
             provider: None,
-            system_prompt_template: Some("thorough/thorough_system".to_string()),
+            system_prompt: Some(SystemPrompt::Template(
+                "thorough/thorough_system".to_string(),
+            )),
             temperature: None,
             max_tokens: None,
             max_tool_rounds: 10,
             enable_thinking: true,
             allowed_tools: None,
-            context: None,
             run_id: None,
         }
     }

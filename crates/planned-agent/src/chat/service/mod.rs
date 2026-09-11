@@ -15,7 +15,7 @@ mod event;
 mod service;
 mod ticket;
 
-pub use config::ChatConfig;
+pub use config::{ChatConfig, SystemPrompt};
 pub use event::{SubscriptionGuard, SubscriptionId, ChatEvent};
 pub use service::ChatService;
 pub use ticket::{SendOutcome, SendTicket};

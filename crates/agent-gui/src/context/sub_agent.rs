@@ -20,7 +20,7 @@ use super::{AiContext, PromptContext, ToolsContext};
 /// - `tool_name` — 工具名（如 `"flexible_step1"`）
 /// - `description` — 工具描述
 /// - `input_schema` — JSON Schema
-/// - `config` — 子 agent 的 `ChatConfig`（含 `system_prompt_template` 等）
+/// - `config` — 子 agent 的 `ChatConfig`（含 `system_prompt` 等）
 /// - `depth` — 当前嵌套深度（通常为 1）
 /// - `max_depth` — 最大允许嵌套深度（通常为 2）
 pub fn register_sub_agent(

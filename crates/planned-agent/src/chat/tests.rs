@@ -22,7 +22,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::chat::service::SubscriptionGuard;
-    use crate::chat::{ChatConfig, ChatEvent, ChatService};
+    use crate::chat::{ChatConfig, ChatEvent, ChatService, SystemPrompt};
 
     /// Mock PromptManager：仅 `render` 返回固定文本。
     struct MockPromptManager;
@@ -675,7 +675,7 @@ mod tests {
         );
 
         // 热切换模板 + 入队重置（不重建 service）
-        svc.set_system_prompt_template(Some("chat/other".to_string()));
+        svc.set_system_prompt(Some(SystemPrompt::Template("chat/other".to_string())));
         svc.reset_session().expect("reset 入队成功");
 
         // 第二轮：Reset 在队列中先于本次 send 执行 → 注入新模板、旧历史消失
