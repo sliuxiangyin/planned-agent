@@ -1,7 +1,8 @@
 # 灵活模式 · 多会话保活设计（切换不打断后台会话）
 
-> 状态：**设计已定，待实施**（本文件为落地前的方案文档，代码尚未改动）
+> 状态：**部分实施**（阶段 1·A「壳 + 常驻宿主」已落地，`cargo check` 通过；其余待实施）
 > 变更：§3 D / §4.4 已改为「父 prompt 注入 session_id + 工具参数传参」方案，**弃用 task-local**（理由见 §3 D）
+> 变更：`ChatConfig.system_prompt_template` → `system_prompt: Option<SystemPrompt>`（`Template(path)` / `Rendered(String)`），原 `context` 字段移除；D 节改用 `SystemPrompt::Rendered` 注入 session_id
 > 目标读者：`crates/agent-gui/src/pages/plan/flexible/` 维护者
 > 关联：`docs/chat-flexible-流程审查与优化建议.md`、`.qoder/flexible/灵活模式.md`
 
@@ -81,7 +82,7 @@ FlexiblePage（壳）
 
 任务链路全部落在 GUI 侧（工具是 custom tool、prompt 是 GUI 模板），无核心库改动：
 
-1. **session_id 注入父 prompt（已就绪的通道）**：`driver/prompt.rs:10-40` 的 `inject_system_prompt` 已支持把 `ChatConfig.context`（`service/config.rs:51`）作为 Tera 变量 `{{ context }}` 注入 system prompt。GUI 在 `new_chat_service`（`chat_service_factory.rs`）构造本会话的 `ChatConfig` 时设 `context = Some(...session_id...)`；`flexible_global_system.toml` 正文加 `{{ context }}`。**每个会话自己的 config → 天然 per-session 隔离**。
+1. **session_id 注入父 prompt**：`ChatConfig.system_prompt` 现为 `Option<SystemPrompt>`（`driver/prompt.rs:23-36`）：`Template(path)` 走 `PromptManager`（空 `PromptContext`，带不了变量）、`Rendered(String)` 直接注入。**带 session_id 走 `SystemPrompt::Rendered`**——GUI 在 `new_chat_service`（`chat_service_factory.rs`）先渲染 `flexible_global_system` 模板、再拼接 session_id 说明，作为 `Rendered` 传入。**每个会话自己的 config → 天然 per-session 隔离**。
 2. **落库改为父 agent 显式调用的工具**：新增 `save_flexible_template` custom tool，executor 从 `arguments.session_id` 读取并调 `PlansFlexibleService::save_snapshot`。父 prompt 指示：step5 返回 JSON 后调用该工具，`session_id` 照抄 system prompt 给出的值。
 3. **step5 不再用 `SubAgentResultCallback`**：`register_sub_agent(..., "flexible_step5", ..., None)`；原 callback 里的 JSON 校验逻辑搬进 `save_flexible_template`。
 4. **`flexible_state` 一并改**：同样从 `arguments.session_id` 读（prompt 指示父 agent 每次调用都带上）。
@@ -199,25 +200,30 @@ pub(crate) fn use_flexible_controller(plan_id: String, session_id: String) -> Fl
 ### 4.4 会话隔离：父 prompt 注入 + 工具传参（零核心库改动）
 
 ```rust
-// ① GUI：构造本会话 ChatConfig 时注入 session_id（通道已存在）
+// ① GUI：构造本会话 ChatConfig 时注入 session_id
+// SystemPrompt::Rendered 直接注入已拼好的字符串；Template 走 PromptManager（空 ctx，带不了变量）
 // flexible/chat_service_factory.rs::new_chat_service
+let base = prompt_manager
+    .render("flexible/flexible_global_system", &PromptContext::new())
+    .await?;                                    // 或直接读模板文件内容
+let sp = format!(
+    "{base}\n\n## 会话上下文\n本会话 session_id = {session_id}。\n\
+     凡工具参数含 session_id 的（flexible_state、save_flexible_template），\
+     必须原样填入该值，不得改写、不得省略。"
+);
 ChatConfig {
-    system_prompt_template: Some("flexible/flexible_global_system".to_string()),
-    context: Some(format!(
-        "本会话的 session_id = {session_id}。\n\
-         凡工具参数含 session_id 的（flexible_state、save_flexible_template），\
-         必须原样填入该值，不得改写、不得省略。"
-    )),
+    system_prompt: Some(SystemPrompt::Rendered(sp)),
     allowed_tools: Some(vec![/* …, "save_flexible_template" */]),
     ..Default::default()
 }
 ```
 
 ```toml
-# ② flexible/flexible_global_system.toml 正文加 Tera 占位符
-{{ context }}
-# 并在第 9 步路由改为：step5 返回 JSON 后 → 调 save_flexible_template
-#   （session_id 照抄上值，template 传 step5 完整 JSON）→ 成功后 flexible_state save current_step="templated"
+# ② flexible/flexible_global_system.toml：把「第 9 步路由」改为
+#   step5 返回 JSON 后 → 调 save_flexible_template
+#   （session_id 照抄会话上下文中的值，template 传 step5 完整 JSON）
+#   → 成功后 flexible_state save current_step="templated"
+# 注：不再用 {{ context }} 占位符（session_id 由 ① 的 Rendered 拼接注入）
 ```
 
 ```rust
@@ -266,6 +272,7 @@ register_sub_agent(/* step5 … */, None);   // 原 step5_callback 传 None
 | 副作用工具串会话 | D 节：`flexible_state` / `save_flexible_template` 的 `session_id` 均由父 agent 经 prompt 照抄传入；验证并发多会话下落库归属正确 |
 | `run_id` 与「会话 id」混淆 | `run_id` 是子 agent 挂起-恢复用；会话 id 是落库归属，二者不混用 |
 | 已开会话无限增长 | 按决策 1 实现 LRU（保留最近 N），移除前 `stop()` 对应 `ChatService` |
+| **切模板会丢掉 session_id** | `apply_template` 走 `set_system_prompt(Some(SystemPrompt::Template(name)))`（`controller.rs:134`），会覆盖构造时 `Rendered` 里的 session_id；切换模板须同样用 `SystemPrompt::Rendered` 重新拼接 session_id |
 
 ## 7. 实施顺序（本文件确认后推进）
 
@@ -285,16 +292,16 @@ register_sub_agent(/* step5 … */, None);   // 原 step5_callback 传 None
 - [x] 决策 2：D 节机制 = **父 prompt 注入 session_id + 工具参数传参**（弃用 task-local）
 - [ ] 建立基线：`cargo check -p agent-gui` 当前通过
 
-### 阶段 1 · A —— 拆分「壳 + 常驻宿主」
+### 阶段 1 · A —— 拆分「壳 + 常驻宿主」 ✅ 代码已完成（`cargo check` 通过）
 
-- [ ] `flexible/page.rs`：新增 `FlexibleSessionHost` 组件（提取原 controller 调用 + `PageHeader`/`ChatPanel` 渲染）
-- [ ] `flexible/page.rs`：`FlexiblePage` 改为壳 —— `open_sessions` signal + `active` 来自 `SessionManager` + `for` 渲染 hosts（带 `key: "{sid}"`）
-- [ ] `flexible/page.rs`：壳内的 ensure effect —— 新 `current` 若不在 `open_sessions` 则加入（只增不减）
-- [ ] `flexible/controller.rs`：`use_flexible_controller` 签名 `Signal<String>` → `String`
-- [ ] `flexible/controller.rs`：去掉 `use_listen_session_manager`（监听上移到壳）
-- [ ] `flexible/controller.rs`：删除 `switch_session` 占位（`controller.rs:112-125`）
-- [ ] 宿主内 early-return 之前必须已完成全部 hooks 调用（后台 host 也要 boot）
-- [ ] 验证：单会话行为不回归
+- [x] `flexible/page.rs`：新增 `FlexibleSessionHost` 组件（提取原 controller 调用 + `PageHeader`/`ChatPanel` 渲染）
+- [x] `flexible/page.rs`：`FlexiblePage` 改为壳 —— `open_sessions` signal + `active` 来自 `SessionManager` + `for` 渲染 hosts（带 `key: "{sid}"`）
+- [x] `flexible/page.rs`：壳内的 ensure effect —— 新 `current` 若不在 `open_sessions` 则加入（只增不减）
+- [x] `flexible/controller.rs`：`use_flexible_controller` 签名 `Signal<String>` → `String`
+- [x] `flexible/controller.rs`：去掉 `use_listen_session_manager`（监听上移到壳）
+- [x] `flexible/controller.rs`：删除 `switch_session` 占位（`controller.rs:112-125`）
+- [x] 宿主内 early-return 之前必须已完成全部 hooks 调用（后台 host 也要 boot）
+- [ ] 验证：多会话切换保活（GUI 手动：A 流式中切 B、再切回 A 看 A 最新）；`cargo check` + code review 已通过
 
 ### 阶段 2 · B —— plan 级注册上移到壳
 
@@ -313,8 +320,8 @@ register_sub_agent(/* step5 … */, None);   // 原 step5_callback 传 None
 
 ### 阶段 4 · D —— 副作用工具会话隔离（父 prompt 注入 + 工具传参）
 
-- [ ] `flexible/chat_service_factory.rs`：`new_chat_service` 设 `ChatConfig.context` = 携带 session_id 的说明文本
-- [ ] `flexible_global_system.toml`：加 `{{ context }}` 占位符 + 第 9 步改为调 `save_flexible_template`
+- [ ] `flexible/chat_service_factory.rs`：`new_chat_service` 用 `SystemPrompt::Rendered(渲染后的 prompt + session_id 说明)` 注入
+- [ ] `flexible_global_system.toml`：第 9 步路由改为调 `save_flexible_template`（无需 `{{ context }}` 占位符）
 - [ ] 新增 `flexible/save_template_tool.rs`：`save_flexible_template` custom tool（从 `args.session_id` 读 + 迁入 step5 校验 + `save_snapshot`）
 - [ ] 注册 `save_flexible_template` 到 registry 并加入协调器 `allowed_tools`
 - [ ] `register_sub_agent(step5 …, None)`：取消 step5 callback

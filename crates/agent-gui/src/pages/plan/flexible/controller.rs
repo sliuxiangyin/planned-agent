@@ -18,7 +18,6 @@
 
 use std::sync::Arc;
 
-use anyhow::anyhow;
 use dioxus::prelude::*;
 use planned_agent::chat::{ChatConfig, SystemPrompt};
 use planned_agent_core::prompt::PromptManager;
@@ -109,21 +108,6 @@ impl FlexibleController {
         bridge.confirm(choice, pending);
     }
 
-    /// 切换到指定 session（多会话并行改造前的占位）。
-    ///
-    /// 原实现会停掉旧对话、为它新建一个绑目标 session store 的 ChatService 并重放
-    /// 历史；该逻辑依赖已移除的 `ChatServiceFactory` struct 且在并发切换下有硬伤
-    /// （切走即 stop 当前会话）。多会话架构就位后将改为「切走不 stop、后台继续跑」。
-    #[allow(dead_code)] // 预留 API：待"历史翻回"UI 接线后使用
-    pub(crate) fn switch_session(&self, _session_id: String) -> anyhow::Result<()> {
-        // TODO(多会话并行): ChatServiceFactory struct 已移除；此处改为直接持有依赖
-        // （storage/ai/tools/prompt）按需构造新会话 ChatService，并在多会话架构就位后
-        // 改为「切走不 stop、后台继续跑」。现临时占位，避免误用单会话重建逻辑。
-        Err(anyhow!(
-            "switch_session 尚未就绪：待多会话并行改造完成后接入"
-        ))
-    }
-
     /// 切换系统提示模板（切换即停当前会话并重置）。
     pub(crate) fn apply_template(&self, name: String) {
         if name.is_empty() {
@@ -154,10 +138,13 @@ impl FlexibleController {
     }
 }
 
-/// 创建/复用 flexible 页面控制器。组件须在顶层无条件调用。
+/// 创建/复用 flexible 页面控制器（每个常驻宿主一个句柄）。组件须在顶层无条件调用。
+///
+/// `session_id` 由宿主组件以固定值传入（不在本 hook 内跟随切换）：
+/// 多会话保活下每个会话一个 host，各自 boot 一次、切走不重建。
 pub(crate) fn use_flexible_controller(
     plan_id: String,
-    session_id: Signal<String>,
+    session_id: String,
 ) -> FlexibleController {
     // ── 纯内存聊天状态（单一订阅桥的 UI 投影 + 独立输入框态）──
     let view = use_signal_sync(ChatView::default);
@@ -197,12 +184,13 @@ pub(crate) fn use_flexible_controller(
         let tools_ctx = tools_ctx_c.clone();
         let prompt_ctx = prompt_ctx_c.clone();
 
-        // 无会话（plan 数据未就绪 / props 传空）时不启动，避免用空 id 去 boot
-        let session_id = session_id.read().clone();
+        // 无会话（plan 数据未就绪 / props 传空）时不启动，避免用空 id 去 boot。
+        // session_id 是宿主传入的固定值（非 signal）→ 本 effect 无响应式依赖，
+        // 仅在本宿主首次挂载时执行一次（切走不重建 → 保活）。
+        let session_id = session_id.clone();
         if session_id.is_empty() {
             return;
         }
-        println!("session updaye:{}", session_id.clone());
 
         // ChatView 是 Copy：把句柄副本交给 boot 异步填充历史/建立订阅桥
         let view_boot = view;
