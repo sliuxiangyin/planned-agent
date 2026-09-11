@@ -27,14 +27,14 @@ use crate::components::chat::chat_flow::{ChatBridge, ChatView, PendingUI};
 use crate::context::{
     register_sub_agent, require_resource, AiContext, PromptContext, StorageContext, ToolsContext,
 };
-use crate::pages::plan::shared::session::SessionManager;
 use crate::services::plans_flexible_service::PlansFlexibleService;
 use crate::shared::BootReporter;
 
-use super::flexible_state_tool::{flexible_state_tool, FlexibleStateExecutor};
+use super::flexible_tool::{
+    flexible_state_tool, save_flexible_template, FlexibleStateExecutor, SaveTemplateExecutor,
+};
 use super::session_boot::{boot_flexible_session, FlexBoot};
 use super::step2_callback::create_step2_callback;
-use super::step5_callback::create_step5_callback;
 
 /// 灵活模式控制器：持有全部状态 signal 与 ChatService，并提供事件处理方法。
 #[derive(Clone, Copy)]
@@ -165,10 +165,6 @@ pub(crate) fn use_flexible_controller(
     let tools_ctx = require_resource::<ToolsContext>();
     let prompt_ctx = require_resource::<PromptContext>();
 
-    // plan 级共享单例（PlanPage 已注入 context）；flexible_state / step5 旁路读「当前会话」用
-    let session_mgr_ctx = use_context::<Arc<SessionManager>>();
-    let session_mgr = use_signal_sync(move || session_mgr_ctx.clone());
-
     // ── 供异步 boot 闭包捕获的 owned clone ──
     let plan_id_c = plan_id.clone();
     let ai_ctx_c = ai_ctx.clone();
@@ -245,17 +241,22 @@ pub(crate) fn use_flexible_controller(
             storage_ctx.session_repo(),
             storage_ctx.flexible_state_repo(),
         ));
-        // flexible_state：协调器读写「当前会话流程中间状态」的旁路工具。
-        // 按引用借用再 clone，避免 move 掉 plans_flexible_service（下文 step5 回调仍要读它）。
+        // flexible_state：协调器读写「流程中间状态」的旁路工具（session_id 由协调器经参数传入）。
         {
-            let receiver = session_mgr.read().clone().receiver();
-            let executor = FlexibleStateExecutor::new(
-                plan_id.clone(),
-                plans_flexible_service.clone(),
-                receiver,
-            );
+            let executor =
+                FlexibleStateExecutor::new(plan_id.clone(), plans_flexible_service.clone());
             tools_ctx.register_custom_tool(
                 flexible_state_tool(),
+                vec![ToolCategory::Utility],
+                Arc::new(executor),
+            );
+        }
+        // save_flexible_template：step5 产出后由协调器显式调用，登记模板快照（session_id 经参数传入）。
+        {
+            let executor =
+                SaveTemplateExecutor::new(plan_id.clone(), plans_flexible_service.clone());
+            tools_ctx.register_custom_tool(
+                save_flexible_template(),
                 vec![ToolCategory::Utility],
                 Arc::new(executor),
             );
@@ -437,10 +438,6 @@ pub(crate) fn use_flexible_controller(
             None,
         );
 
-        let step5_callback = {
-            let receiver = session_mgr.read().clone().receiver();
-            create_step5_callback(plan_id.clone(), plans_flexible_service.clone(), receiver)
-        };
         register_sub_agent(
             &ai_ctx,
             &tools_ctx,
@@ -476,7 +473,7 @@ pub(crate) fn use_flexible_controller(
             },
             1, // depth
             2, // max_depth
-            step5_callback,
+            None, // step5 不再用回调：改用 save_flexible_template 工具落库
         );
     });
     use_drop(move || {
@@ -487,6 +484,7 @@ pub(crate) fn use_flexible_controller(
             "flexible_step4",
             "flexible_step5",
             "flexible_state",
+            "save_flexible_template",
         ] {
             let _ = registry.unregister_tool(name);
         }
