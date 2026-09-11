@@ -1,0 +1,203 @@
+/* 会话面板：整列占满，flex 纵向三段（搜索 / 滚动列表 / 新建按钮） */
+.panel {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+}
+
+/* 顶部搜索条 */
+.searchbar {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex: none;
+    padding: 0.6rem 0.75rem;
+    color: var(--secondary-color-4);
+}
+
+.searchbar svg {
+    flex: none;
+}
+
+.search_input {
+    flex: 1;
+    min-width: 0;
+}
+
+/* 中部：可滚动列表（高度约束在父容器，ScrollArea 内部滚动） */
+.scroll {
+    flex: 1;
+    min-height: 0;
+}
+
+.list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0 0.4rem 0.5rem;
+}
+
+.empty {
+    padding: 1.5rem 0.5rem;
+    text-align: center;
+    color: var(--secondary-color-4);
+    font-size: 0.85rem;
+}
+
+/* 分组（section） */
+.group {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+/* 相邻分组之间的分隔线（由 Separator 组件渲染，这里只负责上下间距） */
+.group_sep {
+    margin: 0.3rem 0 0.15rem;
+}
+
+/* 分组标题行：标题 + 右侧占位操作按钮 */
+.group_header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.35rem 0.5rem 0.15rem;
+}
+
+.group_title {
+    color: var(--secondary-color-4);
+    font-size: 0.72rem;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+}
+
+/* 占位操作按钮：默认低存在感，hover 分组头时才显眼 */
+.group_action {
+    opacity: 0.6;
+}
+
+.group_header:hover .group_action {
+    opacity: 1;
+}
+
+/* 分组内无数据时的占位（保持分组高度、弱化提示） */
+.group_empty {
+    padding: 0.35rem 0.55rem;
+    color: var(--secondary-color-4);
+    font-size: 0.78rem;
+    opacity: 0.7;
+}
+
+/* 会话行 */
+.row {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    box-sizing: border-box;
+    width: 100%;
+    padding: 0.6rem 0.55rem;
+    border-radius: 0.3rem;
+    cursor: pointer;
+    color: var(--secondary-color-2);
+    background: transparent;
+    transition: background-color 0.1s ease;
+}
+
+.row:hover {
+    background: var(--primary-color-4);
+}
+
+/* 选中：仅淡色背景（--focused-border-color 同色淡化），不加竖条、不改内外边距 */
+.row_selected {
+    background: color-mix(in srgb, var(--focused-border-color) 14%, transparent);
+}
+
+.row_selected:hover {
+    background: color-mix(in srgb, var(--focused-border-color) 18%, transparent);
+}
+
+/* 左侧主区：title + version 同行，且不换行 */
+.row_main {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: baseline;
+    gap: 0.4rem;
+    flex: 1;
+    min-width: 0;
+}
+
+.row_title {
+    display: block;
+    flex: 0 1 auto;
+    min-width: 0;
+    font-size: 0.85rem;
+    font-weight: 400;
+    line-height: 1.4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 版本：次级色小字 */
+.version {
+    flex: none;
+    color: var(--secondary-color-4);
+    font-size: 0.7rem;
+}
+
+/* 未定稿「草稿」弱化 */
+.version_draft {
+    flex: none;
+    color: var(--secondary-color-4);
+    font-size: 0.7rem;
+    font-style: italic;
+    opacity: 0.7;
+}
+
+/* 右侧：相对时间 */
+.row_time {
+    flex: none;
+    color: var(--secondary-color-4);
+    font-size: 0.7rem;
+    white-space: nowrap;
+}
+
+/* 底部：新建会话（其上分隔线由 Separator 组件渲染） */
+.footer {
+    flex: none;
+    padding: 0.6rem 0.75rem 0.75rem;
+}
+
+/* ── 新建会话弹窗 ── */
+.create_dialog_body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+.create_dialog_field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+
+.create_dialog_label {
+    color: var(--secondary-color-4);
+    font-size: 0.8rem;
+}
+
+.create_dialog_error {
+    color: #e5484d;
+    font-size: 0.78rem;
+}
+
+.create_dialog_footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+}

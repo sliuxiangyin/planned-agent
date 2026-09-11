@@ -1,6 +1,6 @@
 # 灵活模式 · 多会话保活设计（切换不打断后台会话）
 
-> 状态：**部分实施**（阶段 1·A「壳 + 常驻宿主」已落地；阶段 4·D **工具侧 + 注入侧均已落地**——`flexible_tool.rs` 两工具从 `arguments.session_id` 读、step5 callback 移除、`chat_service_factory` 以 `SystemPrompt::Rendered` 注入 session_id、模板已加「会话上下文」；仅「切模板保留 session_id」为已知项）
+> 状态：**部分实施**（阶段 1·A「壳 + 常驻宿主」已落地；阶段 2·B **plan 级注册上移已落地**——`use_plan_agent_registrations`/`use_plan_templates` 上移到壳 `FlexiblePage`，controller 不再重复注册；阶段 4·D **工具侧 + 注入侧均已落地**——`flexible_tool.rs` 两工具从 `arguments.session_id` 读、step5 callback 移除、`chat_service_factory` 以 `SystemPrompt::Rendered` 注入 session_id、模板已加「会话上下文」；仅「切模板保留 session_id」为已知项）
 > 变更：§3 D / §4.4 已改为「父 prompt 注入 session_id + 工具参数传参」方案，**弃用 task-local**（理由见 §3 D）
 > 变更：`ChatConfig.system_prompt_template` → `system_prompt: Option<SystemPrompt>`（`Template(path)` / `Rendered(String)`），原 `context` 字段移除；D 节改用 `SystemPrompt::Rendered` 注入 session_id
 > 目标读者：`crates/agent-gui/src/pages/plan/flexible/` 维护者
@@ -69,6 +69,17 @@ FlexiblePage（壳）
 
 - **模板列表加载**、**子 agent 注册 / 注销**：上移到壳里的一次性 hook（`register` 一次，`use_drop` 注销一次）。
 - **`flexible_state` executor / `step5` 落库**：改为在调用时由父 agent 传入 `session_id`（见 D 节），工具本身不再绑定会话。
+
+**实现计划（阶段 2·B）**：
+
+- **上移对象**（当前在 `use_flexible_controller` 内、每个 host 执行一次）：
+  1. 两个 custom tool 注册：`flexible_state`、`save_flexible_template`—— executor 仅依赖 `plan_id`、与 session 无关 → 可共享；
+  2. 子 agent 注册：`flexible_step1..5`（+ 测试用 `flexible_step_rua_demo` / `flexible_step_max_rounds_demo`）；
+  3. `use_drop` 注销；
+  4. 模板列表加载（`list_prompts` → `templates`）。
+- **新增「自定义 hook」**：`fn use_plan_agent_registrations(plan_id: String)`（dioxus 惯例：`use_` 前缀 fn 内可用 hooks），在壳 `FlexiblePage` 体内调用一次；内部 `require_resource` 取 `Storage/Ai/Tools/Prompt`，`use_hook` 注册 + `use_drop` 注销。
+- **模板列表上移后**：`templates` signal 改由壳持有，经 props 传给 `FlexibleSessionHost` → `use_flexible_controller`；controller 不再自建 `templates`、不再有加载 effect。`template`（当前选中项）仍 per-host。
+- **依赖与顺序**：注册需 `storage_ctx`（构造 `PlansFlexibleService`）—— 壳渲染时启动门保证资源就绪，与原 controller 同假设。
 
 ### C. host 内的会话态
 
@@ -311,10 +322,12 @@ register_sub_agent(/* step5 … */, None);   // 原 step5_callback 传 None
 
 ### 阶段 2 · B —— plan 级注册上移到壳
 
-- [ ] 把模板列表加载从 `controller.rs:236` 的 `use_effect` 上移到壳
-- [ ] 把子 agent 注册（`register_sub_agent` × 多个）与 `flexible_state` 注册从 `controller.rs:252` 的 `use_hook` 上移到壳
-- [ ] 把 `use_drop` 注销（`controller.rs:494`）同样上移到壳
-- [ ] 验证：多 host 下无重复注册（日志 `Registered tool:` 每个工具仅出现一次）
+- [x] 新增自定义 hook `use_plan_agent_registrations(plan_id: String)`：`use_hook` 内注册 `flexible_state` + `save_flexible_template` + `flexible_step1..5`（+ 测试用 2 个），`use_drop` 注销
+- [x] 从 `use_flexible_controller` 移除注册 `use_hook`与 `use_drop`
+- [x] 模板列表加载（原 `controller.rs`）上移到壳：壳持有 `templates` + 加载 effect（`use_plan_templates`）
+- [x] `use_flexible_controller` 签名增加 `templates: Signal<Vec<String>, SyncStorage>`，移除本地 `templates` signal
+- [x] `FlexiblePage` 调 `use_plan_agent_registrations(plan_id)`；`FlexibleSessionHost` 接收 `templates` prop 并透传
+- [ ] 验证：多 host 下注册仅一次（切换/新增会话不重复注册、任一 host 卸载不注销全局工具）——`cargo check` 通过；运行期单次性由「`use_hook` 在壳」结构保证（待 GUI 手测）
 
 ### 阶段 3 · 多会话联调（C）
 
