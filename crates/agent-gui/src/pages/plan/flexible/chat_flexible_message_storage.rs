@@ -132,7 +132,10 @@ impl ChatHistoryStore for ChatMessageStore {
             }
         };
 
-        if let Err(e) = repo.update_by_id(&id_owned, &msg_json).await {
+        if let Err(e) = repo
+            .update_by_id(&id_owned, &msg_json, msg.is_error_type as i32)
+            .await
+        {
             tracing::error!("更新聊天消息失败 (id: {}): {}", id_owned, e);
         }
     }

@@ -86,6 +86,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
             cancelled: Arc::new(AtomicBool::new(false)),
             cancel_tx,
             upstream_cancel: std::sync::Mutex::new(None),
+            pending_replay: std::sync::Mutex::new(None),
         });
         Self { state }
     }
@@ -114,6 +115,7 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
             cancelled: Arc::new(AtomicBool::new(false)),
             cancel_tx,
             upstream_cancel: std::sync::Mutex::new(None),
+            pending_replay: std::sync::Mutex::new(None),
         });
         Self { state }
     }

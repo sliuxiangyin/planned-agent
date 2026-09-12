@@ -122,17 +122,22 @@ impl ChatMessageRepo {
         Ok(())
     }
 
-    /// 根据 UUID id 更新消息内容
+    /// 根据 UUID id 更新消息内容与错误类型
     pub async fn update_by_id(
         &self,
         id: &str,
         message_json: &str,
+        is_error_type: i32,
     ) -> StorageResult<()> {
         chat_message::Entity::update_many()
             .filter(chat_message::Column::Id.eq(id))
             .col_expr(
                 chat_message::Column::MessageJson,
                 Expr::val(message_json),
+            )
+            .col_expr(
+                chat_message::Column::IsErrorType,
+                Expr::val(is_error_type),
             )
             .exec(&self.db)
             .await?;

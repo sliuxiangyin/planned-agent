@@ -52,7 +52,7 @@ pub(super) enum ConversationOutcome {
 /// 达到 `max_tool_rounds` 询问用户后，本次触顶的处理去向。
 #[derive(Debug, Clone)]
 enum PromptChoice {
-    /// 用户选择继续：放行本批尚未执行的 tool_calls（多续一轮）。
+    /// 用户选择继续：**直接执行本批**尚未执行的 tool_calls（不再重新请求 LLM）。
     Continue,
     /// 用户选择结束 / 无法询问：闭合本批并终止循环。
     Stop,
@@ -101,12 +101,12 @@ fn next_max_rounds_ui_id() -> String {
 /// 与 request_user_action_demo 里 LLM 主动发起的交互一致：把「是否继续」作为一条完整工具回合
 /// 写入 history —— `assistant(tool_calls=[request_user_action])` + 用户选择的 `tool`，因此可持久化、
 /// 可回显，前端交互卡也有对应锚点。
-/// - 触顶时本批真实工具一律先 close（主/子一致，本批不执行）。
-/// - 主 agent（`BlockAndConfirm`）：原地 await；用户作答后 push_tool 闭合该回合。选「继续」→
-///   外层授予 1 次"续跑额度"，下一批工具放行执行一轮后再回到上限重新询问（每次续一轮、可反复弹）；
-///   选「结束」→ 结束。
-/// - 子 agent（`EmitAndSuspend`）：emit 请求后挂起，resume 以 history 里这条未闭合的
-///   request_user_action 为锚点闭合，再跑（round 重算，即"继续"给一档新预算）。
+/// - 触顶时本批真实工具先 close 成「达到最大轮次限制」（用于让 history 合法、并让询问回合可回显）。
+/// - 主 agent（`BlockAndConfirm`）：原地 await。选「继续」→ 外层**直接执行本批**（执行时按
+///   tool_call_id upsert 覆盖该 cancelled 记录），不再重新请求 LLM，因此不存在"LLM 续跑轮空返回"；
+///   选「结束」→ 保留 close 结果并终止循环。
+/// - 子 agent（`EmitAndSuspend`）：本批先 close；emit 请求后挂起，resume 以 history 里这条未闭合的
+///   request_user_action 为锚点闭合，再跑（round 重算，仍由 LLM 重新发起下一批 —— 待后续对齐）。
 async fn prompt_max_rounds<
     PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'static,
 >(
@@ -118,6 +118,19 @@ async fn prompt_max_rounds<
     round: usize,
 ) -> Result<PromptChoice> {
     let (ask_message, ask_questions) = continue_question(max_rounds);
+
+    // 子 agent（EmitAndSuspend）：把本批（即将被 close）记入待重放，resume 后直接执行。
+    // 此时 history 最后一条 assistant 仍是本批（尚未写入触顶询问回合）。
+    if matches!(ui_strategy, UIActionStrategy::EmitAndSuspend) {
+        if let Some(batch) = state
+            .history
+            .snapshot()
+            .last()
+            .and_then(|m| m.tool_calls.clone())
+        {
+            state.set_pending_replay(batch);
+        }
+    }
 
     // 触顶：本批真实工具一律先按「达到轮次限制」close（主/子一致，本批不执行）。
     close_max_rounds_tool_calls(state).await;
@@ -202,6 +215,84 @@ async fn prompt_max_rounds<
     }
 }
 
+/// 一批工具的执行结果（供 [`execute_tool_batch`] 返回给主循环）。
+enum BatchOutcome {
+    /// 本批全部执行完，循环可继续。
+    Continue,
+    /// 需要结束本次会话（取消 / 工具取消 / UI 无效）。
+    Completed,
+    /// 触发新的挂起（子 agent）。
+    Suspended { run_id: String },
+}
+
+/// 执行一批工具调用（backend + UI）。
+///
+/// 从 `run_conversation` 循环体抽出，供两条路径复用：
+/// - 正常一轮：LLM 返回本批后执行；
+/// - 子 agent 触顶 resume 后的**重放**：直接执行被取消的本批，不请求 LLM。
+async fn execute_tool_batch<
+    PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'static,
+>(
+    state: &Arc<State<PM>>,
+    tool_calls_vec: Vec<ToolCall>,
+    ui_strategy: &UIActionStrategy,
+    rx: &mut mpsc::UnboundedReceiver<Command>,
+    queue: &mut VecDeque<Command>,
+    bridge: &dyn ToolExecutionBridge,
+    stream_error: &str,
+) -> Result<BatchOutcome> {
+    let (ui_calls, backend_calls): (Vec<_>, Vec<_>) = tool_calls_vec
+        .iter()
+        .partition(|tc| UI_TOOL_NAMES.contains(&tc.function.name.as_str()));
+
+    info!(
+        "[round] 后端工具 {} 个, UI 工具 {} 个",
+        backend_calls.len(),
+        ui_calls.len()
+    );
+    for call in &backend_calls {
+        if state.is_cancelled_effective() {
+            state.mark_cancelled();
+            break;
+        }
+        match execute_backend_tool_call(state, call, bridge).await? {
+            BackendToolResult::Done => {}
+            BackendToolResult::Cancelled => {
+                close_unclosed_tool_calls(state).await;
+                return Ok(BatchOutcome::Completed);
+            }
+        }
+    }
+    info!("[round] 所有后端工具执行完毕");
+
+    for call in &ui_calls {
+        if state.is_cancelled_effective() {
+            state.mark_cancelled();
+            break;
+        }
+        match handle_ui_tool_call(state, call, ui_strategy, rx, queue, stream_error).await? {
+            UIActionOutcome::Continue => {}
+            UIActionOutcome::Invalid { reason } => {
+                // UI 工具无效（如空 questions）：handle 内已闭合该 tool_call 并 emit Error，
+                // 这里直接结束本轮，不再挂起等用户——否则会话永久卡死。
+                info!("[round] UI 工具无效，结束本轮: {}", reason);
+                close_unclosed_tool_calls(state).await;
+                return Ok(BatchOutcome::Completed);
+            }
+            UIActionOutcome::UserCancelled => {
+                close_unclosed_tool_calls(state).await;
+                return Ok(BatchOutcome::Completed);
+            }
+            UIActionOutcome::Suspended { run_id } => {
+                close_unclosed_tool_calls(state).await;
+                return Ok(BatchOutcome::Suspended { run_id });
+            }
+        }
+    }
+
+    Ok(BatchOutcome::Continue)
+}
+
 /// 运行一次完整的多轮对话循环。
 pub(super) async fn run_conversation<
     PM: planned_agent_core::prompt::PromptManager + Send + Sync + 'static,
@@ -216,14 +307,30 @@ pub(super) async fn run_conversation<
 
     let mut round = 1usize;
     let mut stream_error_text: Option<String> = None;
-    // 用户触顶选择「继续」后授予的续跑额度：>0 时下一次触顶放行本批执行一轮，然后清零。
-    let mut grace_rounds: usize = 0;
 
     loop {
         info!("[round] === 第 {} 轮开始 ===", round);
         if state.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
             info!("[round] 已取消，break");
             break;
+        }
+
+        // 子 agent 触顶「继续」重放：直接执行被 close 的本批，不请求 LLM。
+        if let Some(replay) = state.take_pending_replay() {
+            info!(
+                "[round] 重放被触顶取消的本批 {} 个工具调用（不请求 LLM）",
+                replay.len()
+            );
+            match execute_tool_batch(state, replay, &ui_strategy, rx, queue, bridge, "").await? {
+                BatchOutcome::Continue => {
+                    round += 1;
+                    continue;
+                }
+                BatchOutcome::Completed => return Ok(ConversationOutcome::Completed),
+                BatchOutcome::Suspended { run_id } => {
+                    return Ok(ConversationOutcome::Suspended { run_id });
+                }
+            }
         }
 
         state
@@ -368,81 +475,42 @@ pub(super) async fn run_conversation<
 
         let max_rounds = state.config.lock().unwrap().max_tool_rounds;
         if round >= max_rounds {
-            if grace_rounds > 0 {
-                // 上轮用户选「继续」给的续跑额度：放行本批真实工具执行一轮。
-                grace_rounds -= 1;
-                info!("[round] 消耗续跑额度，放行本批 {} 个工具调用", tool_calls_vec.len());
-            } else {
-                match prompt_max_rounds(state, rx, queue, &ui_strategy, max_rounds, round).await? {
-                    PromptChoice::Continue => {
-                        // 用户选「继续」：本批已在 prompt_max_rounds 内 close（成 cancelled），
-                        // 授予 1 次续跑额度供下一批放行，然后进入下一轮让 LLM 继续发起。
-                        grace_rounds = 1;
-                        info!("[round] 用户选择继续：本批已 close，授权续跑一轮");
-                        round += 1;
-                        continue;
-                    }
-                    PromptChoice::Stop => {
-                        // 本批已在 prompt_max_rounds 内 close（成 cancelled）。
-                        warn!("chat: 达到 max_tool_rounds={}, 用户选择结束，终止循环", max_rounds);
-                        break;
-                    }
-                    PromptChoice::Suspend { run_id } => {
-                        info!("[round] 子 agent 触顶：挂起等用户选择是否继续（run_id={run_id}）");
-                        return Ok(ConversationOutcome::Suspended { run_id });
-                    }
+            match prompt_max_rounds(state, rx, queue, &ui_strategy, max_rounds, round).await? {
+                PromptChoice::Continue => {
+                    // 用户选「继续」：不再重新请求 LLM，直接放行本批真实工具执行（重放）。
+                    // 本批是 LLM 在触顶这一轮已生成的调用；执行时按 tool_call_id upsert，
+                    // 覆盖 prompt_max_rounds 内先写入的那条「达到最大轮次限制」cancelled tool。
+                    info!(
+                        "[round] 用户选择继续：直接执行本批 {} 个工具调用",
+                        tool_calls_vec.len()
+                    );
                 }
-            }
-        }
-
-        let (ui_calls, backend_calls): (Vec<_>, Vec<_>) = tool_calls_vec
-            .iter()
-            .partition(|tc| UI_TOOL_NAMES.contains(&tc.function.name.as_str()));
-
-        info!(
-            "[round] 后端工具 {} 个, UI 工具 {} 个",
-            backend_calls.len(),
-            ui_calls.len()
-        );
-        for call in &backend_calls {
-            if state.is_cancelled_effective() {
-                state.mark_cancelled();
-                break;
-            }
-            match execute_backend_tool_call(state, call, bridge).await? {
-                BackendToolResult::Done => {}
-                BackendToolResult::Cancelled => {
-                    close_unclosed_tool_calls(state).await;
-                    return Ok(ConversationOutcome::Completed);
+                PromptChoice::Stop => {
+                    warn!("chat: 达到 max_tool_rounds={}, 用户选择结束，终止循环", max_rounds);
+                    break;
                 }
-            }
-        }
-        info!("[round] 所有后端工具执行完毕，round += 1，继续循环");
-
-        for call in &ui_calls {
-            if state.is_cancelled_effective() {
-                state.mark_cancelled();
-                break;
-            }
-            match handle_ui_tool_call(state, call, &ui_strategy, rx, queue, &last_stream_error)
-                .await?
-            {
-                UIActionOutcome::Continue => {}
-                UIActionOutcome::Invalid { reason } => {
-                    // UI 工具无效（如空 questions）：handle 内已闭合该 tool_call 并 emit Error，
-                    // 这里直接结束本轮，不再挂起等用户——否则会话永久卡死。
-                    info!("[round] UI 工具无效，结束本轮: {}", reason);
-                    close_unclosed_tool_calls(state).await;
-                    return Ok(ConversationOutcome::Completed);
-                }
-                UIActionOutcome::UserCancelled => {
-                    close_unclosed_tool_calls(state).await;
-                    return Ok(ConversationOutcome::Completed);
-                }
-                UIActionOutcome::Suspended { run_id } => {
-                    close_unclosed_tool_calls(state).await;
+                PromptChoice::Suspend { run_id } => {
+                    info!("[round] 子 agent 触顶：挂起等用户选择是否继续（run_id={run_id}）");
                     return Ok(ConversationOutcome::Suspended { run_id });
                 }
+            }
+        }
+
+        match execute_tool_batch(
+            state,
+            tool_calls_vec,
+            &ui_strategy,
+            rx,
+            queue,
+            bridge,
+            &last_stream_error,
+        )
+        .await?
+        {
+            BatchOutcome::Continue => {}
+            BatchOutcome::Completed => return Ok(ConversationOutcome::Completed),
+            BatchOutcome::Suspended { run_id } => {
+                return Ok(ConversationOutcome::Suspended { run_id });
             }
         }
 

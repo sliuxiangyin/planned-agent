@@ -84,6 +84,33 @@ fn is_cancelled_tool(msg: &StoreMessage) -> bool {
     msg.is_error_type == ErrorType::Cancelled
 }
 
+/// 判断某条 tool 消息是否是对 UI 工具（`request_user_action`）的作答。
+///
+/// 触顶询问（以及普通 `request_user_action`）在 history 里是
+/// `assistant(tool_calls=[request_user_action])` + 用户作答的 `tool` 回合。
+/// 这条作答 tool 代表「用户刚对一个交互问题作了选择」，属于回合终态，
+/// 收尾时不应再补 `Output interrupt` / `Error: ...` 之类的占位 assistant。
+fn is_ui_tool_response(messages: &[StoreMessage], tool_call_id: &str) -> bool {
+    if tool_call_id.is_empty() {
+        return false;
+    }
+    messages.iter().any(|sm| {
+        matches!(sm.message.role, MessageRole::Assistant)
+            && sm
+                .message
+                .tool_calls
+                .as_ref()
+                .map(|tcs| {
+                    tcs.iter().any(|tc| {
+                        tc.id == tool_call_id
+                            && crate::chat::tools::UI_TOOL_NAMES
+                                .contains(&tc.function.name.as_str())
+                    })
+                })
+                .unwrap_or(false)
+    })
+}
+
 /// 补齐孤立消息：若最后一条是 User 或执行成功的 Tool，补一条 assistant 消息并 emit 流式事件。
 ///
 /// 用于以下场景：
@@ -93,6 +120,7 @@ fn is_cancelled_tool(msg: &StoreMessage) -> bool {
 ///
 /// 不补的场景：
 /// - 最后一条是 cancelled Tool（close_unclosed_tool_calls 已处理）
+/// - 最后一条是 UI 工具 `request_user_action` 的作答（用户交互终态）
 /// - 最后一条是执行失败的 Tool（已告知失败）
 /// - 最后一条是 Assistant（不需要补）
 pub(in crate::chat::driver) async fn close_orphaned_user<
@@ -110,6 +138,12 @@ pub(in crate::chat::driver) async fn close_orphaned_user<
             MessageRole::Tool => {
                 if is_cancelled_tool(last) {
                     // cancelled tool → close_unclosed_tool_calls 已处理，跳过
+                    false
+                } else if is_ui_tool_response(
+                    &messages,
+                    last.message.tool_call_id.as_deref().unwrap_or(""),
+                ) {
+                    // UI 工具（request_user_action）的作答 → 用户交互终态，不补
                     false
                 } else {
                     // 执行成功或普通失败的 tool → 需要补 assistant 给 LLM 上下文

@@ -70,12 +70,12 @@ pub(crate) async fn new_chat_service(
             //   2) max_tool_rounds: 2：把轮次上限压到很小，2 轮即可触顶。
             //      正常协调器要调度 step1~step5 需要多轮，默认应为 10（删除这行即回默认）。
             allowed_tools: Some(vec![
-                // "flexible_step1".to_string(),
-                // "flexible_step2".to_string(),
-                // "flexible_step3".to_string(),
-                // "flexible_step4".to_string(),
-                // "flexible_step5".to_string(),
-                // "flexible_state".to_string(),
+                "flexible_step1".to_string(),
+                "flexible_step2".to_string(),
+                "flexible_step3".to_string(),
+                "flexible_step4".to_string(),
+                "flexible_step5".to_string(),
+                "flexible_state".to_string(),
                 "request_user_action".to_string(),
                 // "builtin_read_documentation".to_string(),
                 // 测试用：供 chat/sub_agent_rua_driver.toml 驱动的协调器调用，

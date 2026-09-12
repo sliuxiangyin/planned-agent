@@ -18,6 +18,7 @@ use planned_agent_ai_manager::AiManager;
 use planned_agent_core::ai::types::Message;
 use planned_agent_core::ai::types::MessageContent;
 use planned_agent_core::ai::types::MessageRole;
+use planned_agent_core::ai::types::ToolCall;
 use planned_agent_core::prompt::PromptManager;
 use planned_agent_tool_manager::ToolRegistry;
 use serde_json::Value;
@@ -55,6 +56,12 @@ pub(crate) struct State<PM: PromptManager + Send + Sync + 'static> {
     pub(crate) cancel_tx: watch::Sender<bool>,
     /// 上游父级取消接收端。当本服务是某个父服务创建的子 agent 时持有（主 agent 为 `None`）。
     pub(crate) upstream_cancel: Mutex<Option<watch::Receiver<bool>>>,
+    /// 触顶「继续」后待重放的本批工具（子 agent resume 路径用）。
+    ///
+    /// `prompt_max_rounds` 在子 agent 触顶挂起前把本批（即将被 close 成 cancelled）存入；
+    /// resume 后 `run_conversation` 首轮取出**直接执行**（不请求 LLM），执行时按 `tool_call_id`
+    /// upsert 覆盖对应的 cancelled tool 记录。主 agent 走原地执行路径，不使用该字段。
+    pub(crate) pending_replay: Mutex<Option<Vec<ToolCall>>>,
 }
 
 impl<PM: PromptManager + Send + Sync + 'static> State<PM> {
@@ -62,6 +69,16 @@ impl<PM: PromptManager + Send + Sync + 'static> State<PM> {
     pub(crate) fn mark_cancelled(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
         let _ = self.cancel_tx.send(true);
+    }
+
+    /// 取出待重放的本批工具（若有）。
+    pub(crate) fn take_pending_replay(&self) -> Option<Vec<ToolCall>> {
+        self.pending_replay.lock().unwrap().take()
+    }
+
+    /// 记录待重放的本批工具（子 agent 触顶挂起前调用）。
+    pub(crate) fn set_pending_replay(&self, batch: Vec<ToolCall>) {
+        *self.pending_replay.lock().unwrap() = Some(batch);
     }
 
     /// 本层（父）本地取消 watch 的接收端 —— 交给下游子 agent 作为其上游取消。
@@ -265,6 +282,67 @@ impl History {
         let store_id = self.store.append(&sm).await;
         self.inner.lock().unwrap().push((store_id.clone(), sm));
         store_id
+    }
+
+    /// 写入或更新一条 tool 消息（按 `tool_call_id` 去重）。
+    ///
+    /// 与 [`History::push_tool`] 的区别：若该 `tool_call_id` 已存在一条 tool 消息
+    /// （例如触顶时先写入的「达到最大轮次限制」cancelled 记录），就地**更新**为本次结果
+    /// （内存 + store），而不是再追加一条——避免同一 `tool_call_id` 出现两条 tool 消息
+    /// 导致 history 非法（下一次 LLM 请求会被拒）。用于「触顶继续」重放本批工具的场景。
+    pub async fn upsert_tool(
+        &self,
+        tool_call_id: &str,
+        content: &Value,
+        is_error_type: ErrorType,
+    ) -> String {
+        // 先查是否已有同 id 的 tool 消息（短暂持锁，不跨 await）
+        let existing = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .iter()
+                .find(|(_, m)| {
+                    matches!(m.message.role, MessageRole::Tool)
+                        && m.message.tool_call_id.as_deref() == Some(tool_call_id)
+                })
+                .map(|(id, _)| id.clone())
+        };
+
+        let json = serde_json::to_string(content).unwrap_or_else(|_| content.to_string());
+        let msg = Message {
+            role: MessageRole::Tool,
+            content: Some(MessageContent::ToolResult {
+                tool_call_id: tool_call_id.to_string(),
+                content: json,
+            }),
+            tool_call_id: Some(tool_call_id.to_string()),
+            tool_calls: None,
+            name: None,
+            reasoning_content: None,
+            ..Default::default()
+        };
+        let sm = StoreMessage::new(msg, is_error_type);
+
+        match existing {
+            Some(store_id) => {
+                self.store.update(&store_id, &sm).await;
+                if let Some(entry) = self
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|(id, _)| *id == store_id)
+                {
+                    entry.1 = sm;
+                }
+                store_id
+            }
+            None => {
+                let store_id = self.store.append(&sm).await;
+                self.inner.lock().unwrap().push((store_id.clone(), sm));
+                store_id
+            }
+        }
     }
 
     /// 清空历史（会话重置）。

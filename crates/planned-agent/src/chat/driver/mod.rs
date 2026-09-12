@@ -78,6 +78,11 @@ pub(super) async fn driver_loop<PM: planned_agent_core::prompt::PromptManager + 
                     "action_id": action_id
                 });
                 state.history.push_tool(&tool_call_id, &tool_content, ErrorType::None).await;
+                // 触顶「继续」重放：仅当用户选「继续」时保留待重放批；选「结束」则丢弃，
+                // 避免 resume 后误把被取消的本批执行掉。
+                if !choice.contains("continue") {
+                    let _ = state.take_pending_replay();
+                }
                 *state.run_state.lock().unwrap() = RunState::Running;
 
                 let bridge = bridge::SubAgentBridge::new(state.clone());

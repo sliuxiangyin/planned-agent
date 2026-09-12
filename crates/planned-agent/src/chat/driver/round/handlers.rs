@@ -94,7 +94,7 @@ pub(super) async fn handle_ui_tool_call<
                 "choice": choice,
                 "action_id": action_id
             });
-            state.history.push_tool(&call.id, &tool_content, ErrorType::None).await;
+            state.history.upsert_tool(&call.id, &tool_content, ErrorType::None).await;
         }
         UIActionStrategy::EmitAndSuspend => {
             return Ok(UIActionOutcome::Suspended {
@@ -170,7 +170,7 @@ pub(super) async fn execute_backend_tool_call<
     } else {
         ErrorType::None
     };
-    state.history.push_tool(&call.id, &content, error_type).await;
+    state.history.upsert_tool(&call.id, &content, error_type).await;
     state
         .subscribers
         .emit(ChatEvent::Chat(CoreChatEvent::ToolExecuted {
