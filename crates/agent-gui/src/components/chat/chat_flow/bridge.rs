@@ -27,8 +27,8 @@ use planned_agent::chat::{ChatEvent as ServiceChatEvent, SubscriptionGuard, Syst
 use planned_agent::ChatService;
 use planned_agent_prompt_manager::FilePromptManager;
 
-use super::reduce::{fmt_choice, reduce};
-use super::types::{AgentEvent, PendingUI};
+use super::reduce::{fmt_reply, reduce};
+use super::types::{ActionReply, AgentEvent, PendingUI};
 use super::view::ChatView;
 
 /// 聊天桥：`ChatService` ↔ `Signal<ChatView>` 的唯一接线点。
@@ -84,20 +84,27 @@ impl ChatBridge {
     /// 用户提交 `request_user_action` / 子 agent 挂起卡片。
     ///
     /// 按 `pending.run_id` 区分子 agent（`resume_sub_agent`）与主 agent（`confirm_user_action`）路径。
-    pub fn confirm(&self, choice: String, pending: PendingUI) {
+    /// `reply` 携带「提交 / 取消」语义：取消对应 `action_id = "cancel"` 且 choice 为空串，
+    /// 与「未作答直接提交」（`action_id = "submit"` + 空串）区分开。
+    pub fn confirm(&self, reply: ActionReply, pending: PendingUI) {
+        let (choice, action_id) = match &reply {
+            ActionReply::Submit(c) => (c.clone(), "submit"),
+            ActionReply::Cancel => (String::new(), "cancel"),
+        };
+        let rendered = fmt_reply(&reply);
         // 1. 改 view（先落用户选择文本，再清 pending）
         {
             let mut view = self.view;
             let mut v = view.write();
             if let Some(run_id) = pending.run_id.clone() {
                 if v.agent_views.contains_key(&run_id) {
-                    v.push_agent_event(&run_id, AgentEvent::TextDelta(fmt_choice(&choice)));
+                    v.push_agent_event(&run_id, AgentEvent::TextDelta(rendered.clone()));
                 } else {
                     // fallback：agent_views 里找不到（历史加载后），写到父 agent 气泡
-                    v.append_to_last_assistant(&fmt_choice(&choice));
+                    v.append_to_last_assistant(&rendered);
                 }
             } else {
-                v.append_to_last_assistant(&fmt_choice(&choice));
+                v.append_to_last_assistant(&rendered);
                 v.push_assistant_placeholder();
             }
             v.clear_pending();
@@ -105,7 +112,7 @@ impl ChatBridge {
         }
         // 2. 调 svc（已释放 view 写锁）
         if let Some(run_id) = pending.run_id {
-            let input = serde_json::json!({ "choice": choice, "action_id": "submit" });
+            let input = serde_json::json!({ "choice": choice, "action_id": action_id });
             if let Err(e) = self.svc.resume_sub_agent(&run_id, input) {
                 let mut view = self.view;
                 let mut v = view.write();
@@ -114,7 +121,7 @@ impl ChatBridge {
             }
         } else if let Err(e) =
             self.svc
-                .confirm_user_action(&pending.tool_call_id, &choice, "submit")
+                .confirm_user_action(&pending.tool_call_id, &choice, action_id)
         {
             let mut view = self.view;
             let mut v = view.write();

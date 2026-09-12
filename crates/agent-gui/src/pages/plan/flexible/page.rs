@@ -112,9 +112,7 @@ fn use_plan_agent_registrations(plan_id: String) {
     use_hook(move || {
         // flexible_step5 落库回调 + flexible_state 工具（storage 由启动门保证就绪，始终存在）
         let plans_flexible_service = Arc::new(PlansFlexibleService::new(
-            storage_ctx.plans_flexible_repo(),
-            storage_ctx.plan_repo(),
-            storage_ctx.session_repo(),
+            storage_ctx.plans_flexible_sessions_repo(),
             storage_ctx.flexible_state_repo(),
         ));
         // flexible_state：协调器读写「流程中间状态」的旁路工具（session_id 由协调器经参数传入）。

@@ -19,17 +19,33 @@ use planned_agent_core::ai::types::{Message, MessageContent, MessageRole};
 use planned_agent_core::events::ChatEvent;
 use planned_agent_core::tool_registry::types::ToolSource;
 
-use super::types::{AgentEvent, AgentViewData, Bubble, PendingUI, ToolCallPhase, ToolViewData};
+use super::types::{ActionReply, AgentEvent, AgentViewData, Bubble, PendingUI, ToolCallPhase, ToolViewData};
 use super::view::ChatView;
 
 /// `request_user_action` 工具名——该工具不渲染 tool_view，而是文本化进气泡。
 const REQUEST_USER_ACTION: &str = "request_user_action";
 
-/// 统一「用户选择 / request_user_action 文本」的渲染格式。
+/// 底层：把一段**非空**文本渲染为 `--- **文本**` 段落。
 ///
-/// 「用户选择 / request_user_action 文本」的渲染格式，收口为唯一实现。
+/// 调用方需自保证非空；空串场景请走 [`fmt_reply`]——否则 `---` 与残留的空加粗
+/// `****` 会各自被 Markdown 解析成一条 thematic break，视觉上画出**两条**空横线。
 pub fn fmt_choice(choice: &str) -> String {
     format!("\n\n---\n\n**{}**\n\n", choice)
+}
+
+/// 把一次用户回应（提交 / 取消）渲染为 Markdown 段落。
+///
+/// - 取消 → 一句「已取消」提示；
+/// - 未作答直接提交（空串）→ 一句「未作答」提示；
+/// - 其余提交 → `--- **答案**`。
+///
+/// 取消与空提交过去都退化成空串、渲染成同样的空横线；此处按语义分别给出提示。
+pub fn fmt_reply(reply: &ActionReply) -> String {
+    match reply {
+        ActionReply::Cancel => "\n\n*（已取消本轮交互）*\n\n".to_string(),
+        ActionReply::Submit(c) if c.trim().is_empty() => "\n\n*（未作答）*\n\n".to_string(),
+        ActionReply::Submit(c) => fmt_choice(c),
+    }
 }
 
 /// 消费单个 `ChatEvent`，就地更新 `ChatView`。
@@ -331,14 +347,15 @@ fn build_bubbles(
             MessageRole::Tool => {
                 if let Some(id) = sm.message.tool_call_id.as_deref() {
                     if ui_action_ids.contains(id) {
-                        if let Some(choice) = extract_choice(&sm.message) {
+                        if let Some(reply) = extract_reply(&sm.message) {
+                            let rendered = fmt_reply(&reply);
                             if last_is_agent_tool {
                                 // 子 agent 的 request_user_action → 追加到 agent_views
                                 if let (Some(views), Some(ref agent_id)) =
                                     (agent_views.as_deref_mut(), &last_agent_tool_id)
                                 {
                                     if let Some(av) = views.get_mut(agent_id) {
-                                        av.events.push(AgentEvent::TextDelta(fmt_choice(&choice)));
+                                        av.events.push(AgentEvent::TextDelta(rendered.clone()));
                                     }
                                 }
                             } else {
@@ -346,7 +363,7 @@ fn build_bubbles(
                                 if let Some(last_asst) =
                                     bubbles.iter_mut().rfind(|b| b.is_assistant)
                                 {
-                                    last_asst.text.push_str(&fmt_choice(&choice));
+                                    last_asst.text.push_str(&rendered);
                                 }
                             }
                         }
@@ -380,16 +397,28 @@ fn display_text(msg: &Message) -> &str {
 /// 从 `request_user_action` Tool 消息的 content 中提取 `choice` 字段。
 ///
 /// content 格式为 JSON：`{"choice":"approved","action_id":"..."}`。
-fn extract_choice(msg: &Message) -> Option<String> {
+/// 从 Tool 消息 content 解析用户回应（提交 choice / 取消）。
+///
+/// content 形如 `{"choice":"...","action_id":"submit"|"cancel"}`；`action_id == "cancel"`
+/// 视为取消（回传 [`ActionReply::Cancel`]）；否则按提交处理（兼容缺失 action_id 的旧数据，默认 submit）。
+/// 解析失败（非 JSON）时按纯文本提交处理。
+fn extract_reply(msg: &Message) -> Option<ActionReply> {
     let content_text = match &msg.content {
         Some(MessageContent::ToolResult { content, .. }) => content.as_str(),
         Some(MessageContent::Text { text }) => text.as_str(),
         _ => return None,
     };
-    // 尝试解析 JSON，提取 choice 字段
+    // 尝试解析 JSON，提取 choice / action_id
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(content_text) {
         if let Some(choice) = json.get("choice").and_then(|v| v.as_str()) {
-            return Some(choice.to_string());
+            let action_id = json
+                .get("action_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("submit");
+            if action_id == "cancel" {
+                return Some(ActionReply::Cancel);
+            }
+            return Some(ActionReply::Submit(choice.to_string()));
         }
     }
     // 解析失败（非 JSON）→ 原样返回（兼容纯文本场景）
@@ -397,7 +426,7 @@ fn extract_choice(msg: &Message) -> Option<String> {
     if trimmed.is_empty() {
         None
     } else {
-        Some(trimmed.to_string())
+        Some(ActionReply::Submit(trimmed.to_string()))
     }
 }
 

@@ -20,7 +20,7 @@ use crate::components::alert_dialog::{
     AlertDialogTitle,
 };
 use crate::components::button::{Button, ButtonSize, ButtonVariant};
-use crate::components::chat::chat_flow::{AgentViewData, Bubble, ChatBridge, ChatView, PendingUI, ToolCallPhase};
+use crate::components::chat::chat_flow::{ActionReply, AgentViewData, Bubble, ChatBridge, ChatView, PendingUI, ToolCallPhase};
 use crate::components::chat::chat_ui_actions_view::ChatUIActionsView;
 use crate::components::chat::reasoning_view::ReasoningView;
 use crate::components::chat::tool_view::ToolView;
@@ -46,7 +46,7 @@ pub struct ChatPanelProps {
     pub view: Signal<ChatView, SyncStorage>,
     pub input_text: Signal<String, SyncStorage>,
     pub bridge: Arc<ChatBridge>,
-    pub on_user_action: EventHandler<(String, PendingUI)>,
+    pub on_user_action: EventHandler<(ActionReply, PendingUI)>,
     #[props(default = String::new())]
     pub template_label: String,
     #[props(default)]
@@ -178,8 +178,8 @@ pub fn ChatPanel(props: ChatPanelProps) -> Element {
                             ChatUIActionsView {
                                 message: p.message.clone(),
                                 questions: p.questions.clone(),
-                                on_submit: move |choice| {
-                                    on_action.call((choice, p.clone()));
+                                on_submit: move |reply| {
+                                    on_action.call((reply, p.clone()));
                                 },
                             }
                         }

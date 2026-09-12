@@ -4,9 +4,7 @@ use sea_orm_migration::prelude::*;
 
 mod m20260801_create_chat_messages;
 mod m20260801_create_plans;
-mod m20260801_create_plans_flexible;
 mod m20260801_create_tests;
-mod m20260901_create_sessions;
 mod m20260904_create_flexible_state;
 mod m20260910_create_plans_flexible_sessions;
 
@@ -18,11 +16,8 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(m20260801_create_tests::Migration),
             Box::new(m20260801_create_plans::Migration),
-            // 旧 sessions 表：plans_flexible 仍以 session_id 外键依赖它
-            Box::new(m20260901_create_sessions::Migration),
-            // 新会话表先建：chat_messages / flexible_state 以 session_id 外键依赖它
+            // 会话表先建：chat_messages / flexible_state 以 session_id 外键依赖它
             Box::new(m20260910_create_plans_flexible_sessions::Migration),
-            Box::new(m20260801_create_plans_flexible::Migration),
             Box::new(m20260801_create_chat_messages::Migration),
             Box::new(m20260904_create_flexible_state::Migration),
         ]

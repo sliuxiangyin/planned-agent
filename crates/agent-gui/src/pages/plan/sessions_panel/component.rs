@@ -66,7 +66,11 @@ impl RowData {
         Self {
             id: m.id,
             title: m.title,
-            version: if draft { "草稿".to_string() } else { m.version },
+            version: if draft {
+                "草稿".to_string()
+            } else {
+                m.version
+            },
             draft,
             created_at: m.created_at,
         }
@@ -281,7 +285,11 @@ fn render_group(
 }
 
 /// 渲染单个会话行：左 = title + version（同行），右 = 相对时间。
-fn render_row(item: &RowData, session_id: Signal<String>, session_mgr: Arc<SessionManager>) -> Element {
+fn render_row(
+    item: &RowData,
+    session_id: Signal<String>,
+    session_mgr: Arc<SessionManager>,
+) -> Element {
     let sid = item.id.clone();
     // 高亮当前会话：以组件的 session_id 信号为准（与 SessionManager 双向一致）。
     let is_active = session_id.read().as_str() == sid.as_str();

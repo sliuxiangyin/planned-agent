@@ -21,7 +21,7 @@ use std::sync::Arc;
 use dioxus::prelude::*;
 use planned_agent::chat::SystemPrompt;
 
-use crate::components::chat::chat_flow::{ChatBridge, ChatView, PendingUI};
+use crate::components::chat::chat_flow::{ActionReply, ChatBridge, ChatView, PendingUI};
 use crate::context::{require_resource, AiContext, PromptContext, StorageContext, ToolsContext};
 use crate::shared::BootReporter;
 
@@ -94,9 +94,9 @@ impl FlexibleController {
     }
 
     /// 用户提交 request_user_action / 子 agent 卡片后的回调。
-    pub(crate) fn on_user_action(&self, choice: String, pending: PendingUI) {
+    pub(crate) fn on_user_action(&self, reply: ActionReply, pending: PendingUI) {
         let Some(bridge) = self.bridge() else { return };
-        bridge.confirm(choice, pending);
+        bridge.confirm(reply, pending);
     }
 
     /// 切换系统提示模板（切换即停当前会话并重置）。

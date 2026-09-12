@@ -376,11 +376,11 @@ LLM 调用 request_user_action
   → 服务端 emit UIActionRequest { message, questions, session_id }
   → reduce: view.set_pending(PendingUI { tool_call_id, run_id, message, questions })
   → ChatPanel 在输入框上方渲染 ChatUIActionsView（并列 questions 问题卡）
-  → 用户作答 on_user_action((String, PendingUI))  // 回传文本形如 `header => answer`（每问一行）
-  → bridge.confirm(choice, pending):
-      1. choice 文本追加到 view（主 agent → 气泡；子 agent → agent_views）
+  → 用户作答 on_user_action((ActionReply, PendingUI))  // Submit(文本 `header => answer`) 或 Cancel
+  → bridge.confirm(reply, pending):
+      1. fmt_reply(reply) 追加到 view（主 agent → 气泡；子 agent → agent_views）
       2. 主 agent 再 push 新 assistant 占位气泡
-      3. run_id 非空 → resume_sub_agent；否则 confirm_user_action
+      3. run_id 非空 → resume_sub_agent；否则 confirm_user_action（action_id = submit / cancel）
 ```
 
 ---

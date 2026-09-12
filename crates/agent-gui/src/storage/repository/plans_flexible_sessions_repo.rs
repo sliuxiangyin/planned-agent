@@ -105,6 +105,38 @@ impl PlansFlexibleSessionsRepo {
         Ok(res)
     }
 
+    /// 定稿：把 step5 产出的模板四件套写入指定会话行，置 `status=produced`，
+    /// 刷新 `updated_at` 并写 `closed_at`，返回更新后的 Model。
+    ///
+    /// 目标行由 `id`（= 会话/版本 id）定位；同一会话反复产出即覆盖同一行。
+    pub async fn produce(
+        &self,
+        id: &str,
+        input_schema: &str,
+        output: &str,
+        steps: &str,
+        execution_plan: &str,
+    ) -> StorageResult<plans_flexible_sessions::Model> {
+        let now = Utc::now().to_rfc3339();
+        let mut am: plans_flexible_sessions::ActiveModel =
+            plans_flexible_sessions::Entity::find_by_id(id)
+                .one(&self.db)
+                .await?
+                .ok_or_else(|| {
+                    StorageError::NotFound(format!("plans_flexible_sessions '{id}' not found"))
+                })?
+                .into();
+        am.input_schema = Set(Some(input_schema.to_string()));
+        am.output = Set(Some(output.to_string()));
+        am.steps = Set(Some(steps.to_string()));
+        am.execution_plan = Set(Some(execution_plan.to_string()));
+        am.status = Set(status::PRODUCED.to_string());
+        am.updated_at = Set(now.clone());
+        am.closed_at = Set(Some(now));
+        let res = am.update(&self.db).await?;
+        Ok(res)
+    }
+
     /// 计算该 plan 的下一个版本号：现有最大版本 patch +1；无会话时返回 `v1.0.0`。
     async fn next_version(&self, plan_id: &str) -> StorageResult<String> {
         let rows = plans_flexible_sessions::Entity::find()

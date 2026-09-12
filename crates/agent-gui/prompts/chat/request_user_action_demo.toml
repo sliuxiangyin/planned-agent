@@ -41,8 +41,4 @@ text = """
 
 结束时只做一句测试收尾（如"用例均已验证 / 结束"），**不要输出任何暗示可再来一轮或重复调用测试工具的内容**。
 
-{{ context }}
 """
-
-[variables]
-context = { description = "测试上下文信息（可选）", required = false }

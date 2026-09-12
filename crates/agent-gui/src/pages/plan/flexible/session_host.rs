@@ -90,8 +90,8 @@ pub(crate) fn FlexibleSessionHost(props: FlexibleSessionHostProps) -> Element {
             view: ctl.view,
             input_text: ctl.input_text,
             bridge,
-            on_user_action: move |(choice, pending)| {
-                ctl.on_user_action(choice, pending);
+            on_user_action: move |(reply, pending)| {
+                ctl.on_user_action(reply, pending);
             },
             template_label: template_label,
             templates: ctl.templates(),

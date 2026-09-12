@@ -1,8 +1,9 @@
 # 灵活模式 · 多会话保活设计（切换不打断后台会话）
 
-> 状态：**部分实施**（阶段 1·A「壳 + 常驻宿主」已落地；阶段 2·B **plan 级注册上移已落地**——`use_plan_agent_registrations`/`use_plan_templates` 上移到壳 `FlexiblePage`，controller 不再重复注册；阶段 4·D **工具侧 + 注入侧均已落地**——`flexible_tool.rs` 两工具从 `arguments.session_id` 读、step5 callback 移除、`chat_service_factory` 以 `SystemPrompt::Rendered` 注入 session_id、模板已加「会话上下文」；仅「切模板保留 session_id」为已知项）
+> 状态：**部分实施**（阶段 1·A「壳 + 常驻宿主」已落地；阶段 2·B **plan 级注册上移已落地**——`use_plan_agent_registrations`/`use_plan_templates` 上移到壳 `FlexiblePage`，controller 不再重复注册；阶段 4·D **工具侧 + 注入侧均已落地**——`flexible_tool.rs` 两工具从 `arguments.session_id` 读、step5 callback 移除、`chat_service_factory` 以 `SystemPrompt::Rendered` 注入 session_id、模板已加「会话上下文」；已知项：「切模板保留 session_id」、「协调器「当前模板」UI 与后端不一致」（见 §6））
 > 变更：§3 D / §4.4 已改为「父 prompt 注入 session_id + 工具参数传参」方案，**弃用 task-local**（理由见 §3 D）
 > 变更：`ChatConfig.system_prompt_template` → `system_prompt: Option<SystemPrompt>`（`Template(path)` / `Rendered(String)`），原 `context` 字段移除；D 节改用 `SystemPrompt::Rendered` 注入 session_id
+> 变更：`FlexibleSessionHost` 从 `page.rs` 拆到 `flexible/session_host.rs`；`flexible_tool.rs` 拆到 `flexible/tool/`（`flexible_state.rs` / `save_flexible_template.rs` + `mod.rs` 共享 helper）
 > 目标读者：`crates/agent-gui/src/pages/plan/flexible/` 维护者
 > 关联：`docs/chat-flexible-流程审查与优化建议.md`、`.qoder/flexible/灵活模式.md`
 
@@ -90,7 +91,7 @@ FlexiblePage（壳）
 原问题：`flexible_state_tool.rs` 与 `step5_callback.rs` 都读 `session_rx.borrow()`（=「当前会话」watch 槽）。并发多会话下，A 的工具会写到 B 的库。
 
 **当前实现状态**：
-- ✅ **工具侧已落地**：旧 `flexible_state_tool.rs` + `step5_callback.rs` 已删除，合并为 `flexible_tool.rs`（`flexible_state` + `save_flexible_template`）。二者从 `arguments.session_id` 读（`read_session_id`），不再持 watch 槽；step5 的 `register_sub_agent(..., None)` 已取消回调，原 callback 的 JSON 校验迁入 `SaveTemplateExecutor::execute`；`controller.rs` 已注册两工具并把 `save_flexible_template` 加入白名单。
+- ✅ **工具侧已落地**：旧 `flexible_state_tool.rs` + `step5_callback.rs` 已删除，合并为 `flexible/tool/`（`flexible_state.rs` + `save_flexible_template.rs`，共享 helper 在 `mod.rs`）。二者从 `arguments.session_id` 读（`read_session_id`），不再持 watch 槽；step5 的 `register_sub_agent(..., None)` 已取消回调，原 callback 的 JSON 校验迁入 `SaveTemplateExecutor::execute`；`controller.rs` 已注册两工具并把 `save_flexible_template` 加入白名单。
 - ✅ **注入侧已落地**：`chat_service_factory.rs::new_chat_service` 先 `PromptManager::render("flexible/flexible_global_system")`、再拼接「会话上下文」(session_id) 段，以 `SystemPrompt::Rendered` 注入；`flexible_global_system.toml` 已加「会话上下文」说明 + `save_flexible_template` 工具条目，第 9 步路由改为调用该工具。
 
 **采用方案：父 prompt 注入 session_id + 工具参数传参（不改核心库）。**
@@ -285,11 +286,12 @@ register_sub_agent(/* step5 … */, None);   // 原 step5_callback 传 None
 | host 全量渲染开销 | 后台 host early-return 不渲染 `ChatPanel`（不订阅 view）；仅首次挂载会 boot（预期内） |
 | 子 agent / 工具重复注册 | 注册上移到壳的一次性 hook；`use_drop` 注销也在壳里，避免某 host 卸载连带注销全局工具 |
 | **LLM 回填 session_id 不可靠**（写错库主键） | 参数 `required` + schema 描述强约束「原样照抄 system prompt 中的会话 ID」；executor 校验非法即返回可读 error，让父 agent 重试（不静默写错） |
-| **step5 校验/重试能力迁移** | ✅ 已迁入 `flexible_tool.rs::SaveTemplateExecutor`（原 `step5_callback` 的结构校验改为返回 `is_error`，由父 agent 决定重跑）；需实测行为等价 |
+| **step5 校验/重试能力迁移** | ✅ 已迁入 `tool/save_flexible_template.rs::SaveTemplateExecutor`（原 `step5_callback` 的结构校验改为返回 `is_error`，由父 agent 决定重跑）；需实测行为等价 |
 | 副作用工具串会话 | ✅ 工具侧从 `arguments.session_id` 读 + 注入侧 system prompt 已携带 session_id；仍需并发多会话实测落库归属 |
 | `run_id` 与「会话 id」混淆 | `run_id` 是子 agent 挂起-恢复用；会话 id 是落库归属，二者不混用 |
 | 已开会话无限增长 | 按决策 1 实现 LRU（保留最近 N），移除前 `stop()` 对应 `ChatService` |
 | **切模板会丢掉 session_id** | `apply_template` 走 `set_system_prompt(Some(SystemPrompt::Template(name)))`（`controller.rs:134`），会覆盖构造时 `Rendered` 里的 session_id；切换模板须同样用 `SystemPrompt::Rendered` 重新拼接 session_id |
+| **协调器「当前模板」UI 与后端不一致**（已知项，暂不处理） | 后端初始化 system prompt 固定为 `flexible/flexible_global_system`（`chat_service_factory.rs` 常量 + `SystemPrompt::Rendered` 注入 session_id），而 UI `template` signal 初值为 `Some("flexible/flexible_step1")`（`controller.rs`，仅驱动按钮文案/tooltip，不参与后端，故目前只是展示误导）；用户若从下拉选模板即触发上一条的覆盖。更彻底的做法：移除协调器的模板选择器（其提示固定为 global_system，切换无意义） |
 
 ## 7. 实施顺序（本文件确认后推进）
 
@@ -341,7 +343,7 @@ register_sub_agent(/* step5 … */, None);   // 原 step5_callback 传 None
 
 - [x] `flexible/chat_service_factory.rs`：`new_chat_service` 用 `SystemPrompt::Rendered(渲染后的 prompt + session_id 说明)` 注入
 - [x] `flexible_global_system.toml`：加「会话上下文」说明（含 session_id）+ `save_flexible_template` 工具条目 + 第 9 步路由改为调 `save_flexible_template`
-- [x] 新增 `flexible/flexible_tool.rs`：`flexible_state` + `save_flexible_template` 两个 custom tool（从 `args.session_id` 读 + 迁入 step5 校验 + `save_snapshot`）—— 合并替代旧 `flexible_state_tool.rs`，`step5_callback.rs` 已删除
+- [x] 新增 `flexible/tool/`（`flexible_state.rs` + `save_flexible_template.rs`，共用 helper 在 `tool/mod.rs`）：`flexible_state` + `save_flexible_template` 两个 custom tool（从 `args.session_id` 读 + 迁入 step5 校验 + `save_snapshot`）—— 合并替代旧 `flexible_state_tool.rs`，`step5_callback.rs` 已删除
 - [x] 注册 `save_flexible_template` 到 registry 并加入协调器 `allowed_tools`
 - [x] `register_sub_agent(flexible_step5 …, None)`：取消 step5 callback
 - [x] `flexible_state` 改从 `arguments.session_id` 读（去掉 `session_rx`）

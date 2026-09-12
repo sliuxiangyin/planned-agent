@@ -77,13 +77,13 @@ pub(crate) async fn new_chat_service(
                 // "flexible_step4".to_string(),
                 // "flexible_step5".to_string(),
                 // "flexible_state".to_string(),
-                // "request_user_action".to_string(),
+                "request_user_action".to_string(),
                 // "builtin_read_documentation".to_string(),
                 // 测试用：供 chat/sub_agent_rua_driver.toml 驱动的协调器调用，
                 // 验证子 agent 内 request_user_action 交互。测试完可一并删除。
                 // "flexible_step_rua_demo".to_string(),
                 // 测试用：子 agent max_tool_rounds 触顶复现（chat/sub_agent_max_rounds_driver.toml 驱动的协调器调用）。
-                "flexible_step_max_rounds_demo".to_string(),
+                // "flexible_step_max_rounds_demo".to_string(),
             ]),
             max_tool_rounds: 2,
             ..Default::default()

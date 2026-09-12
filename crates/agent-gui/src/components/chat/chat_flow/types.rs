@@ -21,6 +21,18 @@ pub struct PendingUI {
     pub run_id: Option<String>,
 }
 
+/// 用户对 `request_user_action` 卡片的回应。
+///
+/// 用于区分「提交」与「取消」：过去二者都回传空串，导致下游（`confirm_user_action`
+/// 的 `action_id`、渲染文案）无法分辨「用户主动取消」与「未作答直接提交」。
+#[derive(Clone, Debug, PartialEq)]
+pub enum ActionReply {
+    /// 点底部「提交」：打包后的作答文本（`header => answer` 多行；全部未作答时为空串）。
+    Submit(String),
+    /// 点底部「取消」：跳过整批。
+    Cancel,
+}
+
 // ── Tool 调用 ────────────────────────────────────────────────────────────
 
 /// Tool 调用的执行阶段。

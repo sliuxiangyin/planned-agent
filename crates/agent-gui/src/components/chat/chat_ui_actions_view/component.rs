@@ -10,10 +10,11 @@
 //!   后原地展开输入框（reasonix 风格）。单选进入自定义会自动取消预设选中（自定义优先、
 //!   单选保持单值）；填入后按钮态展示内容摘要并可一键清除。`allow_input == false`
 //!   （该问 options 已穷尽）则不渲染该按钮。
-//! - 底部导航：`取消`（跳过整批，回传空串）｜`上一步`（非首题）｜`下一步/提交`。
+//! - 底部导航：`取消`（跳过整批，回传 `ActionReply::Cancel`）｜`上一步`（非首题）｜`下一步/提交`。
 //! - 空题放行：某题未作答可直接「下一步」，回传时省略该行。
-//! - 仅**最后一题的「提交」**触发 `on_submit`，把整批作答按 `header => answer` 多行
-//!   一次回传；中途 `取消` 回传空串。协议仍为"一次调用 = 一次交互闭环"。
+//! - 仅**最后一题的「提交」**触发 `ActionReply::Submit`，把整批作答按 `header => answer`
+//!   多行一次回传；`取消` 回传 `ActionReply::Cancel`。两者不再共用空串，下游可区分。
+//!   协议仍为"一次调用 = 一次交互闭环"。
 //!
 //! 作答状态以 `question key`（header + 题序）存入顶层 signal，逐步索引存于
 //! `current` signal；每次变更读 → 克隆 → 写回，避免长借用守卫。
@@ -23,6 +24,7 @@ use std::collections::{HashMap, HashSet};
 use dioxus::prelude::*;
 use planned_agent::UIQuestion;
 
+use crate::components::chat::chat_flow::ActionReply;
 use crate::components::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::input::Input;
 
@@ -98,12 +100,13 @@ fn build_choice(questions: &[UIQuestion], map: &HashMap<String, QState>) -> Stri
 /// # Props
 /// - `message` — 顶部引导文本（可为空）
 /// - `questions` — 并列问题数组，每问含 options/multi/allow_input
-/// - `on_submit` — 末题「提交」或「取消」时回调，传入打包选择字符串（取消传空串）
+/// - `on_submit` — 末题「提交」回传 `ActionReply::Submit(打包选择字符串)`；「取消」回传
+///   `ActionReply::Cancel`。二者语义分离，不再是同一个空串。
 #[component]
 pub fn ChatUIActionsView(
     message: String,
     questions: Vec<UIQuestion>,
-    on_submit: EventHandler<String>,
+    on_submit: EventHandler<ActionReply>,
 ) -> Element {
     // 各题作答状态（key → QState）
     let mut states = use_signal(|| HashMap::<String, QState>::new());
@@ -352,7 +355,7 @@ pub fn ChatUIActionsView(
                             variant: ButtonVariant::Ghost,
                             size: ButtonSize::Sm,
                             title: "取消本轮交互，整体跳过",
-                            onclick: move |_| on_submit.call(String::new()),
+                            onclick: move |_| on_submit.call(ActionReply::Cancel),
                             "取消"
                         }
                     }
@@ -385,7 +388,7 @@ pub fn ChatUIActionsView(
                                         // 末题：打包整批回传
                                         let map = states.read();
                                         let choice = build_choice(&questions, &map);
-                                        on_submit.call(choice);
+                                        on_submit.call(ActionReply::Submit(choice));
                                     } else {
                                         // 非末题：空题也放行
                                         current += 1;
