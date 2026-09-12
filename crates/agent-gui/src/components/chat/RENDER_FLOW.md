@@ -57,7 +57,6 @@ pub struct ChatView {
     pub active: Vec<Bubble>,                           // 当前 turn 气泡组（流式增量更新）
     pub agent_views: HashMap<String, AgentViewData>,   // 子 agent 流式数据（key = tool_call_id）
     pub pending_ui: Option<PendingUI>,                 // 交互卡片
-    pub pending_tool_call_id: Option<String>,          // request_user_action 的 tool_call_id
 }
 ```
 
@@ -176,7 +175,7 @@ pub struct UIOption {
 | `Chat(ToolExecuted)` | `tool_call_executed` + `finish_agent_view` | `phase=Completed/Error` + `result`；子 agent 同步更新 `AgentView` |
 | `Chat(SubChat)` | `push_agent_event` | 子 agent 流式事件（TextDelta/ReasoningDelta）攒入 `agent_views` |
 | `Chat(RoundEnd)` | `stop_streaming` | 轮次结束 |
-| `Chat(UIActionRequest)` | `set_pending` | 弹出交互卡片 |
+| `Chat(UIActionRequest)` | `set_pending` | 弹出交互卡片（`tool_call_id` 取自事件自身） |
 | `Done` | `stop_streaming` + **`finish_turn`** + `clear_pending` | turn 收尾并入历史 |
 | `Error(e)` | `render_error` + `stop_streaming` + **`finish_turn`** + `clear_pending` | 收尾 |
 | `HistoryUpdated` | `reconcile_with_snapshot` | 保持注释（启用时用快照校准 bubbles） |
@@ -373,7 +372,7 @@ session_boot.rs (boot_flexible_session):
 
 ```
 LLM 调用 request_user_action
-  → 服务端 emit UIActionRequest { message, questions, session_id }
+  → 服务端 emit UIActionRequest { tool_call_id, message, questions, session_id }
   → reduce: view.set_pending(PendingUI { tool_call_id, run_id, message, questions })
   → ChatPanel 在输入框上方渲染 ChatUIActionsView（并列 questions 问题卡）
   → 用户作答 on_user_action((ActionReply, PendingUI))  // Submit(文本 `header => answer`) 或 Cancel

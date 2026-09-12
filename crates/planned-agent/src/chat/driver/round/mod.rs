@@ -164,6 +164,7 @@ async fn prompt_max_rounds<
         state
             .subscribers
             .emit(ChatEvent::Chat(CoreChatEvent::UIActionRequest {
+                tool_call_id: ui_id.clone(),
                 message: ask_message,
                 questions: ask_questions,
                 session_id: Some(run_id.clone()),
@@ -191,6 +192,7 @@ async fn prompt_max_rounds<
     state
         .subscribers
         .emit(ChatEvent::Chat(CoreChatEvent::UIActionRequest {
+            tool_call_id: ui_id.clone(),
             message: ask_message,
             questions: ask_questions,
             session_id,

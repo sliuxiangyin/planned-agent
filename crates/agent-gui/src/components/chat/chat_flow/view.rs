@@ -1,7 +1,7 @@
 //! `ChatView` —— 聊天会话的不可变 UI 投影（单一数据源）。
 //!
-//! 目标：把会话状态（`bubbles` / `active` / `agent_views` / `pending_ui` /
-//! `pending_tool_call_id`）收敛为**一个**可整体读写的值类型，配合 `reduce.rs`
+//! 目标：把会话状态（`bubbles` / `active` / `agent_views` / `pending_ui`）
+//! 收敛为**一个**可整体读写的值类型，配合 `reduce.rs`
 //! 的纯 reducer 与 `bridge.rs` 的 `ChatBridge`（持有 `Signal<ChatView>`）
 //! 完成「事件 → 视图」的翻译。
 //!
@@ -27,8 +27,6 @@ pub struct ChatView {
     pub agent_views: HashMap<String, AgentViewData>,
     /// 待处理的 UI 交互卡片（`request_user_action` / 子 agent 挂起）。
     pub pending_ui: Option<PendingUI>,
-    /// 最近一次 `request_user_action` 的 tool_call_id（用于回填确认）。
-    pub pending_tool_call_id: Option<String>,
 }
 
 /// 构造一个 streaming 的 assistant 占位气泡。
@@ -295,7 +293,6 @@ impl ChatView {
         self.active.clear();
         self.agent_views.clear();
         self.pending_ui = None;
-        self.pending_tool_call_id = None;
     }
 }
 

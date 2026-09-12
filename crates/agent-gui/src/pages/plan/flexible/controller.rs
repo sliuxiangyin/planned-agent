@@ -114,7 +114,6 @@ impl FlexibleController {
         let mut view = self.view;
         let mut v = view.write();
         v.clear_pending();
-        v.pending_tool_call_id = None;
         let mut template = self.template;
         template.set(Some(name));
     }

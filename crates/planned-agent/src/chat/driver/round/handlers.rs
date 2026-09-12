@@ -78,6 +78,7 @@ pub(super) async fn handle_ui_tool_call<
     state
         .subscribers
         .emit(ChatEvent::Chat(CoreChatEvent::UIActionRequest {
+            tool_call_id: call.id.clone(),
             message,
             questions,
             session_id: run_id.clone(),

@@ -66,10 +66,11 @@ pub fn reduce(view: &mut ChatView, ev: &ServiceChatEvent) {
                 view.push_assistant_placeholder();
             }
         }
-        ServiceChatEvent::Chat(ChatEvent::ToolCallStart { id, name, .. })
+        ServiceChatEvent::Chat(ChatEvent::ToolCallStart { name, .. })
             if name.as_str() == REQUEST_USER_ACTION =>
         {
-            view.pending_tool_call_id = Some(id.clone());
+            // request_user_action 不建 tool_view；其 tool_call_id 由随后的
+            // UIActionRequest 事件自带（见下），无需在此缓存。
         }
         ServiceChatEvent::Chat(ChatEvent::ToolCallStart { id, name, source }) => {
             let is_sub_agent = matches!(source, Some(ToolSource::SubAgent { .. }));
@@ -133,8 +134,8 @@ pub fn reduce(view: &mut ChatView, ev: &ServiceChatEvent) {
             message,
             questions,
             session_id,
+            tool_call_id,
         }) => {
-            let tool_call_id = view.pending_tool_call_id.clone().unwrap_or_default();
             tracing::info!(
                 target: "event", event = "UIActionRequest",
                 tool_call_id = ?tool_call_id, session_id = ?session_id,
@@ -143,7 +144,7 @@ pub fn reduce(view: &mut ChatView, ev: &ServiceChatEvent) {
             view.set_pending(PendingUI {
                 message: message.clone(),
                 questions: questions.clone(),
-                tool_call_id,
+                tool_call_id: tool_call_id.clone(),
                 run_id: session_id.clone(),
             });
         }
@@ -182,7 +183,6 @@ pub fn reduce(view: &mut ChatView, ev: &ServiceChatEvent) {
             view.stop_streaming();
             view.finish_turn();
             view.clear_pending();
-            view.pending_tool_call_id = None;
         }
         ServiceChatEvent::Error(e) => {
             tracing::error!(target: "event", event = "Error", error = ?e, "聊天事件错误");
@@ -258,7 +258,6 @@ pub fn view_from_history(history: &[StoreMessage]) -> ChatView {
         active: Vec::new(),
         agent_views: views,
         pending_ui: None,
-        pending_tool_call_id: None,
     }
 }
 
@@ -586,9 +585,8 @@ mod tests {
                 source: None,
             }),
         );
-        // 不建 tool_view，但记录 pending_tool_call_id
+        // 不建 tool_view
         assert!(view.active[0].tool_calls.is_empty());
-        assert_eq!(view.pending_tool_call_id, Some("ua_1".to_string()));
 
         reduce(
             &mut view,
@@ -744,11 +742,11 @@ mod tests {
     fn ui_action_request_sets_pending_with_run_id() {
         let mut view = ChatView::default();
         round_start(&mut view);
-        view.pending_tool_call_id = Some("ua_1".to_string());
 
         reduce(
             &mut view,
             &ServiceChatEvent::Chat(ChatEvent::UIActionRequest {
+                tool_call_id: "ua_1".to_string(),
                 message: "请选择：".to_string(),
                 questions: vec![question()],
                 session_id: Some("sid_9".to_string()),
@@ -771,14 +769,12 @@ mod tests {
             tool_call_id: "ua_1".to_string(),
             run_id: None,
         });
-        view.pending_tool_call_id = Some("ua_1".to_string());
         assert_eq!(view.active.len(), 2); // user + assistant placeholder
 
         reduce(&mut view, &ServiceChatEvent::Done { cancelled: false });
         assert_eq!(view.active.len(), 0);
         assert_eq!(view.bubbles.len(), 2); // active 已并入 bubbles
         assert!(view.pending_ui.is_none());
-        assert_eq!(view.pending_tool_call_id, None);
     }
 
     #[test]

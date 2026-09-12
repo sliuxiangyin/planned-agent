@@ -235,20 +235,13 @@ fn render_assistant_bubble(bubble: &Bubble, agent_views: &std::collections::Hash
         return rsx! {};
     }
 
-    let bubble_class = if bubble.is_streaming {
-        format!(
-            "{} {} {}",
-            Styles::chat_message,
-            Styles::chat_message__assistant,
-            Styles::chat_message__streaming
-        )
-    } else {
-        format!(
-            "{} {}",
-            Styles::chat_message,
-            Styles::chat_message__assistant
-        )
-    };
+    // streaming 视觉（末尾光标 ▍）由 render_assistant_message 内的 RSX 条件光标承担，
+    // 不再挂 CSS 类，避免与 CSS ::after 形成双光标。
+    let bubble_class = format!(
+        "{} {}",
+        Styles::chat_message,
+        Styles::chat_message__assistant
+    );
 
     rsx! {
         div { class: "{bubble_class}",

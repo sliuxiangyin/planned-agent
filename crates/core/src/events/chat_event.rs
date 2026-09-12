@@ -79,6 +79,10 @@ pub enum ChatEvent {
     /// 此后 chat 循环中断，调用方需收集用户作答后重新调用 `chat_with_callback`
     /// （子 agent 场景则调用 `ChatService::resume_sub_agent`）。
     UIActionRequest {
+        /// 触发本次交互的 `tool_call_id`（`request_user_action` 的 id；
+        /// 触顶询问为合成的 `max_rounds_continue_N`）。
+        /// 前端据此回填 `confirm_user_action`，无需再靠 `ToolCallStart` 缓存推断。
+        tool_call_id: String,
         /// 展示给用户的引导文本（可选）
         message: String,
         /// 并列的问题数组（1..N，建议 ≤4；彼此独立）
@@ -174,6 +178,7 @@ mod tests {
             content: json!({ "result": "ok" }),
         });
         round_trip(&ChatEvent::UIActionRequest {
+            tool_call_id: "call_1".to_string(),
             message: "开始前确认：".to_string(),
             questions: vec![sample_question()],
             session_id: Some("sid".to_string()),

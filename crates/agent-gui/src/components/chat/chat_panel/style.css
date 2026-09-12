@@ -94,18 +94,6 @@
     border: none;
 }
 
-/* 流式输出光标动画 */
-.chat-message__streaming::after {
-    content: "▍";
-    margin-left: 2px;
-    animation: chat-cursor-blink 1s steps(2) infinite;
-    color: var(--secondary-color-4);
-}
-
-@keyframes chat-cursor-blink {
-    50% { opacity: 0; }
-}
-
 /* ── Markdown 内容 ─────────────────────────────────────────────────── */
 .chat-message .markdown > :first-child {
     margin-top: 0;

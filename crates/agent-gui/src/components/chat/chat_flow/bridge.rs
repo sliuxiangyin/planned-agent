@@ -105,10 +105,13 @@ impl ChatBridge {
                 }
             } else {
                 v.append_to_last_assistant(&rendered);
+                // 封口上一轮气泡：下面会 push 新占位气泡，若不停止旧气泡，
+                // 连续多次 UI 交互（如触顶“是否继续”连点、子 agent 连续 request_user_action）
+                // 会让多个气泡长期停在 streaming 态，末尾光标（▍）随之累积成串。
+                v.stop_streaming();
                 v.push_assistant_placeholder();
             }
             v.clear_pending();
-            v.pending_tool_call_id = None;
         }
         // 2. 调 svc（已释放 view 写锁）
         if let Some(run_id) = pending.run_id {
