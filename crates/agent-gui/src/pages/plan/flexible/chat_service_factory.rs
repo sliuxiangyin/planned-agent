@@ -15,6 +15,7 @@ use planned_agent::chat::{ChatConfig, SystemPrompt};
 use planned_agent::ChatService;
 use planned_agent_core::prompt::{PromptContext as PromptTemplateContext, PromptManager};
 use planned_agent_prompt_manager::FilePromptManager;
+use serde_json::json;
 
 use crate::context::{AiContext, PromptContext, StorageContext, ToolsContext};
 
@@ -42,18 +43,16 @@ pub(crate) async fn new_chat_service(
     let repo = storage.chat_message_repo();
     let store = ChatMessageStore::new(plan_id, session_id.clone(), repo);
 
-    // 协调器 system prompt：渲染 flexible_global_system 后拼接「会话上下文」(session_id)，
-    // 以 SystemPrompt::Rendered 注入 —— 因为 Template 分支渲染时用空 PromptContext，带不了变量。
+    // 协调器 system prompt：以 PromptContext 注入 session_id 渲染 flexible_global_system
+    // （模板正文用 `{{ session_id }}`），再以 SystemPrompt::Rendered 注入 —— 因为核心 driver 的
+    // Template 分支渲染时用空 PromptContext、带不了变量，故「带变量的渲染」须在 GUI 侧完成。
     // 每个会话自己的 config → session_id 天然 per-session 隔离。
-    let base = prompt
+    let context = PromptTemplateContext::new().with_variable("session_id", json!(session_id));
+    let coordinator_system_prompt = prompt
         .manager
-        .render(FLEXIBLE_GLOBAL_SYSTEM_PROMPT, &PromptTemplateContext::new())
+        .render(FLEXIBLE_GLOBAL_SYSTEM_PROMPT, &context)
         .await
         .map_err(|e| anyhow::anyhow!("渲染协调器 system prompt 失败: {e}"))?;
-    let coordinator_system_prompt = format!(
-        "{base}\n\n## 会话上下文\n本会话的 session_id = {session_id}\n\
-         调用 flexible_state / save_flexible_template 时，其 session_id 参数必须原样照抄上面的值，不得改写、不得省略。"
-    );
 
     Ok(ChatService::with_store(
         ai.manager.default()?,

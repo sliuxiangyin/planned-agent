@@ -16,8 +16,6 @@ text = """
 - 只调用 `flexible_step_rua_demo` 这一个子 agent，其它工具一律不要用。
 - 若子 agent 未按预期完成，如实说明现状即可。
 
-{{ context }}
 """
 
 [variables]
-context = { description = "测试上下文信息（可选）", required = false }

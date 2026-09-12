@@ -29,8 +29,6 @@ text = """
 ## 结束语
 触顶被打断后，只做上述一句现象汇报，不要继续调用工具、不要发起新的多轮循环。
 
-{{ context }}
 """
 
 [variables]
-context = { description = "测试上下文信息（可选）", required = false }

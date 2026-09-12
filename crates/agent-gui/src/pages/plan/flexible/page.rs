@@ -27,7 +27,7 @@ use crate::services::plans_flexible_service::PlansFlexibleService;
 use super::session_host::FlexibleSessionHost;
 use super::step2_callback::create_step2_callback;
 use super::tool::{
-    flexible_state_tool, save_flexible_template, FlexibleStateExecutor, SaveTemplateExecutor,
+    flexible_state_tool, flexible_save_template, FlexibleStateExecutor, FlexibleSaveTemplateExecutor,
 };
 
 #[derive(Props, Clone, PartialEq)]
@@ -125,12 +125,12 @@ fn use_plan_agent_registrations(plan_id: String) {
                 Arc::new(executor),
             );
         }
-        // save_flexible_template：step5 产出后由协调器显式调用，登记模板快照（session_id 经参数传入）。
+        // flexible_save_template：step5 产出后由协调器显式调用，登记模板快照（session_id 经参数传入）。
         {
             let executor =
-                SaveTemplateExecutor::new(plan_id.clone(), plans_flexible_service.clone());
+                FlexibleSaveTemplateExecutor::new(plan_id.clone(), plans_flexible_service.clone());
             tools_ctx.register_custom_tool(
-                save_flexible_template(),
+                flexible_save_template(),
                 vec![ToolCategory::Utility],
                 Arc::new(executor),
             );
@@ -349,7 +349,7 @@ fn use_plan_agent_registrations(plan_id: String) {
             },
             1, // depth
             2, // max_depth
-            None, // step5 不再用回调：改用 save_flexible_template 工具落库
+            None, // step5 不再用回调：改用 flexible_save_template 工具落库
         );
     });
 
@@ -361,7 +361,7 @@ fn use_plan_agent_registrations(plan_id: String) {
             "flexible_step4",
             "flexible_step5",
             "flexible_state",
-            "save_flexible_template",
+            "flexible_save_template",
         ] {
             let _ = registry.unregister_tool(name);
         }

@@ -26,8 +26,6 @@ text = """
 
 若你发现自己已无法再发起调用（被打断 / 达到轮次限制 / 系统拒绝），就地用一句话说明现状后停止，不要强行继续。
 
-{{ context }}
 """
 
 [variables]
-context = { description = "协调器传入的测试说明（可选）", required = false }

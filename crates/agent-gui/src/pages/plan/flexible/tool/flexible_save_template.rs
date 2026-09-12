@@ -1,4 +1,4 @@
-//! `save_flexible_template` 工具：登记某会话产出的模板快照。
+//! `flexible_save_template` 工具：登记某会话产出的模板快照。
 
 use std::sync::Arc;
 
@@ -13,24 +13,24 @@ use crate::services::plans_flexible_service::PlansFlexibleService;
 
 use super::{error_result, read_session_id};
 
-/// `save_flexible_template` 执行器：把某会话 step5 产出的模板快照落库。
+/// `flexible_save_template` 执行器：把某会话 step5 产出的模板快照落库。
 ///
 /// `session_id` 由协调器经 `arguments.session_id` 传入（不再绑定会话 watch 槽）；
 /// `template` 为 step5 返回的完整模板 JSON。原 `step5_callback` 的 JSON 结构校验迁移至此，
 /// 校验失败返回 `is_error`，由父 agent 决定重跑 step5 或重传。
-pub struct SaveTemplateExecutor {
+pub struct FlexibleSaveTemplateExecutor {
     plan_id: String,
     service: Arc<PlansFlexibleService>,
 }
 
-impl SaveTemplateExecutor {
+impl FlexibleSaveTemplateExecutor {
     pub fn new(plan_id: String, service: Arc<PlansFlexibleService>) -> Self {
         Self { plan_id, service }
     }
 }
 
 #[async_trait]
-impl ToolExecutor for SaveTemplateExecutor {
+impl ToolExecutor for FlexibleSaveTemplateExecutor {
     async fn execute(&self, _tool_name: &str, arguments: Value) -> Result<ToolResult> {
         let session_id = match read_session_id(&arguments) {
             Ok(s) => s,
@@ -110,7 +110,7 @@ impl ToolExecutor for SaveTemplateExecutor {
     }
 
     fn name(&self) -> &str {
-        "SaveTemplateExecutor"
+        "FlexibleSaveTemplateExecutor"
     }
 
     fn description(&self) -> &str {
@@ -118,7 +118,7 @@ impl ToolExecutor for SaveTemplateExecutor {
     }
 
     fn supported_tools(&self) -> Vec<String> {
-        vec!["save_flexible_template".into()]
+        vec!["flexible_save_template".into()]
     }
 }
 
@@ -129,10 +129,10 @@ fn take_or_default(json: &Value, key: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
-/// 构造 `save_flexible_template` 工具定义。
-pub fn save_flexible_template() -> Tool {
+/// 构造 `flexible_save_template` 工具定义。
+pub fn flexible_save_template() -> Tool {
     Tool {
-        name: "save_flexible_template".into(),
+        name: "flexible_save_template".into(),
         description: "保存某会话产出的模板快照到 plans_flexible（由父 agent 在 step5 返回 JSON 后显式调用）。\n\
              \n\
              用途：step5 子 agent 返回完整模板 JSON 后，协调器调用本工具把该模板按会话落库；\n\
