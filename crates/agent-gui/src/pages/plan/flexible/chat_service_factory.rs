@@ -61,14 +61,8 @@ pub(crate) async fn new_chat_service(
         ChatConfig {
             system_prompt: Some(SystemPrompt::Rendered(coordinator_system_prompt)),
             // 协调器仅做状态机调度，不执行业务：工具层只暴露 5 个 step 子 agent +
-            // flexible_state + request_user_action，杜绝误调业务 / 其它子 agent 工具。
-            //
-            // ⚠️ 以下两项是「轮次触顶」复现测试的临时改动，测试完请还原：
-            //   1) "builtin_read_documentation"：临时放开的一个简单无副作用工具，
-            //      配合 chat/max_rounds_demo 模板让协调器持续调用工具直到触顶。
-            //      正常使用应删除该条目。
-            //   2) max_tool_rounds: 2：把轮次上限压到很小，2 轮即可触顶。
-            //      正常协调器要调度 step1~step5 需要多轮，默认应为 10（删除这行即回默认）。
+            // flexible_state（只读）+ flexible_save_template + request_user_action，
+            // 杜绝误调业务 / 其它子 agent 工具。
             allowed_tools: Some(vec![
                 "flexible_step1".to_string(),
                 "flexible_step2".to_string(),
@@ -76,15 +70,15 @@ pub(crate) async fn new_chat_service(
                 "flexible_step4".to_string(),
                 "flexible_step5".to_string(),
                 "flexible_state".to_string(),
+                "flexible_save_template".to_string(),
                 "request_user_action".to_string(),
+                // 测试用（默认关闭）：供 chat/*_driver.toml 驱动的协调器调用，
+                // 复现「子 agent 内 request_user_action」/「子 agent 轮次触顶」场景。
                 // "builtin_read_documentation".to_string(),
-                // 测试用：供 chat/sub_agent_rua_driver.toml 驱动的协调器调用，
-                // 验证子 agent 内 request_user_action 交互。测试完可一并删除。
                 // "flexible_step_rua_demo".to_string(),
-                // 测试用：子 agent max_tool_rounds 触顶复现（chat/sub_agent_max_rounds_driver.toml 驱动的协调器调用）。
                 // "flexible_step_max_rounds_demo".to_string(),
             ]),
-            max_tool_rounds: 2,
+            max_tool_rounds: 10,
             ..Default::default()
         },
         Arc::new(store),

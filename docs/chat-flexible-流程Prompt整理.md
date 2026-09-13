@@ -15,7 +15,7 @@
 
 ```
 none → task_defined → executed → fields_selected → params_confirmed → templated
-        (step1 定稿)   (step2 成功)  (step3 定稿)      (step4 定稿)       (step5 落库)
+        (step1 定稿)   (step2 成功)  (step3 定稿)      (step4 定稿)       (step5 回调推进)
 ```
 
 | 档位 | 该档位允许存在的产物（`products` 的不变量） |
@@ -26,13 +26,14 @@ none → task_defined → executed → fields_selected → params_confirmed → 
 | `params_confirmed` | `parameter_confirmation_result` |
 | `templated` | 无（模板由 `flexible_save_template` 写入 `plans_flexible`，不入 `products`） |
 
-规则：
+规则（现由各 step 的完成回调统一执行，见 `step_callback/step_commit.rs`）：
 
-- **读-改-写合并**：`save` 未传的 key 保留、传 `null` 的 key 清除、`current_step` 未传则保留原值。
-- **只增不减**：`current_step` 仅在明确「重做 / 返回」上游时回退；回退时必须把下游产物一并在同一次 `save` 里传 `null` 清除。
+- **读-改-写合并**：`merge_state` 未传的 key 保留、传 `null` 的 key 清除、`current_step` 未传则保留原值。
+- **只增不减**：`current_step` 仅在明确「重做 / 返回」上游时回退；该 step 一旦定稿，回调会在同一次写入里把其下游产物传 `null` 清除。
 - 失败不推进：任何 step 返回非定稿 status 时，不写产物、不动 `current_step`。
+- **协调器不写状态**：`flexible_state` 工具已改为只读，状态只由回调登记。
 
-出处：`crates/agent-gui/src/pages/plan/flexible/tool/flexible_state.rs:127`、`crates/agent-gui/prompts/flexible/flexible_global_system.toml`（「产物一致性原则」一节）。
+出处：`crates/agent-gui/src/pages/plan/flexible/step_callback/step_commit.rs`、`tool/flexible_state.rs`、`prompts/flexible/flexible_global_system.toml`。
 
 ---
 
@@ -42,8 +43,8 @@ none → task_defined → executed → fields_selected → params_confirmed → 
 |---|---|
 | 模板变量 | `session_id`（必需），注入到「会话上下文」段 |
 | 注册位置 | `crates/agent-gui/src/pages/plan/flexible/chat_service_factory.rs:51` |
-| 代码白名单 | `flexible_step1~5`、`flexible_state`、`request_user_action` |
-| 职责 | 纯状态机调度：路由到 step、读写 `flexible_state`、发 `request_user_action`、调 `flexible_save_template` 落库；**不碰业务工具、不做需求澄清** |
+| 代码白名单 | `flexible_step1~5`、`flexible_state`（只读）、`flexible_save_template`、`request_user_action` |
+| 职责 | 纯状态机调度：路由到 step、只读 `flexible_state`、发 `request_user_action`、调 `flexible_save_template` 落库；**不碰业务工具、不做需求澄清、不写状态** |
 | 输出契约 | 只读每个 step 返回 JSON 的顶层 `status`；**不解析正文、不向用户回显 JSON**（用户看到的是协调器转述的自然语言） |
 
 step → `status` → 定稿档位：
@@ -88,7 +89,7 @@ step → `status` → 定稿档位：
 { "status": "cancelled" }    // 用户取消
 ```
 
-- **落 state**：**协调器**在用户确认后 `save(current_step="task_defined", products={task_definition, output_format})`。step1 **无回调**。
+- **落 state**：由 **`flexible_step1` 完成回调**自动登记——`status:"task_defined"` ⇒ 写 `task_definition` / `output_format`、清 step2~4 全部下游产物、推进 `task_defined`（`step_callback/step1_callback.rs`）；协调器不再写状态。
 - **强约束**：`output_format` 必须由用户明确确认，禁止默认值 / 推断；缺基线且用户未指定时必须用单选 `request_user_action` 询问。
 
 ### 3.2 `flexible_step2` — 任务执行
@@ -115,8 +116,8 @@ step → `status` → 定稿档位：
   "execution_trace": [] }
 ```
 
-- **落 state**：由 **`FlexibleStep2Callback`** 自动完成——读 `host_session_id` 定位会话，解析 `status == "success"` 后写入 `execution_trace` / `compressed_context`，`current_step = "executed"`，并**把 `field_selection_result`、`parameter_confirmation_result` 置 `null`**（重跑 step2 ⇒ step3/step4 定稿作废）。`status == "error"` 或非 JSON 时**不登记**。
-  出处：`crates/agent-gui/src/pages/plan/flexible/step_callback/step2_callback.rs:61-89`。
+- **落 state**：由 **`flexible_step2` 完成回调**自动登记——读 `host_session_id` 定位会话，`status == "success"` 时写入 `execution_trace` / `compressed_context`，`current_step = "executed"`，并**把 `field_selection_result`、`parameter_confirmation_result` 清掉**（重跑 step2 ⇒ step3/step4 定稿作废）；非定稿 status / 非 JSON / 拿不到 `host_session_id` 一律**不登记**。
+  实现：`step_callback/step2_callback.rs`（契约常量）+ `step_callback/step_commit.rs`（通用逻辑）。
 
 ### 3.3 `flexible_step3` — 字段选择
 
@@ -127,7 +128,7 @@ step → `status` → 定稿档位：
 | 参数 | 类型 | 必需 | 说明 |
 |---|---|---|---|
 | `execution_trace_summary` | string | ✅ | 来自 step2 的 `compressed_context` |
-| `output_format` | string | | 来自 step1（**schema 未标必需**，但 prompt / 协调器都按必需处理，见 §六-4） |
+| `output_format` | string | ✅ | 来自 step1（已列入 `required`） |
 | `host_session_id` | string | ✅ | 隐藏控制字段 |
 
 - **出参**
@@ -145,7 +146,7 @@ step → `status` → 定稿档位：
 ```
 
 - 规则：`selected_fields` 顺序即输出顺序；嵌套数据用点号路径作 `name`；字段必须来自真实执行结果。
-- **落 state**：**协调器**手动 `save(current_step="fields_selected", products={field_selection_result})`。step3 **无回调**。
+- **落 state**：由 **`flexible_step3` 完成回调**自动登记——`status:"fields_selected"` ⇒ 写 `field_selection_result`、清 `parameter_confirmation_result`、推进 `fields_selected`（`step_callback/step3_callback.rs`）；协调器不再写状态。
 
 ### 3.4 `flexible_step4` — 参数确认
 
@@ -179,7 +180,7 @@ step → `status` → 定稿档位：
 ```
 
 - 约束：`input_schema[].type` 取 string / number / boolean / date / array；**`output_fields` 必须与 step3 的 `selected_fields` 一致**；候选必须来自真实轨迹。
-- **落 state**：**协调器**手动 `save(current_step="params_confirmed", products={parameter_confirmation_result})`。step4 **无回调**。
+- **落 state**：由 **`flexible_step4` 完成回调**自动登记——`status:"params_confirmed"` ⇒ 写 `parameter_confirmation_result`、推进 `params_confirmed`（`step_callback/step4_callback.rs`）；协调器不再写状态。
 
 ### 3.5 `flexible_step5` — 模板序列化
 
@@ -217,25 +218,22 @@ step → `status` → 定稿档位：
   - `steps` 与 `execution_plan` **等长且 `steps[i].id == execution_plan[i].step_id`**；`params` 为硬编码值，只有「上游输出被下游引用」时用 `{{step_1.output}}` 占位。
   - 字段必须来自输入，禁止臆造工具名 / 字段名 / 参数值（prompt 内的示例已标注为虚构）。
   - `input_schema` 为空时写成 `{}`。
-- **落 state**：由 `flexible_save_template` 写入 `plans_flexible`（见 §四）；成功后协调器 `save(current_step="templated")`，**不写 `products`**。
+- **落 state**：模板由 `flexible_save_template` 写入 `plans_flexible`（见 §四）；**状态推进**由 `flexible_step5` 完成回调负责——`status:"success"` ⇒ 只把 `current_step` 置为 `templated`，**不写 `products`、不做落库**（`step_callback/step5_callback.rs`）。回调先于协调器调 `flexible_save_template` 触发，故 `current_step` 会先到 `templated`。
 
 ---
 
 ## 四、两个旁路工具
 
-### 4.1 `flexible_state`（协调器专用）
+### 4.1 `flexible_state`（协调器专用 · 只读）
 
-定义：`crates/agent-gui/src/pages/plan/flexible/tool/flexible_state.rs:127-177`
+定义：`crates/agent-gui/src/pages/plan/flexible/tool/flexible_state.rs`
 
 | 入参 | 必需 | 说明 |
 |---|---|---|
 | `session_id` | ✅ | 原样照抄 system prompt 中的本会话 ID |
-| `action` | ✅ | `load` / `save` |
-| `current_step` | (save) | 推进到的档位 |
-| `products` | (save) | 要写入的产物对象；值传 `null` 表示清除该 key |
 
-- **出参**：`load` → `{loaded, current_step, products}`（无记录时 `loaded=false`、`current_step="none"`、`products={}`）；`save` → `{saved, current_step, products}`。
-- **合法 `products` key**：`task_definition`、`output_format`、`execution_trace`、`compressed_context`、`field_selection_result`、`parameter_confirmation_result`。
+- **出参**：`{loaded, current_step, products}`（无记录时 `loaded=false`、`current_step="none"`、`products={}`）。
+- **只读**：状态（`current_step` + `products`）由各 step 的完成回调登记，工具不再提供 `save`。`products` 的 key：`task_definition`、`output_format`、`execution_trace`、`compressed_context`、`field_selection_result`、`parameter_confirmation_result`。
 
 ### 4.2 `flexible_save_template`
 
@@ -269,31 +267,47 @@ step → `status` → 定稿档位：
   │     └─► parameter_confirmation_result(object)
   │
   └─► step5 ◄── task_definition + execution_trace + field_selection_result + parameter_confirmation_result
-        └─► 模板 6 字段 ──► flexible_save_template ──► plans_flexible ──► save(current_step="templated")
+        └─► 模板 6 字段 ──► flexible_save_template ──► plans_flexible_sessions（`templated` 由 step5 回调即刻推进）
 ```
 
 协调器传参要点（`flexible_global_system.toml`）：
 
 - 含 `session_id` 的工具（`flexible_state`、`flexible_save_template`）必须原样照抄。
-- 调 `flexible_step2/3/4` 时必须一并传 `host_session_id`（同样原样照抄）。
+- 调任一 step 工具（`flexible_step1` ~ `flexible_step5`）时必须一并传 `host_session_id`（同样原样照抄）。
 - step3 的 `execution_trace_summary` 取 step2 的 `compressed_context`；step4 的 `execution_trace` 取 step2 的完整轨迹。
+- step2 的 `runtime_context` 取上一轮 step2 的 `compressed_context`（首次没有则不传；重试 / `back_to_execute` 重跑时必传）。
+- 需求澄清前，用只读的 `flexible_state` 取 `products.task_definition` / `products.output_format` 作为**任务基线**（唯一来源）。
 
 ---
 
-## 六、发现的代码 ↔ prompt 不一致（待逐条确认）
+## 六、代码 ↔ prompt 一致性复核
 
-| # | 位置 | 问题 | 影响 |
-|---|---|---|---|
-| 1 | `crates/agent-gui/src/pages/plan/flexible/chat_service_factory.rs:72-86` | 协调器 `allowed_tools` **没有 `flexible_save_template`**，但 `flexible_global_system.toml` 第 9 步要求调用它落库 | **P0**：模板无法落库（工具不在白名单，调用会被拒） |
-| 2 | `crates/agent-gui/src/pages/plan/flexible/chat_service_factory.rs:87` | `max_tool_rounds: 2`、以及上一条 `builtin_read_documentation` 条目是**测试残留**（注释自己写明「测试完请还原」） | 协调器 2 轮即触顶，正常 step1~step5 调度跑不完 |
-| 3 | `crates/agent-gui/src/pages/plan/flexible/page.rs:361-364` | step5 入参 `field_selection_result` 声明为 `string`（描述「纯文本输出」），而 step3 实际输出 **object**、step4 也声明 object；协调器 §6 / §8 文字同样写「纯文本输出」 | 类型契约自相矛盾，易导致传参形态不一致 |
-| 4 | `crates/agent-gui/src/pages/plan/flexible/page.rs:283-292` | step3 的 `output_format` 未列入 `required`，但 prompt 与协调器都按必需传 | 契约松紧不一致（当前不致命，但易被误省略） |
-| 5 | `crates/agent-gui/src/pages/plan/flexible/page.rs:246-249` | step2 的 `runtime_context` 已声明但协调器**从不传**；重试 / `back_to_execute` 也没回传 `compressed_context` | 死参数：声明与实现不一致 |
-| 6 | `step_callback/step2_callback.rs:74-89` vs `flexible_global_system.toml`（任务执行阶段） | step2 产物由 callback 自动写 + 协调器又手动 `save`，两处逻辑重复（含清下游产物） | 双写；当前幂等无害，但职责重叠、易漂移 |
-| 7 | `flexible_global_system.toml`（「状态」一节） | 文案写「整个流程分为四个阶段」，但实际列了 5 个 step、6 个状态档位 | 纯文档误差 |
+本章原先列出的 7 项不一致，加上复核时新增的 5 项，**已全部处理**（改动记录见
+`docs/chat-flexible-回调会话归属设计.md` §13 阶段 4 / 阶段 5）：
 
-补充说明（非缺陷，仅记录）：
+| # | 问题 | 处理结果 |
+|---|---|---|
+| 1 | 协调器 `allowed_tools` 缺 `flexible_save_template`（P0：模板无法落库） | 已加入白名单 |
+| 2 | `max_tool_rounds: 2` + `builtin_read_documentation` 测试残留（P0） | 已还原：删除 `max_tool_rounds` 即回默认 10；残留条目保持注释态 |
+| 3 | step5 入参 `field_selection_result` 声明 `string`、实为 object；prompt 写「纯文本输出」 | schema 已改 `object`，prompt 文案统一为「对象」 |
+| 4 | step3 入参 `output_format` 未列 `required` | 已加入 `required` |
+| 5 | step2 入参 `runtime_context` 声明却从不传 | 已补传（重试 / `back_to_execute` / 已有上一轮产物时带 `compressed_context`） |
+| 6 | step2 双写（回调 + 协调器 `save`） | 已消除：`flexible_state` 改为**只读**，prompt 不再写状态 |
+| 7 | prompt 写「整个流程分为四个阶段」而实际 5 步 6 档位 | 已改为「五个步骤」表 |
+| 8 | 档位表把 `task_defined` 注为「step1 已确认」 | 已改为「step1 已澄清」（回调在用户点确认前即登记） |
+| 9 | `flexible_state` / `flexible_save_template` 用 `session_id`，step 子 agent 用 `host_session_id` | 保留不动（两个 custom tool 各自独立，不撞名） |
+| 10 | step5 回调早于 `flexible_save_template` 触发，`templated` 会先落地 | 已在 prompt 与设计文档注明顺序，属既定取舍 |
+| 11 | prompt 把 `flexible_state` 描述为「流程状态的读写登记」 | 已改为只读 |
+| 12 | step2 prompt 的「运行上下文」与 schema `runtime_context` 对应不明 | 已在 prompt 写清语义（上一轮运行记录） |
 
-- step2/3/4 带 `host_session_id`（`hidden_args`），step1/step5 不带——因为只有 step2 挂了回调（`create_step2_callback`，`page.rs:268`），step5 改由 `flexible_save_template` 落库（`page.rs:379`）。
-- step3 / step4 目前**无回调**，状态登记完全靠协调器手动 `save`（与 `flexible_save_template 白名单` 同属待办方向：把 step3/4 登记也下沉为回调）。
-- 模板下拉的筛选是 `name.starts_with("chat/") || name.starts_with("flexible/")`（`page.rs:409`），所以往 `prompts/` 下的 `chat` / `flexible` 目录放 `.md`/`.txt` 都会被 prompt-manager 注册并出现在下拉里。
+**验证**：`cargo check -p planned-agent-gui` 0 error；6 个 prompt 经 `FilePromptManager` 实测全部可加载、协调器模板 `{{ session_id }}` 渲染正常（校验用一次性脚本，跑完已删）。
+
+**尚未做**：
+
+- **运行时验收**：并发多会话归属、step3/step4 挂起-恢复后的回调归属，需启动应用手测。
+- `max_tool_rounds` 触顶复现脚本（`chat/max_rounds_demo.toml`、`chat/sub_agent_max_rounds_driver.toml`）在还原后需临时改回才可复现。
+
+其它记录：
+
+- step1~step5 **全部**带 `host_session_id`（`hidden_args`，协调器按 schema 传参）——五步都挂了完成回调；step5 的回调只推进档位，落库仍由 `flexible_save_template` 负责。
+- 模板下拉的筛选是 `name.starts_with("chat/") || name.starts_with("flexible/")`，所以往 `prompts/` 下的 `chat` / `flexible` 目录放 `.md`/`.txt` 都会被 prompt-manager 注册并出现在下拉里。

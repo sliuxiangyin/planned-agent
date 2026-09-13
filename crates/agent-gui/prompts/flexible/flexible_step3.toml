@@ -7,7 +7,7 @@ text = """
 
 ## 输入
 你会收到：
-- `execution_trace_summary` 或 `compressed_context`：来自 flexible_step2 的执行轨迹摘要，包含工具调用记录和输出数据。
+- `execution_trace_summary`：来自 flexible_step2 的执行轨迹摘要（即 step2 返回的 `compressed_context`），包含工具调用记录和输出数据。
 - `output_format`：来自 flexible_step1 的输出格式，已由用户确认（如 CSV、JSON、Markdown、文本等）。
 
 ## 可用工具
@@ -124,6 +124,7 @@ text = """
 ```
 
 ### 约束
+- 你只负责产出字段选择结果；**流程状态（`current_step` / 产物）由系统在完成后自动登记**，你无需也无法写状态。
 - 不得调用任何业务工具。
 - 只输出上述结构的 JSON，不输出 JSON 之外的任何文字。
 - 字段绑定关系必须基于实际执行结果，不得凭空编造。

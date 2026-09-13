@@ -1,6 +1,6 @@
 # 灵活模式 · step 回调会话归属设计（让回调动态拿到会话标识）
 
-> 状态：**阶段 1–3 已实施（step2 路径）**，三 crate 编译通过；step3/step4 的回调下沉与运行时验收待做（见 §13 实施记录）
+> 状态：**阶段 1–5 已实施（step1~step5 全量回调 + 状态登记收敛为「回调唯一写入」）**，编译通过；仅剩运行时验收待做（见 §13 实施记录）
 > 关联：`docs/chat-flexible-多会话保活设计.md`（§3 D 是本方案的前身；本方案是它的**延伸**，不推翻其「父 prompt 注入 + 参数传参」机制）
 > 目标读者：`crates/agent-gui/src/pages/plan/flexible/` 与 `crates/planned-agent/src/chat/sub_agent/` 维护者
 > 前置阅读：`docs/chat-flexible-多会话保活设计.md` §2（保活模型）、§3 D（会话隔离机制与「为何不用 task-local」）
@@ -177,7 +177,7 @@ pub fn create_step2_callback(
 }
 ```
 
-（step1 在两端都不走回调路径，可暂不加；step5 若将来也下沉再加。）
+（step1 / step5 现已一并纳入回调：两者都补了 `host_session_id` + `hidden_args`，见 §13 实施记录。）
 
 **⑧ 协调器 prompt**（`prompts/flexible/flexible_global_system.toml`）说明：调用 `flexible_step2` / `flexible_step3` / `flexible_step4` 时必须带上 `host_session_id`，值照抄「会话上下文」段。
 
@@ -193,7 +193,7 @@ pub fn create_step2_callback(
 | step3 | 首行 `# 输出确认` | `back_to_execute` / `empty_result` / `cancelled` | ⚠️ `flexible_step3.toml:100-104` 只说「返回 X 状态」，**无精确首行模板** |
 | step4 | 首行 `# 参数确认` | `back_to_step3：...` / `cancelled：...` | ✅ 接近达标（`flexible_step4.toml:65-74`） |
 
-→ **必须先收紧 step3 的非定稿输出为严格首行标记**，否则代码解析不稳。（判定原则：宁可「不写」也不错写。）
+→ ~~必须先收紧 step3 的非定稿输出为严格首行标记~~ **（已过时）**：step1~step5 现已统一为「纯 JSON + 顶层 `status`」契约，回调直接用 `status` 判定定稿（见 §13 实施记录），不再依赖首行文本标记。（判定原则不变：宁可「不写」也不错写。）
 
 ## 8. 为什么 resume 路径必须一起改
 
@@ -242,7 +242,7 @@ pub fn create_step2_callback(
 
 - [x] `flexible_step3.toml`：非定稿输出改严格首行标记
 - [x] step2 回调内判定定稿 → `PlansFlexibleService::merge_state` 登记 `executed`（含清下游）
-- [ ] 扩到 step3 / step4
+- [x] 扩到 step1 / step3 / step4 / step5（step1 / step5 一并纳入；默认走通用实现）
 - [ ] 跑 §10 验收 1、2
 
 ### 收尾
@@ -277,9 +277,19 @@ pub fn create_step2_callback(
 - **回调**：`FlexibleStep2Callback` 携带 `plan_id` + `service`，按契约判定定稿后登记 `executed`（写入 `execution_trace`/`compressed_context`，并清 `field_selection_result`/`parameter_confirmation_result`）；`error` / 非 JSON 不推进。**回调统一放在 `pages/plan/flexible/step_callback/` 目录**（`mod.rs` 存共享的 `HOST_SESSION_ID_FIELD` / `read_host_session_id`，各 step 回调一个子模块），便于 step3/step4 后续扩展。
 - **契约收紧**：`flexible_step3.toml` 非定稿输出改严格首行标记。
 
+阶段 4 · 全量回调（step1 / step3 / step4 / step5 补齐）已落地，`cargo check -p planned-agent-gui` 通过：
+
+- **通用实现**：新增 `step_callback/step_commit.rs`（`StepSpec` + `StepCallback`），把「读会话归属 → 判定定稿 → 写产物 → 推进 `current_step` → 清下游产物」收敛成一份代码；五个 step 各自只给一份 `StepSpec`，回调实现细节不再重复。
+- **step1**：`status:"task_defined"` ⇒ 写 `task_definition` + `output_format`，清 `execution_trace` / `compressed_context` / `field_selection_result` / `parameter_confirmation_result`，推进 `task_defined`。
+- **step2**：行为不变（改写为复用通用实现）。
+- **step3**：`status:"fields_selected"` ⇒ 写 `field_selection_result`，清 `parameter_confirmation_result`，推进 `fields_selected`。
+- **step4**：`status:"params_confirmed"` ⇒ 写 `parameter_confirmation_result`，推进 `params_confirmed`。
+- **step5**：`status:"success"` ⇒ **只推进 `current_step="templated"`，不写 `products`、不做落库**（`plans_flexible_sessions` 的写入与结构校验仍由 `flexible_save_template` 工具负责）。
+- **接线**：`page.rs` 四个 step 的 `register_sub_agent` 传入各自回调；step1 / step5 的 `input_schema` 补 `host_session_id`（`required`）并加入 `hidden_args`；协调器 prompt 的传参要求从「step2/3/4」扩到「`flexible_step1` ~ `flexible_step5`」，并在 §需求澄清（step1）与 §输出确认与模板化（step5）两处调用说明里补上该参数。
+
 待办 / 偏差：
 
-- **step3 / step4 的回调下沉未做**（需各自新建回调 + 首行标记解析 + `page.rs` 注册）；这两步的状态登记目前仍由协调器 `flexible_state` 工具完成。
-- §10 的**并发归属**与**挂起-恢复归属**属运行时验收，尚未执行（需启动应用手测）。
-- §12 的两项现存问题未修。
-- 协调器 prompt 中「step2 成功后 `flexible_state` save(executed)」的步骤**保留**（与回调双写且语义幂等）——回调失败时它仍是兜底。
+- **运行时验收未做**：§10 的并发归属、挂起-恢复归属仍需启动应用手测（step3/step4 的挂起-恢复路径虽已透传 `arguments`，但未实测）。
+- ~~§12 的两项现存问题未修~~ → **已修（阶段 5）**：`flexible_save_template` 已进协调器 `allowed_tools`；`max_tool_rounds: 2` 与 `builtin_read_documentation` 测试残留已还原（回默认 10）。
+- ~~协调器 prompt 中各处 `flexible_state` 的 `save` 步骤保留（与回调双写）~~ → **已移除（阶段 5）**：`flexible_state` 改为**只读**（删 `save` 及 `action`/`current_step`/`products` 参数），prompt 删除全部 `save` 与「产物一致性原则」整节、换为「重做与状态」；回调成为状态登记的**唯一写入方**。取舍：回调若因缺 `host_session_id` 而跳过登记，该步将没有任何状态记录（已用 schema `required` 约束协调器务必传参）。另同步：step5 入参 `field_selection_result` 由 `string` 改为 `object`；step3 入参 `output_format` 列入 `required`；step2 的 `runtime_context` 改为**补传**（上一轮 `compressed_context`）；step1 任务基线来源唯一化为 `flexible_state` 的 `products`。验证：6 个 prompt 经 `FilePromptManager` 实测全部可加载、`{{ session_id }}` 渲染正常。
+- step5 的回调在协调器调用 `flexible_save_template` **之前**触发，即 `current_step` 会先变成 `templated`；落库失败时协调器重跑 step5，回调再写一次（幂等）。

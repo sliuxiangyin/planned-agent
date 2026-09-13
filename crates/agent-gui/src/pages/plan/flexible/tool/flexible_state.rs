@@ -1,4 +1,4 @@
-//! `flexible_state` 工具：读写当前会话的灵活模式「流程中间状态」。
+//! `flexible_state` 工具：读取当前会话的灵活模式「流程中间状态」（只读）。
 
 use std::sync::Arc;
 
@@ -13,9 +13,10 @@ use crate::services::plans_flexible_service::PlansFlexibleService;
 
 use super::{error_result, read_session_id};
 
-/// `flexible_state` 执行器：读/写当前会话的流程中间状态。
+/// `flexible_state` 执行器：读取当前会话的流程中间状态（只读）。
 ///
-/// `session_id` 由协调器经 `arguments.session_id` 传入（不再绑定会话 watch 槽）。
+/// 状态由各 step 子 agent 的完成回调登记（见 `step_callback/`），协调器只读不写，
+/// 故本工具不再提供写入能力。`session_id` 由协调器经 `arguments.session_id` 传入。
 pub struct FlexibleStateExecutor {
     plan_id: String,
     service: Arc<PlansFlexibleService>,
@@ -34,33 +35,13 @@ impl ToolExecutor for FlexibleStateExecutor {
             Ok(s) => s,
             Err(msg) => return error_result(&msg),
         };
-        let plan_id = self.plan_id.clone();
-
-        let action = arguments
-            .get("action")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-
-        let result = match action.as_str() {
-            "load" => self.load(&plan_id, &session_id).await,
-            "save" => self.save(&plan_id, &session_id, &arguments).await,
-            other => {
-                let msg = format!(
-                    "未知 action '{}'：仅支持 load（读取当前流程状态）或 save（登记某阶段产物）。",
-                    other
-                );
-                return error_result(&msg);
-            }
-        };
-
-        match result {
+        match self.load(&self.plan_id, &session_id).await {
             Ok(content) => Ok(ToolResult {
                 call_id: String::new(),
                 content: Value::String(content),
                 is_error: false,
             }),
-            Err(e) => error_result(&format!("读写流程状态失败: {}", e)),
+            Err(e) => error_result(&format!("读取流程状态失败: {}", e)),
         }
     }
 
@@ -69,7 +50,7 @@ impl ToolExecutor for FlexibleStateExecutor {
     }
 
     fn description(&self) -> &str {
-        "Read/write the flexible-flow intermediate state (current_step + step products) for the current session"
+        "Read the flexible-flow intermediate state (current_step + step products) for the current session"
     }
 
     fn supported_tools(&self) -> Vec<String> {
@@ -101,52 +82,28 @@ impl FlexibleStateExecutor {
         }
     }
 
-    /// save：登记某阶段的产物。`current_step` 与 `products`（对象）均可选；未提供则保留原值。
-    /// 读-改-写合并：先读当前，再合并传入字段后覆盖（与 [`PlansFlexibleService::merge_state`] 同语义）。
-    async fn save(&self, plan_id: &str, session_id: &str, args: &Value) -> Result<String> {
-        let patch = match args.get("products") {
-            Some(Value::Object(map)) => map.clone(),
-            _ => serde_json::Map::new(),
-        };
-        let current_step = args.get("current_step").and_then(Value::as_str);
-
-        let saved = self
-            .service
-            .merge_state(plan_id, session_id, current_step, &patch)
-            .await?;
-        Ok(json!({
-            "saved": true,
-            "current_step": saved.0,
-            "products": serde_json::from_str::<Value>(&saved.1).unwrap_or(Value::Object(Default::default()))
-        })
-        .to_string())
-    }
 }
 
 /// 构造 `flexible_state` 工具定义。
 pub fn flexible_state_tool() -> Tool {
     Tool {
         name: "flexible_state".into(),
-        description: "读写当前会话的灵活模式流程状态。\n\
+        description: "读取当前会话的灵活模式流程状态（只读）。\n\
              \n\
-             用途：协调器在用户要求「直接执行 / 跳到某一步骤」时，先 load 当前已推进到哪一步、\n\
-             各步骤产物是否齐备，据此前置判断；在每步「定稿」后（如 step1 需求确认、step2 执行成功、\n\
-             step3 字段确认、step4 参数确认）调用 save 登记产物并推进阶段。\n\
+             用途：协调器在用户要求「直接执行 / 跳到某一步骤」时，读取当前已推进到哪一步、\n\
+             各步骤产物是否齐备，据此前置判断；也在需求澄清前读取「任务基线」。\n\
+             状态（current_step + products）由各 step 子 agent 的完成回调自动登记，本工具只读、不写入。\n\
              \n\
              session_id（必填）：本会话的 session ID，原样照抄 system prompt「会话上下文」中给出的值，\n\
              不得改写、不得省略。\n\
              \n\
-             action：\n\
-             - load：返回该会话当前的 { current_step, products }，无记录时 current_step=none。\n\
-             - save：登记某阶段产物。参数 current_step（string，如 task_defined / executed /\n\
-               fields_selected / params_confirmed）与 products（object，key 见下）可选；\n\
-               未提供的字段保留原值，product 传 null 表示清除该项。\n\
+             返回：{ loaded, current_step, products }；该会话尚无记录时 loaded=false、current_step=none、products={}。\n\
              \n\
              products 的 key（均为 string，存原始文本/JSON）：task_definition、output_format、\n\
              execution_trace、compressed_context、field_selection_result、parameter_confirmation_result。\n\
              \n\
              current_step 档位（顺序 none→task_defined→executed→fields_selected→params_confirmed→templated）：\n\
-             - task_defined    = step1 已确认（可执行 step2）\n\
+             - task_defined    = step1 已澄清（可执行 step2）\n\
              - executed        = step2 已成功（可做 step3 字段选择）\n\
              - fields_selected = step3 已确认（可做 step4 参数确认）\n\
              - params_confirmed= step4 已确认（可编译 step5 模板）\n\
@@ -157,22 +114,9 @@ pub fn flexible_state_tool() -> Tool {
                 "session_id": {
                     "type": "string",
                     "description": "本会话的 session ID，原样照抄 system prompt 中给出的值"
-                },
-                "action": {
-                    "type": "string",
-                    "enum": ["load", "save"],
-                    "description": "load=读取当前流程状态；save=登记某阶段产物并推进 current_step"
-                },
-                "current_step": {
-                    "type": "string",
-                    "description": "(仅 save) 推进到的阶段档位：task_defined / executed / fields_selected / params_confirmed / templated"
-                },
-                "products": {
-                    "type": "object",
-                    "description": "(仅 save) 要写入的产物；key 为 task_definition / output_format / execution_trace / compressed_context / field_selection_result / parameter_confirmation_result，值传 null 表示清除"
                 }
             },
-            "required": ["session_id", "action"]
+            "required": ["session_id"]
         }),
     }
 }

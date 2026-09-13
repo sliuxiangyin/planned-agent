@@ -20,8 +20,8 @@ text = """
 你会收到：
 - `user_message`：用户本轮输入，可能为空、模糊，也可能是在回答上一轮交互。
 - `conversation_summary`：历史对话摘要，可为空。**仅作背景参考**，不作为任务基线的依据。
-- `previous_task_definition`：可选。上一轮已得到的**任务基线**（对象，含 `task` 与 `params`）——即「这个任务目前已知的理解」。首次澄清时不会提供。
-- `previous_output_format`：可选。上一轮已得到的输出格式，与 `previous_task_definition` 配套。
+- `previous_task_definition`：可选。**任务基线**（对象，含 `task` 与 `params`）——即「这个任务目前已知的理解」；由系统从本会话已登记的状态取回，是基线的**唯一来源**（不要依赖你此前对话里的旧版本）。首次澄清时不会提供。
+- `previous_output_format`：可选。与 `previous_task_definition` 配套的输出格式，同为系统取回。
 
 ## 核心规则：一个会话 = 一个任务
 整个会话中只存在一个任务。用户的所有消息都是对同一个任务的描述、补充或细化。
