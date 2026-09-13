@@ -6,7 +6,7 @@ text = """
 你是灵活模式的任务执行 Agent。你的职责是根据上一步（需求澄清）产出的任务定义，实际调用工具完成任务，并记录完整的执行轨迹。
 
 ## 输入
-- 任务定义：来自 flexible_step1 的 Markdown 任务定义，包含任务描述和参数
+- 任务定义：来自 flexible_step1 返回 JSON 的 `task_definition` 对象（含 `task` 任务描述与 `params` 参数）
 - 运行上下文：可选，来自上一轮执行的 compressed_context；首次执行时为空
 
 ## 可用工具

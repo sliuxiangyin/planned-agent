@@ -7,9 +7,9 @@ text = """
 
 ## 输入
 你会收到：
-- `execution_trace`：来自 flexible_step2 的完整执行轨迹，重点包含每次工具调用的输入参数。
-- `output_format`：来自 flexible_step1 的输出格式，已由用户确认。
-- `field_selection_result`：来自 flexible_step3 的纯文本输出，包含可用字段和用户选中的字段。
+- `execution_trace`：来自 flexible_step2 返回 JSON 的 `execution_trace` 数组，重点包含每次工具调用的输入参数。
+- `output_format`：来自 flexible_step1 返回 JSON 的 `output_format`，已由用户确认。
+- `field_selection_result`：来自 flexible_step3 返回 JSON 的 `field_selection_result` 对象，含可用字段（`available_fields`）与用户选中字段（`selected_fields`）。
 
 ## 可用工具
 - `request_user_action`：用于与用户交互的 UI 工具。
@@ -40,40 +40,49 @@ text = """
 6. 不得调用任何业务工具。
 
 ## 输出格式
-以**纯文本**格式输出（不要输出 JSON，不要使用 Markdown 代码块标记），格式如下：
+输出**纯 JSON 对象**（不要 Markdown 代码块标记、不要 JSON 之外的任何文字），顶层必须带 `status`：
 
+```json
+{
+  "status": "params_confirmed",
+  "parameter_confirmation_result": {
+    "output_format": "CSV",
+    "candidates": [
+      { "name": "date", "example": "2025-03-01", "description": "查询日期" },
+      { "name": "region", "example": "华东", "description": "地区" }
+    ],
+    "selected_params": ["date"],
+    "template_input": {
+      "input_schema": [
+        { "name": "date", "type": "date", "required": true, "description": "查询日期", "example": "2025-03-01" }
+      ],
+      "output_type": "CSV",
+      "output_fields": ["title", "date"],
+      "tool_sequence": ["query_tool", "export_tool"]
+    }
+  }
+}
 ```
-# 参数确认
-## 输出格式
-{step1 确定的输出格式}
-
-## 参数候选
-* {建议参数名}：{示例值}（{参数说明}）
-* {建议参数名}：{示例值}（{参数说明}）
-...
-
-## 选中参数
-{参数名1}, {参数名2}, ...
-
-## 模板输入定义
-* 输入 Schema：{参数名}（{类型}）、{参数名}（{类型}）...
-* 输出类型：{用户确认的输出格式}
-* 输出字段：{字段1}、{字段2}、...
-* 工具调用序列：{工具1} → {工具2} → ...
-```
+规则：
+- `output_format`：step1 确定的输出格式。
+- `candidates`：识别到的全部可参数化候选，每项 `{name, example, description}`。
+- `selected_params`：用户勾选、成为模板输入变量的参数名数组。
+- `template_input`：`input_schema`（每项 `{name, type, required, description, example}`）、`output_type`、`output_fields`、`tool_sequence`；`type` 取 string/number/boolean/date/array。
+- `output_fields` 必须与 step3 的选中字段一致。
 
 ### 异常处理
-这些状态同样以**纯文本**输出（不要输出 JSON），格式如下：
+这些状态同样输出**纯 JSON 对象**，`status` 取下述值，附加说明放 `message`：
+
 - 用户要求返回上一步：
-```
-back_to_step3：用户要求重新选择输出字段（可选补充原因）
+```json
+{ "status": "back_to_step3", "message": "可选补充原因" }
 ```
 - 用户取消：
-```
-cancelled：取消原因（可选）
+```json
+{ "status": "cancelled", "message": "可选取消原因" }
 ```
 
 ### 约束
-- 输出必须是纯文本，不得输出 JSON。
+- 只输出上述结构的 JSON，不输出 JSON 之外的任何文字。
 - 参数候选必须基于执行轨迹中的实际参数值，不得凭空编造。
 """

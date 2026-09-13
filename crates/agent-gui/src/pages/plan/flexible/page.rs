@@ -209,6 +209,14 @@ fn use_plan_agent_registrations(plan_id: String) {
                     "conversation_summary": {
                         "type": "string",
                         "description": "历史对话摘要（若无则传空字符串）"
+                    },
+                    "previous_task_definition": {
+                        "type": "object",
+                        "description": "可选：上一轮已得到的任务基线（task_definition 对象）。优先取 flexible_state 中已定稿的 task_definition，其次取最近一次 flexible_step1 返回的 task_definition；首次澄清时不传"
+                    },
+                    "previous_output_format": {
+                        "type": "string",
+                        "description": "可选：上一轮已得到的输出格式，与 previous_task_definition 配套；首次澄清时不传"
                     }
                 },
                 "required": ["user_message"]
@@ -232,8 +240,8 @@ fn use_plan_agent_registrations(plan_id: String) {
                 "type": "object",
                 "properties": {
                     "task_definition": {
-                        "type": "string",
-                        "description": "来自 flexible_step1 的 Markdown 任务定义，包含任务描述和参数"
+                        "type": "object",
+                        "description": "来自 flexible_step1 返回 JSON 的 task_definition 对象（含 task 任务描述与 params 参数）"
                     },
                     "runtime_context": {
                         "type": "string",
@@ -304,16 +312,16 @@ fn use_plan_agent_registrations(plan_id: String) {
                 "type": "object",
                 "properties": {
                     "execution_trace": {
-                        "type": "string",
-                        "description": "来自 flexible_step2 的完整执行轨迹，包含每次工具调用的输入参数"
+                        "type": "array",
+                        "description": "来自 flexible_step2 返回 JSON 的 execution_trace 数组，包含每次工具调用的输入参数"
                     },
                     "output_format": {
                         "type": "string",
                         "description": "来自 flexible_step1 的输出格式，已由用户确认（如 CSV、JSON、Markdown、文本等）"
                     },
                     "field_selection_result": {
-                        "type": "string",
-                        "description": "来自 flexible_step3 的纯文本输出，包含可用字段和用户选中的字段"
+                        "type": "object",
+                        "description": "来自 flexible_step3 返回 JSON 的 field_selection_result 对象（含 output_format / available_fields / selected_fields）"
                     },
                     "host_session_id": {
                         "type": "string",
@@ -343,20 +351,20 @@ fn use_plan_agent_registrations(plan_id: String) {
                 "type": "object",
                 "properties": {
                     "task_definition": {
-                        "type": "string",
-                        "description": "来自 flexible_step1 的 Markdown 任务描述（含任务名称、参数列表）"
+                        "type": "object",
+                        "description": "来自 flexible_step1 返回 JSON 的 task_definition 对象（含 task 任务描述与 params 参数）"
                     },
                     "execution_trace": {
-                        "type": "string",
-                        "description": "来自 flexible_step2 的完整执行轨迹（按顺序的工具调用及输入参数）"
+                        "type": "array",
+                        "description": "来自 flexible_step2 返回 JSON 的 execution_trace 数组（按顺序的工具调用及输入参数）"
                     },
                     "field_selection_result": {
                         "type": "string",
                         "description": "来自 flexible_step3 的纯文本输出，包含可用字段和用户选中的字段"
                     },
                     "parameter_confirmation_result": {
-                        "type": "string",
-                        "description": "来自 flexible_step4 的纯文本输出，包含参数候选、选中参数和模板输入定义"
+                        "type": "object",
+                        "description": "来自 flexible_step4 返回 JSON 的 parameter_confirmation_result 对象（含 candidates / selected_params / template_input）"
                     }
                 },
                 "required": ["task_definition", "execution_trace", "field_selection_result", "parameter_confirmation_result"]
