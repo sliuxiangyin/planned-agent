@@ -83,8 +83,9 @@ impl SubAgentSessionRunner for SubAgentRunner {
             }));
         }
 
-        // 提取 task 参数
-        let task = serde_json::to_string_pretty(&arguments)
+        // 提取 task 参数（剔除不进入 task 文本的控制字段，如宿主注入的会话标识）
+        let task_arguments = strip_hidden_args(&arguments, &self.config.hidden_args);
+        let task = serde_json::to_string_pretty(&task_arguments)
             .unwrap_or_else(|_| "请完成指定任务".to_string());
         info!("[子agent] 准备发送任务: {}", task);
 
@@ -127,7 +128,27 @@ impl SubAgentSessionRunner for SubAgentRunner {
             self.depth,
             self.max_depth,
             self.result_callback.clone(),
+            arguments,
         )
         .await
+    }
+}
+
+/// 从父 agent 传入的 `arguments` 中剔除「不进入子 agent task 文本」的控制字段。
+///
+/// `hidden` 为空（默认）时原样返回，保持既有行为。
+fn strip_hidden_args(args: &Value, hidden: &[String]) -> Value {
+    if hidden.is_empty() {
+        return args.clone();
+    }
+    match args {
+        Value::Object(map) => {
+            let mut map = map.clone();
+            for key in hidden {
+                map.remove(key);
+            }
+            Value::Object(map)
+        }
+        other => other.clone(),
     }
 }

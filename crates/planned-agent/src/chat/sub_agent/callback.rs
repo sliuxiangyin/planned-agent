@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use planned_agent_core::mcp::types::ToolResult;
+use serde_json::Value;
 
 /// 子 agent 结果处理决策。
 ///
@@ -25,6 +26,23 @@ pub enum ResultDecision {
     Retry(String),
 }
 
+/// 本次子 agent 调用的上下文。
+///
+/// 由 `collect_until_outcome` 在触发回调前构造。核心库只做**透传**：它不理解
+/// `arguments` 里各字段的业务含义，具体取哪个字段（如宿主/会话标识）由回调自行决定。
+///
+/// 注意：`arguments` 是**父 agent 传入本子 agent 的原始工具参数**，与子 agent 自身的
+/// 挂起-恢复会话（`session_id` / `run_id`）是不同概念，不要混用。
+#[derive(Debug, Clone)]
+pub struct SubAgentCallContext {
+    /// 子 agent 工具名（如 `"flexible_step2"`）。
+    pub agent_name: String,
+    /// 本次调用的 tool_call_id（等于 `run_id` / invocation id）。
+    pub tool_call_id: String,
+    /// 父 agent 传给该子 agent 的原始参数（LLM tool_call 的 `arguments`）。
+    pub arguments: Value,
+}
+
 /// 子 agent 结果回调：完成后可获取最终 tool result（用于外部解析/提取）。
 ///
 /// `on_result` 为 **async**：它在触发方的异步上下文（`collect_until_outcome`）中被
@@ -34,12 +52,12 @@ pub enum ResultDecision {
 pub trait SubAgentResultCallback: Send + Sync {
     /// 子 agent 完成后触发。
     ///
-    /// - `agent_name`：子 agent 工具名（如 `"flexible_step1"`）
+    /// - `ctx`：本次调用的上下文（工具名 / tool_call_id / 父 agent 传入的原始参数）
     /// - `result`：最终 tool result（`content` 即为 `extract_last_assistant_text` 的文本）
     ///
     /// 返回 [`ResultDecision`]：
     /// - `Accept`：接受结果
     /// - `Transform(text)`：替换 content
     /// - `Retry(msg)`：发送纠正消息给子 agent，重试后再次回调
-    async fn on_result(&self, agent_name: &str, result: &ToolResult) -> ResultDecision;
+    async fn on_result(&self, ctx: &SubAgentCallContext, result: &ToolResult) -> ResultDecision;
 }

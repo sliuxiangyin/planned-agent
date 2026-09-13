@@ -24,6 +24,8 @@ pub struct ChatSubAgentSession {
     depth: u32,
     max_depth: u32,
     result_callback: Option<Arc<dyn SubAgentResultCallback>>,
+    /// 父 agent 传入本子 agent 的原始参数（挂起时保留，resume 后回调仍需用它定位归属）。
+    arguments: Value,
 }
 
 impl ChatSubAgentSession {
@@ -32,12 +34,14 @@ impl ChatSubAgentSession {
         depth: u32,
         max_depth: u32,
         result_callback: Option<Arc<dyn SubAgentResultCallback>>,
+        arguments: Value,
     ) -> Self {
         Self {
             service,
             depth,
             max_depth,
             result_callback,
+            arguments,
         }
     }
 }
@@ -75,6 +79,7 @@ impl SubAgentSession for ChatSubAgentSession {
             self.depth,
             self.max_depth,
             self.result_callback.clone(),
+            self.arguments.clone(),
         )
         .await
     }

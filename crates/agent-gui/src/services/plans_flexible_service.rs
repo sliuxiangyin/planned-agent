@@ -96,4 +96,46 @@ impl PlansFlexibleService {
                 .map(|m| (m.current_step, m.products))
         }
     }
+
+    /// 读-改-写**合并**保存某会话的流程中间状态（与 `flexible_state` 工具的 `save` 同语义）。
+    ///
+    /// - `current_step`：`Some` 时推进阶段；`None` 保留原值。
+    /// - `patch`：产物补丁 —— key 出现即写入；值为 `null` 表示**删除**该产物；未出现的 key 保留原值。
+    ///
+    /// 供**代码侧**调用方（如子 agent 完成回调）使用。直接用 [`Self::save_state`] 是**全量覆盖**，
+    /// 会把上游产物（如 `task_definition`）冲掉，故代码侧一律走本方法。
+    pub async fn merge_state(
+        &self,
+        plan_id: &str,
+        session_id: &str,
+        current_step: Option<&str>,
+        patch: &serde_json::Map<String, serde_json::Value>,
+    ) -> StorageResult<(String, String)> {
+        let existing = self.load_state(plan_id, session_id).await?;
+        let (mut step, mut products) = match existing {
+            Some((step, products)) => {
+                let parsed = serde_json::from_str::<serde_json::Value>(&products)
+                    .ok()
+                    .and_then(|v| v.as_object().cloned())
+                    .unwrap_or_default();
+                (step, parsed)
+            }
+            None => ("none".to_string(), serde_json::Map::new()),
+        };
+
+        if let Some(next) = current_step {
+            step = next.to_string();
+        }
+        for (key, value) in patch {
+            if value.is_null() {
+                products.remove(key);
+            } else {
+                products.insert(key.clone(), value.clone());
+            }
+        }
+
+        let products_str = serde_json::Value::Object(products).to_string();
+        self.save_state(plan_id, session_id, &step, &products_str)
+            .await
+    }
 }

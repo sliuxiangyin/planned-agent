@@ -26,6 +26,6 @@ mod collect;
 mod runner;
 mod session;
 
-pub use callback::{ResultDecision, SubAgentResultCallback};
+pub use callback::{ResultDecision, SubAgentCallContext, SubAgentResultCallback};
 pub use runner::SubAgentRunner;
 pub use session::ChatSubAgentSession;

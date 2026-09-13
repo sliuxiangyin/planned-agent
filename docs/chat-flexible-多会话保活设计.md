@@ -104,6 +104,8 @@ FlexiblePage（壳）
 4. ✅ **`flexible_state` 一并改（已实现）**：同样从 `arguments.session_id` 读（prompt 指示父 agent 每次调用都带上）。
 
 > **为何不用 task-local**：`chat/driver/round/handlers.rs::execute_backend_tool_call` 是核心工具执行路径，加 `task_local` + `ChatConfig.scope_id` + 子 agent 继承，为「传一个 id」动执行内核，成本大于收益。本方案把改动全部收敛在 GUI 侧。
+>
+> **延伸（子 agent 完成回调的会话归属）**：把「step 成功后的状态落库」从协调器 LLM 移到**子 agent 完成回调**（`SubAgentResultCallback`）时，回调同样需要知道归属会话。该场景沿用本节机制（父 prompt 注入 + 参数传参），但**字段另起名 `host_session_id`**（避开子 agent 挂起-恢复占用的 `session_id`），并把「本次调用参数」经 `runner → collect_until_outcome → on_result` 透传给回调。详见 [`docs/chat-flexible-回调会话归属设计.md`](chat-flexible-回调会话归属设计.md)（已实施：`SubAgentCallContext` + `PlansFlexibleService::merge_state`）。
 
 **代价（需实测）**：
 - `session_id` 依赖 LLM 从 prompt 照抄回填——参数设为 `required` + schema 描述强约束「原样照抄」，executor 再校验（非法返回可读 error，让父 agent 重试）。

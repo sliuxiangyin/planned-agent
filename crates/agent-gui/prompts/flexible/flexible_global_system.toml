@@ -26,7 +26,8 @@ text = """
 
 ## 会话上下文
 本会话的 session_id = `{{ session_id }}`
-凡工具参数含 `session_id`（`flexible_state`、`flexible_save_template`），必须原样照抄该值，不得改写、不得省略。
+1. 凡工具参数含 `session_id`（`flexible_state`、`flexible_save_template`），必须原样照抄该值，不得改写、不得省略。
+2. 调用子 agent 工具 `flexible_step2` / `flexible_step3` / `flexible_step4` 时，必须一并传 `host_session_id`，值同样原样照抄上面的 session_id（供执行回调定位本次执行归属的会话），不得改写、不得省略。
 
 ## 工作方式
 
@@ -75,7 +76,7 @@ text = """
      - 用 `question` 写清："任务摘要如上，你希望补充修改，还是确认并进入执行？"
      - options：[{label:"补充/修改需求",value:"edit"},{label:"确认，进入执行",value:"confirm"}]（推荐"补充"在前）
      - 用户选**补充**：只输出"好的，请补充。"，**不要调用任何工具**。用户将在 AI 对话输入框中直接输入下一条消息，进入下一轮需求澄清。
-     - 用户选**确认**：用户确认需求无误，进入执行阶段。先调用 `flexible_state` 的 `save`（`current_step="task_defined"`，`products` 写入 `task_definition` 与 `output_format`，内容取已保存的 `# 任务确认` 下方文本），然后**立即调用 `flexible_step2`**，传入已保存的任务定义。进入任务执行阶段。
+     - 用户选**确认**：用户确认需求无误，进入执行阶段。先调用 `flexible_state` 的 `save`（`current_step="task_defined"`，`products` 写入 `task_definition` 与 `output_format`，内容取已保存的 `# 任务确认` 下方文本），然后**立即调用 `flexible_step2`**，传入已保存的任务定义（并带上 `host_session_id`，值照抄会话上下文）。进入任务执行阶段。
 
 ### 任务执行阶段
 3. 调用 `flexible_step2` 后，根据返回的 `status` 进行路由：
@@ -89,6 +90,7 @@ text = """
 4. 调用 `flexible_step3`，传入：
    - `execution_trace_summary`：来自 `flexible_step2` 的 `compressed_context`。
    - `output_format`：来自 step1 用户已确认的输出格式。
+   - `host_session_id`：本会话 ID，原样照抄「会话上下文」的值。
 5. 根据 `flexible_step3` 返回的纯文本内容进行路由：
    - 包含 `# 输出确认` 标记：输出类型已确认。先调用 `flexible_state` 的 `save`（`current_step="fields_selected"`，`products` 写入 `field_selection_result`），然后进入步骤6。
    - `back_to_execute`：重新调用 `flexible_step2`，传入相同任务定义（回到任务执行阶段）。重新执行成功后按「产物一致性原则」执行该次 `save`：`current_step="executed"`，写入新 `execution_trace`/`compressed_context`，并传 `field_selection_result=null`、`parameter_confirmation_result=null` 清除下游产物。
@@ -98,6 +100,7 @@ text = """
    - `execution_trace`：来自 `flexible_step2` 的完整执行轨迹。
    - `output_format`：来自 step1 的输出格式。
    - `field_selection_result`：来自 step3 的纯文本输出（包含可用字段和用户选中的字段）。
+   - `host_session_id`：本会话 ID，原样照抄「会话上下文」的值。
 7. 根据 `flexible_step4` 返回的纯文本内容进行路由：
    - 包含 `# 参数确认` 标记：保存选中的参数与模板输入定义。先调用 `flexible_state` 的 `save`（`current_step="params_confirmed"`，`products` 写入 `parameter_confirmation_result`），然后进入步骤8。
    - `back_to_step3`：重新调用 `flexible_step3`，传入相同参数（回到字段选择阶段）。字段重选成功后按「产物一致性原则」执行该次 `save`：`current_step="fields_selected"`，写入新 `field_selection_result`，并传 `parameter_confirmation_result=null` 清除下游产物；随后需重新进入 step4 并确认后再 `save` 回 `params_confirmed`。

@@ -102,39 +102,17 @@ impl FlexibleStateExecutor {
     }
 
     /// save：登记某阶段的产物。`current_step` 与 `products`（对象）均可选；未提供则保留原值。
-    /// 读-改-写合并：先读当前，再合并传入字段后覆盖。
+    /// 读-改-写合并：先读当前，再合并传入字段后覆盖（与 [`PlansFlexibleService::merge_state`] 同语义）。
     async fn save(&self, plan_id: &str, session_id: &str, args: &Value) -> Result<String> {
-        let existing = self.service.load_state(plan_id, session_id).await?;
-        let (mut current_step, mut products_obj) = match existing {
-            Some((step, products)) => {
-                let parsed: Value = serde_json::from_str(&products)
-                    .unwrap_or_else(|_| Value::Object(Default::default()));
-                (step, parsed)
-            }
-            None => ("none".to_string(), Value::Object(Default::default())),
+        let patch = match args.get("products") {
+            Some(Value::Object(map)) => map.clone(),
+            _ => serde_json::Map::new(),
         };
+        let current_step = args.get("current_step").and_then(Value::as_str);
 
-        if let Some(step) = args.get("current_step").and_then(Value::as_str) {
-            current_step = step.to_string();
-        }
-        if let Some(Value::Object(map)) = args.get("products") {
-            if let Value::Object(existing_map) = &mut products_obj {
-                for (k, v) in map {
-                    if v.is_null() {
-                        existing_map.remove(k);
-                    } else {
-                        existing_map.insert(k.clone(), v.clone());
-                    }
-                }
-            } else {
-                products_obj = Value::Object(map.clone());
-            }
-        }
-
-        let products_str = serde_json::to_string(&products_obj)?;
         let saved = self
             .service
-            .save_state(plan_id, session_id, &current_step, &products_str)
+            .merge_state(plan_id, session_id, current_step, &patch)
             .await?;
         Ok(json!({
             "saved": true,

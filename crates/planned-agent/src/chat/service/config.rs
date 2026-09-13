@@ -71,6 +71,12 @@ pub struct ChatConfig {
     /// 子 agent 的 `ChatService` 在每次 `start()` 时新建、完成即 drop，
     /// run_id 在构造时写入 config，天然隔离。
     pub run_id: Option<String>,
+    /// 不写入子 agent task 文本的参数名（宿主/调用方注入的控制字段）。
+    ///
+    /// [`crate::chat::SubAgentRunner`] 会把父 agent 传入的 `arguments` 序列化后作为子 agent
+    /// 的 task 文本；其中子 agent 用不到的**控制字段**（如宿主会话标识）可在此列出，
+    /// 避免泄漏进子 agent 上下文。默认空（不减任何参数，保持既有行为）。
+    pub hidden_args: Vec<String>,
 }
 
 impl Default for ChatConfig {
@@ -86,6 +92,7 @@ impl Default for ChatConfig {
             enable_thinking: true,
             allowed_tools: None,
             run_id: None,
+            hidden_args: Vec::new(),
         }
     }
 }

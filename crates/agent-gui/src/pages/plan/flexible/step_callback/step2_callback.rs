@@ -69,17 +69,18 @@ impl SubAgentResultCallback for FlexibleStep2Callback {
 
         // ── 登记 executed，并清除下游（重跑 step2 ⇒ step3/step4 的定稿产物作废）──
         let mut patch = serde_json::Map::new();
-        patch.insert(
-            "execution_trace".to_string(),
-            parsed.get("execution_trace").cloned().unwrap_or(serde_json::Value::Null),
-        );
-        patch.insert(
-            "compressed_context".to_string(),
-            parsed
-                .get("compressed_context")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null),
-        );
+        // 产物**缺失即跳过写入**（保留原值）——只有显式提供才写入。
+        // 否则 `merge_state` 会把 `null` 当「删除」，在 step2 漏字段时静默清掉已有产物。
+        if let Some(trace) = parsed.get("execution_trace").filter(|v| !v.is_null()) {
+            patch.insert("execution_trace".to_string(), trace.clone());
+        } else {
+            tracing::warn!("[flexible_step2] success 但缺 execution_trace，跳过该产物写入");
+        }
+        if let Some(ctx_summary) = parsed.get("compressed_context").filter(|v| !v.is_null()) {
+            patch.insert("compressed_context".to_string(), ctx_summary.clone());
+        } else {
+            tracing::warn!("[flexible_step2] success 但缺 compressed_context，跳过该产物写入");
+        }
         patch.insert("field_selection_result".to_string(), serde_json::Value::Null);
         patch.insert("parameter_confirmation_result".to_string(), serde_json::Value::Null);
 

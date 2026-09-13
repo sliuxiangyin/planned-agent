@@ -26,6 +26,7 @@ use crate::services::plans_flexible_service::PlansFlexibleService;
 
 use super::session_host::FlexibleSessionHost;
 use super::step2_callback::create_step2_callback;
+use super::HOST_SESSION_ID_FIELD;
 use super::tool::{
     flexible_state_tool, flexible_save_template, FlexibleStateExecutor, FlexibleSaveTemplateExecutor,
 };
@@ -237,20 +238,26 @@ fn use_plan_agent_registrations(plan_id: String) {
                     "runtime_context": {
                         "type": "string",
                         "description": "可选，来自上一轮执行的 compressed_context；首次执行时为空"
+                    },
+                    "host_session_id": {
+                        "type": "string",
+                        "description": "本会话 ID，原样照抄 system prompt「会话上下文」中给出的值，不得改写"
                     }
                 },
-                "required": ["task_definition"]
+                "required": ["task_definition", "host_session_id"]
             }),
             ChatConfig {
                 system_prompt: Some(SystemPrompt::Template("flexible/flexible_step2".into())),
                 // step2 是纯业务执行：用 "all" 剔除 Utility/SubAgent（含 flexible_state、兄弟 step 子 agent），
                 // 只暴露业务工具，避免执行 agent 误碰协调层工具。
                 allowed_tools: Some(vec!["all".to_string()]),
+                // host_session_id 是宿主注入的控制字段（供回调定位会话），不进子 agent 的 task 文本。
+                hidden_args: vec![HOST_SESSION_ID_FIELD.to_string()],
                 ..Default::default()
             },
             1, // depth
             2, // max_depth
-            create_step2_callback(),
+            create_step2_callback(plan_id.clone(), plans_flexible_service.clone()),
         );
         register_sub_agent(
             &ai_ctx,
@@ -268,13 +275,19 @@ fn use_plan_agent_registrations(plan_id: String) {
                     "output_format": {
                         "type": "string",
                         "description": "来自 flexible_step1 的输出格式，已由用户确认（如 CSV、JSON、Markdown、文本等）"
+                    },
+                    "host_session_id": {
+                        "type": "string",
+                        "description": "本会话 ID，原样照抄 system prompt「会话上下文」中给出的值，不得改写"
                     }
                 },
-                "required": ["execution_trace_summary"]
+                "required": ["execution_trace_summary", "host_session_id"]
             }),
             ChatConfig {
                 system_prompt: Some(SystemPrompt::Template("flexible/flexible_step3".into())),
                 allowed_tools: Some(vec!["request_user_action".to_string()]),
+                // host_session_id 是宿主注入的控制字段（供回调定位会话），不进子 agent 的 task 文本。
+                hidden_args: vec![HOST_SESSION_ID_FIELD.to_string()],
                 ..Default::default()
             },
             1, // depth
@@ -301,13 +314,19 @@ fn use_plan_agent_registrations(plan_id: String) {
                     "field_selection_result": {
                         "type": "string",
                         "description": "来自 flexible_step3 的纯文本输出，包含可用字段和用户选中的字段"
+                    },
+                    "host_session_id": {
+                        "type": "string",
+                        "description": "本会话 ID，原样照抄 system prompt「会话上下文」中给出的值，不得改写"
                     }
                 },
-                "required": ["execution_trace", "output_format", "field_selection_result"]
+                "required": ["execution_trace", "output_format", "field_selection_result", "host_session_id"]
             }),
             ChatConfig {
                 system_prompt: Some(SystemPrompt::Template("flexible/flexible_step4".into())),
                 allowed_tools: Some(vec!["request_user_action".to_string()]),
+                // host_session_id 是宿主注入的控制字段（供回调定位会话），不进子 agent 的 task 文本。
+                hidden_args: vec![HOST_SESSION_ID_FIELD.to_string()],
                 ..Default::default()
             },
             1, // depth

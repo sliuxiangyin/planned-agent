@@ -15,7 +15,7 @@ use tracing::info;
 
 use crate::chat::service::{ChatEvent, ChatService, SendOutcome, SendTicket};
 
-use super::callback::{ResultDecision, SubAgentResultCallback};
+use super::callback::{ResultDecision, SubAgentCallContext, SubAgentResultCallback};
 use super::session::ChatSubAgentSession;
 
 /// 监听子 agent 的事件流，转发到 `ToolStreamSender`，
@@ -32,6 +32,9 @@ pub(super) async fn collect_until_outcome(
     depth: u32,
     max_depth: u32,
     result_callback: Option<Arc<dyn SubAgentResultCallback>>,
+    // 父 agent 传给该子 agent 的原始参数；仅用于填充回调的 `SubAgentCallContext`，
+    // 或随挂起会话保留到 resume（见 `ChatSubAgentSession`）。
+    arguments: Value,
 ) -> Result<SubAgentRunOutcome> {
     info!("[子agent] collect_until_outcome 开始，注册事件监听");
 
@@ -87,6 +90,13 @@ pub(super) async fn collect_until_outcome(
             // ── 回调决策 + 重试循环 ──
             let max_retries = 2;
             let final_text = if let Some(cb) = &result_callback {
+                // 本次调用上下文：核心库只透传参数，具体取哪个字段由回调决定。
+                // 先 clone 一份，因为 `arguments` 在后面 Suspended 分支要 move 给挂起会话。
+                let call_ctx = SubAgentCallContext {
+                    agent_name: stream.tool_name().to_string(),
+                    tool_call_id: stream.invocation_id().to_string(),
+                    arguments: arguments.clone(),
+                };
                 let mut attempts = 0u32;
                 loop {
                     let probe = ToolResult {
@@ -94,7 +104,7 @@ pub(super) async fn collect_until_outcome(
                         is_error: false,
                         content: Value::String(last_text.clone()),
                     };
-                    match cb.on_result(&stream.tool_name(), &probe).await {
+                    match cb.on_result(&call_ctx, &probe).await {
                         ResultDecision::Accept => break last_text,
                         ResultDecision::Transform(new) => break new,
                         ResultDecision::Retry(msg) if attempts < max_retries => {
@@ -146,6 +156,7 @@ pub(super) async fn collect_until_outcome(
                     depth,
                     max_depth,
                     result_callback.clone(),
+                    arguments,
                 )),
                 message,
                 actions: serde_json::to_value(questions).unwrap_or_else(|_| Value::Array(vec![])),
