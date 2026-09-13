@@ -100,7 +100,8 @@ pub fn flexible_state_tool() -> Tool {
              返回：{ loaded, current_step, products }；该会话尚无记录时 loaded=false、current_step=none、products={}。\n\
              \n\
              products 的 key（均为 string，存原始文本/JSON）：task_definition、output_format、\n\
-             execution_trace、compressed_context、field_selection_result、parameter_confirmation_result。\n\
+             execution_trace、compressed_context、field_selection_result、parameter_confirmation_result、\n\
+             template_payload（step5 的整段模板副本，仅供 flexible_save_template 内部读取，你无需使用）。\n\
              \n\
              current_step 档位（顺序 none→task_defined→executed→fields_selected→params_confirmed→templated）：\n\
              - task_defined    = step1 已澄清（可执行 step2）\n\

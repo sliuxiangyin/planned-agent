@@ -24,7 +24,7 @@ none → task_defined → executed → fields_selected → params_confirmed → 
 | `executed` | `execution_trace`、`compressed_context` |
 | `fields_selected` | `field_selection_result` |
 | `params_confirmed` | `parameter_confirmation_result` |
-| `templated` | 无（模板由 `flexible_save_template` 写入 `plans_flexible`，不入 `products`） |
+| `templated` | `template_payload`（整段模板副本，供 `flexible_save_template` 直接读取落库） |
 
 规则（现由各 step 的完成回调统一执行，见 `step_callback/step_commit.rs`）：
 
@@ -185,17 +185,17 @@ step → `status` → 定稿档位：
 ### 3.5 `flexible_step5` — 模板序列化
 
 - **职责**：把 4 份上游产物编译成**混合模板**——`steps`（硬编码、零推理可跑）+ `execution_plan`（1:1 对应的智能修复说明书）。无用户交互。
-- **允许工具**：`request_user_action`（实际不使用）；**无回调**，改由协调器调 `flexible_save_template` 落库。
+- **允许工具**：`request_user_action`（实际不使用）；**有完成回调**（`step_callback/step5_callback.rs`）：推进 `templated` + 登记模板副本；落库仍由协调器调 `flexible_save_template` 执行。
 - **入参 schema**（`page.rs:350-371`）
 
 | 参数 | 类型 | 必需 | 说明 |
 |---|---|---|---|
 | `task_definition` | object | ✅ | 来自 step1 |
 | `execution_trace` | array | ✅ | 来自 step2 |
-| `field_selection_result` | **string** | ✅ | 注释写「纯文本输出」，但 step3 实际返回 **object**（见 §六-3） |
+| `field_selection_result` | object | ✅ | 来自 step3 返回 JSON 的 `field_selection_result` 对象（含 `output_format` / `available_fields` / `selected_fields`） |
 | `parameter_confirmation_result` | object | ✅ | 来自 step4 |
 
-（**无** `host_session_id`——step5 无回调，不需要会话归属控制字段）
+（另有 `host_session_id`（`hidden_args`，必需）：step5 有完成回调，需据此判定状态归属）
 
 - **出参**
 
@@ -203,7 +203,7 @@ step → `status` → 定稿档位：
 { "status": "success",
   "input_schema": { "month": { "type": "string", "required": true, "description": "月份，格式 YYYY-MM", "example": "2026-09" } },
   "output": { "format": "CSV", "fields": ["order_id", "amount"] },
-  "steps": [ { "id": "step_1", "tool": "query_tool", "params": { "query": "...硬编码..." } } ],
+  "steps": [ { "id": "step_1", "tool": "query_tool", "params": { "query": "... WHERE month = '{{input.month}}' ..." } } ],
   "execution_plan": [ { "step_id": "step_1",
                         "intent": "获取指定月份的订单数据",
                         "expected_schema": { "order_id": "string", "amount": "number" },
@@ -215,10 +215,10 @@ step → `status` → 定稿档位：
 
 - 约束：
   - 成功时顶层固定为 `status`、`input_schema`、`output`、`steps`、`execution_plan`、`metadata` 六项。
-  - `steps` 与 `execution_plan` **等长且 `steps[i].id == execution_plan[i].step_id`**；`params` 为硬编码值，只有「上游输出被下游引用」时用 `{{step_1.output}}` 占位。
+  - `steps` 与 `execution_plan` **等长且 `steps[i].id == execution_plan[i].step_id`**；`params` 里**只允许两类占位符**：① 来自 `input_schema` 的输入参数写成 `{{input.<参数名>}}`（**每一次出现都要替换**，含嵌在长字符串内部的部分）；② 上游输出写成 `{{step_N.output}}`。其余值（工具固定选项、命令名、时间格式串）一律硬编码。
   - 字段必须来自输入，禁止臆造工具名 / 字段名 / 参数值（prompt 内的示例已标注为虚构）。
   - `input_schema` 为空时写成 `{}`。
-- **落 state**：模板由 `flexible_save_template` 写入 `plans_flexible`（见 §四）；**状态推进**由 `flexible_step5` 完成回调负责——`status:"success"` ⇒ 只把 `current_step` 置为 `templated`，**不写 `products`、不做落库**（`step_callback/step5_callback.rs`）。回调先于协调器调 `flexible_save_template` 触发，故 `current_step` 会先到 `templated`。
+- **落 state**：**状态推进 + 模板副本**由 `flexible_step5` 完成回调负责——`status:"success"` ⇒ 把 `current_step` 置为 `templated`，并把**整段输出**登记为产物 `template_payload`（`step_callback/step5_callback.rs`）。**落库**（写 `plans_flexible_sessions`）仍由 `flexible_save_template` 执行，但它改为**从 `flexible_state` 读这份副本**，不再由协调器转抄模板 JSON（见 §六-14）。回调先于协调器调 `flexible_save_template` 触发，故 `current_step` 会先到 `templated`。
 
 ---
 
@@ -233,19 +233,21 @@ step → `status` → 定稿档位：
 | `session_id` | ✅ | 原样照抄 system prompt 中的本会话 ID |
 
 - **出参**：`{loaded, current_step, products}`（无记录时 `loaded=false`、`current_step="none"`、`products={}`）。
-- **只读**：状态（`current_step` + `products`）由各 step 的完成回调登记，工具不再提供 `save`。`products` 的 key：`task_definition`、`output_format`、`execution_trace`、`compressed_context`、`field_selection_result`、`parameter_confirmation_result`。
+- **只读**：状态（`current_step` + `products`）由各 step 的完成回调登记，工具不再提供 `save`。`products` 的 key：`task_definition`、`output_format`、`execution_trace`、`compressed_context`、`field_selection_result`、`parameter_confirmation_result`、`template_payload`。
 
 ### 4.2 `flexible_save_template`
 
-定义：`crates/agent-gui/src/pages/plan/flexible/tool/flexible_save_template.rs:133-161`
+定义：`crates/agent-gui/src/pages/plan/flexible/tool/flexible_save_template.rs`
 
 | 入参 | 必需 | 说明 |
 |---|---|---|
 | `session_id` | ✅ | 原样照抄 |
-| `template` | ✅ | step5 返回的完整模板 JSON 对象（含五个顶层字段） |
+
+（**只有** `session_id`。模板数据**不来自参数**——工具自行读 `flexible_state` 的 `products.template_payload`；原 `template` 参数已移除，原因见 §六-14。）
 
 - **出参**：成功 `{saved: true, id, plan_id, version}`；失败返回 error。
-- **校验**（`flexible_save_template.rs:41-76`）：`template` 必须存在且为对象；`status == "error"` 直接拒绝；`steps` / `execution_plan` 必须存在、均为数组、长度相同且 `step_id` 一一对应。
+- **数据来源**：`flexible_state` 里 step5 回调登记的 `template_payload`；无该产物（step5 未定稿 / 重跑中）时返回 error 提示重跑 step5。
+- **校验**：`steps` / `execution_plan` 必须存在、均为数组、长度相同且 `step_id` 一一对应；`status == "error"` 直接拒绝。
 - 语义：同一会话反复产出会覆盖同一版本行，新会话首次产出新增一条。
 
 ---
@@ -267,7 +269,8 @@ step → `status` → 定稿档位：
   │     └─► parameter_confirmation_result(object)
   │
   └─► step5 ◄── task_definition + execution_trace + field_selection_result + parameter_confirmation_result
-        └─► 模板 6 字段 ──► flexible_save_template ──► plans_flexible_sessions（`templated` 由 step5 回调即刻推进）
+        └─► 模板 6 字段 ──► (回调) products.template_payload ──► flexible_save_template ──► plans_flexible_sessions
+                            （`templated` 由 step5 回调即刻推进；落库工具读 state 里的副本，不经协调器转抄）
 ```
 
 协调器传参要点（`flexible_global_system.toml`）：
@@ -299,6 +302,11 @@ step → `status` → 定稿档位：
 | 10 | step5 回调早于 `flexible_save_template` 触发，`templated` 会先落地 | 已在 prompt 与设计文档注明顺序，属既定取舍 |
 | 11 | prompt 把 `flexible_state` 描述为「流程状态的读写登记」 | 已改为只读 |
 | 12 | step2 prompt 的「运行上下文」与 schema `runtime_context` 对应不明 | 已在 prompt 写清语义（上一轮运行记录） |
+| 13 | **运行期实测**：`flexible_step1` 把 JSON 包进 markdown 代码块（且前面有两个空行），回调严格解析失败 → `flexible_state` 未登记 | 已修：回调改为逐级宽松解析（严格 → 剥围栏 → 取首个平衡对象）+ 失败时 `Retry` 让子 agent 重出；`flexible_step1.toml` 补「不要代码块、不要前后空行」 |
+| 14 | **运行期实测**：step5 原始输出 `execution_plan[1].expected_schema` 是合法的 `null`，但协调器把 step5 输出「转抄」成 `flexible_save_template` 的 `template` 参数时写成 `""`（还把 `step_1` 的 `"array"` 改成 `{"type":"array"}`）→ 落库数据不合契约 | 已修（**模板不再经 LLM 手**）：`StepSpec` 新增 `payload_key`，step5 回调把整段输出登记为 `products.template_payload`；`flexible_save_template` 移除 `template` 参数（schema 仅 `session_id`），改为从 state 读副本 |
+| 15 | 观察：step3 返回 `empty_result` 且用户选「继续推进」时，`flexible_state` 里没有 `field_selection_result` | **非缺陷**，属契约行为：回调对非定稿 status 不登记；后续 step4 的 `field_selection_result` 由协调器从 step3 返回内容构造并直传，不依赖 state |
+| 16 | **运行期实测**：step5 把 `builtin_execute_command` 的**数组**参数 `args` 写成对象 `{"item": "..."}`（应为 `["..."]`）；子 agent 原始输出（`seq=25`）即如此，与落库无关 | 已修（**prompt 缺数组示例**）：`flexible_step5.toml` 的 `steps` 规则补「`params` 每项类型必须与工具真实输入一致、严禁改变容器类型」约束，示例补数组参数 `"options": ["--utf8", "--no-header"]` |
+| 17 | **设计缺口**：`steps` 里来自 `input_schema` 的值被硬编码（`path`、命令串里的路径等），模板绑定录制时的具体值；执行器只能依赖 `dynamic_hints.param_mapping` 的文字描述让 LLM 替换，`steps` 就不是「零推理可跑」 | 已改（**输入注入点前移到 `steps`**）：规则改为「来自 `input_schema` 的值必须写成 `{{input.<参数名>}}`，**每一次出现都要替换**（含嵌在字符串内部）」；示例补 `'{{input.month}}'` / `orders_{{input.month}}.csv`；`param_mapping` 语义降级为「人类可读说明 + 兜底」 |
 
 **验证**：`cargo check -p planned-agent-gui` 0 error；6 个 prompt 经 `FilePromptManager` 实测全部可加载、协调器模板 `{{ session_id }}` 渲染正常（校验用一次性脚本，跑完已删）。
 
@@ -309,5 +317,8 @@ step → `status` → 定稿档位：
 
 其它记录：
 
-- step1~step5 **全部**带 `host_session_id`（`hidden_args`，协调器按 schema 传参）——五步都挂了完成回调；step5 的回调只推进档位，落库仍由 `flexible_save_template` 负责。
+- step1~step5 **全部**带 `host_session_id`（`hidden_args`，协调器按 schema 传参）——五步都挂了完成回调；step5 的回调推进档位并登记 `template_payload` 副本，落库仍由 `flexible_save_template` 负责（工具读 state 里的副本，不经协调器转抄）。
+- **`flexible_step5.toml` 的两条编辑陷阱**（都在本轮踩到、且都被一次性校验测试当场抓住，否则会直接坏在运行期）：
+  1. TOML 的 `"""` 多行字符串里 `\` **是转义符** —— 写 Windows 路径 `C:\data\in.txt` 会让 `\d` / `\i` 成为非法转义，整个文件 TOML 解析失败（prompt 加载不出来）。示例里请用 `C:/data/in.txt`。
+  2. 该 prompt 经 **tera 渲染**，`{{...}}` / `{%...%}` **必须**包在 `{% raw %}...{% endraw %}` 内；否则渲染时会报 `Variable \`input.month\` not found in context` 直接失败。注意包裹范围：示例块外（如块上方的说明行）**同样要包**。
 - 模板下拉的筛选是 `name.starts_with("chat/") || name.starts_with("flexible/")`，所以往 `prompts/` 下的 `chat` / `flexible` 目录放 `.md`/`.txt` 都会被 prompt-manager 注册并出现在下拉里。

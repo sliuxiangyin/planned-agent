@@ -3,12 +3,15 @@
 //! 归属定位：从 `SubAgentCallContext.arguments` 读取 `host_session_id`。
 //!
 //! 定稿判定（与 `flexible_step5.toml` 的输出契约一致）：
-//! - `{"status":"success", ...}` → 只推进 `current_step = "templated"`，**不写任何 `products`**。
+//! - `{"status":"success", ...}` → 推进 `current_step = "templated"`，并把**整段输出**
+//!   登记为产物 `template_payload`（模板副本）。
 //! - 其它（`status:"error"` / 非 JSON）→ **不登记**。
 //!
 //! 职责边界：本回调**不做**模板落库。`plans_flexible_sessions` 的写入（含
 //! `steps` / `execution_plan` 结构校验）仍由 `flexible_save_template` 工具负责——只有工具侧
-//! 才知道落库是否成功。回调只承担「状态推进 / 定稿记录」。
+//! 才知道落库是否成功。回调只承担「状态推进 / 定稿记录」加存一份模板副本，
+//! 副本的意义是让落库工具**直接从状态取模板**，不必经过协调器 LLM 转抄
+//! （转抄会改坏字段，例如把 `expected_schema: null` 写成 `""`）。
 //!
 //! 通用逻辑见 [`super::step_commit`]。
 
@@ -20,12 +23,13 @@ use crate::services::plans_flexible_service::PlansFlexibleService;
 
 use super::step_commit::{StepCallback, StepSpec};
 
-/// flexible_step5 的定稿契约：只推进档位，不写 `products`。
+/// flexible_step5 的定稿契约：推进档位，并把整段模板输出登记为 `template_payload`。
 const SPEC: StepSpec = StepSpec {
     agent: "flexible_step5",
     ok_status: "success",
     next_step: "templated",
     products: &[],
+    payload_key: Some("template_payload"),
     clear: &[],
 };
 

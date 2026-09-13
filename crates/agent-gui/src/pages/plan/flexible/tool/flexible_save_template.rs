@@ -15,9 +15,14 @@ use super::{error_result, read_session_id};
 
 /// `flexible_save_template` 执行器：把某会话 step5 产出的模板快照落库。
 ///
-/// `session_id` 由协调器经 `arguments.session_id` 传入（不再绑定会话 watch 槽）；
-/// `template` 为 step5 返回的完整模板 JSON。原 `step5_callback` 的 JSON 结构校验迁移至此，
-/// 校验失败返回 `is_error`，由父 agent 决定重跑 step5 或重传。
+/// `session_id` 由协调器经 `arguments.session_id` 传入（不再绑定会话 watch 槽）。
+///
+/// **模板数据不来自工具参数**：改为读 `flexible_state` 里 step5 回调登记的
+/// `template_payload`。原因：协调器 LLM 把 step5 输出「转抄」成工具参数时会改写字段，
+/// 线上实例——`execution_plan[1].expected_schema` 的 `null` 被写成 `""`、`step_1` 的
+/// `lines` 由 `"array"` 被"修正"成 `{"type":"array"}`。故模板一律由系统在 step5
+/// 定稿时**原样**存下，本工具只负责取用 + 校验 + 落库。
+/// 校验失败返回 `is_error`，由父 agent 决定重跑 step5。
 pub struct FlexibleSaveTemplateExecutor {
     plan_id: String,
     service: Arc<PlansFlexibleService>,
@@ -37,16 +42,32 @@ impl ToolExecutor for FlexibleSaveTemplateExecutor {
             Err(msg) => return error_result(&msg),
         };
 
-        // step5 结果产出：完整模板 JSON
-        let Some(template) = arguments.get("template") else {
-            return error_result(
-                "缺少 template：请把 step5 返回的完整模板 JSON（含 input_schema、output、steps、execution_plan、metadata）作为 template 传入。",
-            );
+        // 模板来源：step5 回调登记的 `template_payload`（见模块头注释：不经协调器转抄）。
+        let (current_step, products) = match self.service.load_state(&self.plan_id, &session_id).await
+        {
+            Ok(Some((step, products))) => (step, products),
+            Ok(None) => {
+                return error_result(&format!(
+                    "会话 {} 尚无流程状态记录：请先运行 flexible_step5 生成模板（定稿时系统会自动登记模板副本）。",
+                    session_id
+                ));
+            }
+            Err(e) => return error_result(&format!("读取会话流程状态失败: {}", e)),
         };
-        if !template.is_object() {
-            return error_result("template 必须是 JSON 对象（step5 返回的完整模板输出）。");
-        }
-        let json = template;
+        let products: Value = serde_json::from_str(&products).unwrap_or_else(|e| {
+            tracing::warn!(
+                "[flexible_save_template] 会话 {} 的 products 不是合法 JSON（{}），按空对象处理",
+                session_id,
+                e
+            );
+            json!({})
+        });
+        let Some(json) = products.get("template_payload").filter(|v| v.is_object()) else {
+            return error_result(&format!(
+                "会话 {} 尚未登记 step5 的模板副本（current_step={}）：请先运行 flexible_step5，确认其返回 status=success 后再调用本工具。",
+                session_id, current_step
+            ));
+        };
 
         // step5 异常分支可能输出 {"status":"error",...}
         if json.get("status").and_then(Value::as_str) == Some("error") {
@@ -133,30 +154,26 @@ fn take_or_default(json: &Value, key: &str, default: &str) -> String {
 pub fn flexible_save_template() -> Tool {
     Tool {
         name: "flexible_save_template".into(),
-        description: "保存某会话产出的模板快照到 plans_flexible（由父 agent 在 step5 返回 JSON 后显式调用）。\n\
+        description: "保存某会话产出的模板快照到 plans_flexible_sessions（step5 返回 success 后由父 agent 调用）。\n\
              \n\
-             用途：step5 子 agent 返回完整模板 JSON 后，协调器调用本工具把该模板按会话落库；\n\
-             同一会话反复产出会覆盖同一版本行，新会话首次产出则新增一条。\n\
+             用途：把 step5 定稿的模板按会话落库；同一会话反复产出会覆盖同一版本行，\n\
+             新会话首次产出则新增一条。\n\
              \n\
              session_id（必填）：原样照抄 system prompt「会话上下文」中给出的本会话 session ID。\n\
-             template（必填）：step5 返回的完整模板 JSON 对象（含 input_schema、output、steps、\n\
-             execution_plan、metadata 五个顶层字段）。\n\
+             **不要传模板内容**：模板由系统在 step5 定稿时原样登记，本工具自行读取；\n\
+             手工转抄模板 JSON 会改坏字段（例如把 null 写成 \"\"），一律以系统登记的副本为准。\n\
              \n\
-             校验失败（非对象 / status=error / steps 与 execution_plan 缺失或 step_id 不一一对应）\n\
-             会返回 error，此时请重跑 step5 或修正后重新传入。".into(),
+             校验失败（steps 与 execution_plan 缺失或 step_id 不一一对应）会返回 error，\n\
+             此时请重跑 step5。".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "session_id": {
                     "type": "string",
                     "description": "本会话的 session ID，原样照抄 system prompt 中给出的值"
-                },
-                "template": {
-                    "type": "object",
-                    "description": "step5 返回的完整模板 JSON（含 input_schema、output、steps、execution_plan、metadata）"
                 }
             },
-            "required": ["session_id", "template"]
+            "required": ["session_id"]
         }),
     }
 }

@@ -24,6 +24,16 @@ pub enum ResultDecision {
     /// - 子 agent 重新生成后，回调会被再次触发（最多重试 2 次）
     /// - 重试耗尽或子 agent 失败时，自动兜底使用原始结果
     Retry(String),
+    /// 中断本次子 agent 调用：**不再重试**，直接把 `String` 作为失败原因返回。
+    ///
+    /// 用于回调侧发生**不可重试的硬错误**（如流程状态写库失败、外部依赖不可用）——
+    /// 重试也修不好，而静默 [`Accept`](Self::Accept) 又会让上层误以为成功。
+    /// 返回后本次调用的 tool result 标记为 `is_error = true`、内容为 `String`，
+    /// 子 agent 不会重新生成。
+    ///
+    /// 与 [`Retry`](Self::Retry) 的分工：`Retry` 是「模型输出不对，让它重做」；
+    /// `Abort` 是「模型没错，但外部动作失败了，立刻收场并如实上报」。
+    Abort(String),
 }
 
 /// 本次子 agent 调用的上下文。
@@ -59,5 +69,6 @@ pub trait SubAgentResultCallback: Send + Sync {
     /// - `Accept`：接受结果
     /// - `Transform(text)`：替换 content
     /// - `Retry(msg)`：发送纠正消息给子 agent，重试后再次回调
+    /// - `Abort(reason)`：中断本次调用，`reason` 作为失败结果返回（不重试）
     async fn on_result(&self, ctx: &SubAgentCallContext, result: &ToolResult) -> ResultDecision;
 }

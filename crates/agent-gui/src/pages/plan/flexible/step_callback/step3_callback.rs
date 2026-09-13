@@ -25,6 +25,7 @@ const SPEC: StepSpec = StepSpec {
     ok_status: "fields_selected",
     next_step: "fields_selected",
     products: &["field_selection_result"],
+    payload_key: None,
     clear: &["parameter_confirmation_result"],
 };
 

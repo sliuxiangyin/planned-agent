@@ -1,6 +1,6 @@
 # 灵活模式 · step 回调会话归属设计（让回调动态拿到会话标识）
 
-> 状态：**阶段 1–5 已实施（step1~step5 全量回调 + 状态登记收敛为「回调唯一写入」）**，编译通过；仅剩运行时验收待做（见 §13 实施记录）
+> 状态：**阶段 1–6 已实施**（step1~step5 全量回调 + 状态登记收敛为「回调唯一写入」+ step5 模板副本消除协调器转抄），编译与单测通过；一次完整流程已端到端跑通（模板成功落库），并发多会话 / 挂起-恢复的运行时验收仍待做（见 §13、§15）
 > 关联：`docs/chat-flexible-多会话保活设计.md`（§3 D 是本方案的前身；本方案是它的**延伸**，不推翻其「父 prompt 注入 + 参数传参」机制）
 > 目标读者：`crates/agent-gui/src/pages/plan/flexible/` 与 `crates/planned-agent/src/chat/sub_agent/` 维护者
 > 前置阅读：`docs/chat-flexible-多会话保活设计.md` §2（保活模型）、§3 D（会话隔离机制与「为何不用 task-local」）
@@ -284,7 +284,7 @@ pub fn create_step2_callback(
 - **step2**：行为不变（改写为复用通用实现）。
 - **step3**：`status:"fields_selected"` ⇒ 写 `field_selection_result`，清 `parameter_confirmation_result`，推进 `fields_selected`。
 - **step4**：`status:"params_confirmed"` ⇒ 写 `parameter_confirmation_result`，推进 `params_confirmed`。
-- **step5**：`status:"success"` ⇒ **只推进 `current_step="templated"`，不写 `products`、不做落库**（`plans_flexible_sessions` 的写入与结构校验仍由 `flexible_save_template` 工具负责）。
+- **step5**：`status:"success"` ⇒ 推进 `current_step="templated"`，并把**整段输出**登记为 `products.template_payload`（模板副本，阶段 6 补）；**不做落库**（`plans_flexible_sessions` 的写入与结构校验仍由 `flexible_save_template` 工具负责，见 §15）。
 - **接线**：`page.rs` 四个 step 的 `register_sub_agent` 传入各自回调；step1 / step5 的 `input_schema` 补 `host_session_id`（`required`）并加入 `hidden_args`；协调器 prompt 的传参要求从「step2/3/4」扩到「`flexible_step1` ~ `flexible_step5`」，并在 §需求澄清（step1）与 §输出确认与模板化（step5）两处调用说明里补上该参数。
 
 待办 / 偏差：
@@ -293,3 +293,39 @@ pub fn create_step2_callback(
 - ~~§12 的两项现存问题未修~~ → **已修（阶段 5）**：`flexible_save_template` 已进协调器 `allowed_tools`；`max_tool_rounds: 2` 与 `builtin_read_documentation` 测试残留已还原（回默认 10）。
 - ~~协调器 prompt 中各处 `flexible_state` 的 `save` 步骤保留（与回调双写）~~ → **已移除（阶段 5）**：`flexible_state` 改为**只读**（删 `save` 及 `action`/`current_step`/`products` 参数），prompt 删除全部 `save` 与「产物一致性原则」整节、换为「重做与状态」；回调成为状态登记的**唯一写入方**。取舍：回调若因缺 `host_session_id` 而跳过登记，该步将没有任何状态记录（已用 schema `required` 约束协调器务必传参）。另同步：step5 入参 `field_selection_result` 由 `string` 改为 `object`；step3 入参 `output_format` 列入 `required`；step2 的 `runtime_context` 改为**补传**（上一轮 `compressed_context`）；step1 任务基线来源唯一化为 `flexible_state` 的 `products`。验证：6 个 prompt 经 `FilePromptManager` 实测全部可加载、`{{ session_id }}` 渲染正常。
 - step5 的回调在协调器调用 `flexible_save_template` **之前**触发，即 `current_step` 会先变成 `templated`；落库失败时协调器重跑 step5，回调再写一次（幂等）。
+
+## 14. 回调硬失败的中断通道（`ResultDecision::Abort`）
+
+**问题**：回调在完成态做的事不全是纯内存操作——`StepCallback` 需要 `merge_state` **写库**。写库失败时旧实现只 `tracing::error!` 然后 `Accept`（静默跳过登记），于是：协调器看到「正常」的 step 输出、以为已定稿并继续下一步，而 `flexible_state` 里根本没有产物。`Retry` 也不适用——模型重出一次照样写不进去。
+
+**方案**：`ResultDecision` 增加第四个变体 `Abort(String)`——中断本次子 agent 调用、**不重试**，语义＝「模型没错，但外部动作失败了，立刻收场并如实上报」：
+
+- `crates/planned-agent/src/chat/sub_agent/callback.rs`：新增 `Abort(String)` 及文档（与 `Retry` 的分工）。
+- `crates/planned-agent/src/chat/sub_agent/collect.rs`：`ResultDecision::Abort(reason)` 直接 `return Ok(SubAgentRunOutcome::Done(ToolResult { is_error: true, content: reason }))`，复用既有的 `SendOutcome::Failed` 错误通道，跳过重试循环。
+- `step_callback/step_commit.rs`：`merge_state` 返回 `Err` ⇒ `ResultDecision::Abort("… 流程状态登记失败（plan_id=…, host_session_id=…）：{e}")`，不再静默 `Accept`。
+- `flexible_global_system.toml`：补一条——step 工具返回 `is_error` 结果时，把原因如实转述给用户并**停下**，不进入下一步、不反复重试同一工具。
+
+`crates/tool-manager/src/sub_agent/executor.rs:137` 在 `Done` 分支只补 `call_id` 后原样返回，故 `is_error` 一路透传到父 agent 的 tool result（GUI 侧显示为错误结果）。验证：`cargo check -p planned-agent-gui` 通过。
+
+## 15. 模板副本：消除「协调器转抄」（阶段 6）
+
+**问题（运行期实测）**：一次完整流程跑通后，`plans_flexible_sessions.execution_plan[1].expected_schema` 落库成了 `""`。按 `chat_messages.sequence_order` 逐层取证：
+
+| 环节 | `expected_schema`（step_2） | `lines`（step_1） |
+|---|---|---|
+| step5 子 agent 原始输出（`seq=19`） | `null` ✅ 合乎契约 | `"array"` |
+| 协调器传给 `flexible_save_template` 的 `template` 参数（`seq=20`） | `""` ❌ | `{"type":"array"}` |
+| 落库后 | `""` | `{"type":"array"}` |
+
+即：**step5 没错、回调没错、落库也没错** —— 坏在「协调器 LLM 把 step5 的输出转抄成下一个工具的参数」这一步：它不是无损搬运，而是理解后重新生成 JSON，顺手把 `null` 写成 `""`、把 `"array"`「修正」成对象。（`flexible_step5.toml` 本就允许 `expected_schema` 为 `null`，表示该步不返回结构化数据。）
+
+**方案**：让模板**不经 LLM 的手**。
+
+- `StepSpec` 新增 `payload_key: Option<&'static str>`：定稿时把**整段输出对象**原样登记到该 key（`step_commit.rs` 的 `build_patch`）。
+- `step5_callback`：`payload_key: Some("template_payload")`，`products: &[]`。
+- `flexible_save_template`：schema **移除 `template` 参数**（只剩 `session_id`），改为 `load_state` 读 `products.template_payload`；缺副本时返回 error 提示重跑 step5。落库前的 `steps` / `execution_plan` 结构校验保留。
+- prompt：`flexible_global_system.toml` 的状态表、工具清单、step5 调用说明三处同步为「只传 `session_id`，模板由系统取用，不得转抄」。
+
+**顺带澄清（非缺陷）**：同一会话的 `flexible_state` 里没有 `field_selection_result`，不是登记失败 —— `seq=13` 显示 step3 返回 `empty_result`（无可提取的结构化字段），回调按契约**正确地**不登记；随后用户选「继续推进」，协调器直接把 `field_selection_result` 从 step3 返回内容构造后传给 step4。判定原则「宁可「不写」也不写错」在此按预期生效。
+
+验证：`cargo check -p planned-agent-gui` 0 error；`cargo test --bin planned-agent-gui` 20 passed（含 `build_patch` 的 3 个新单测：整段复制保留 `null`、`products` + `clear` 组合、缺产物不写 `null`）。

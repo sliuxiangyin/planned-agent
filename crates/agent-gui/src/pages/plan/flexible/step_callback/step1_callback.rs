@@ -27,6 +27,7 @@ const SPEC: StepSpec = StepSpec {
     ok_status: "task_defined",
     next_step: "task_defined",
     products: &["task_definition", "output_format"],
+    payload_key: None,
     clear: &[
         "execution_trace",
         "compressed_context",

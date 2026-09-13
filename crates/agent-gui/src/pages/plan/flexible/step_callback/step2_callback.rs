@@ -24,6 +24,7 @@ const SPEC: StepSpec = StepSpec {
     ok_status: "success",
     next_step: "executed",
     products: &["execution_trace", "compressed_context"],
+    payload_key: None,
     clear: &["field_selection_result", "parameter_confirmation_result"],
 };
 
