@@ -25,8 +25,8 @@ use crate::pages::plan::shared::session::SessionManager;
 use crate::services::plans_flexible_service::PlansFlexibleService;
 
 use super::session_host::FlexibleSessionHost;
-use super::step2_callback::create_step2_callback;
-use super::HOST_SESSION_ID_FIELD;
+use super::step_callback::create_step2_callback;
+use super::step_callback::HOST_SESSION_ID_FIELD;
 use super::tool::{
     flexible_state_tool, flexible_save_template, FlexibleStateExecutor, FlexibleSaveTemplateExecutor,
 };

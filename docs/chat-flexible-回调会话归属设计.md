@@ -1,6 +1,6 @@
 # 灵活模式 · step 回调会话归属设计（让回调动态拿到会话标识）
 
-> 状态：**设计待评审**（本文件只描述方案，未改动任何代码）
+> 状态：**阶段 1–3 已实施（step2 路径）**，三 crate 编译通过；step3/step4 的回调下沉与运行时验收待做（见 §13 实施记录）
 > 关联：`docs/chat-flexible-多会话保活设计.md`（§3 D 是本方案的前身；本方案是它的**延伸**，不推翻其「父 prompt 注入 + 参数传参」机制）
 > 目标读者：`crates/agent-gui/src/pages/plan/flexible/` 与 `crates/planned-agent/src/chat/sub_agent/` 维护者
 > 前置阅读：`docs/chat-flexible-多会话保活设计.md` §2（保活模型）、§3 D（会话隔离机制与「为何不用 task-local」）
@@ -247,8 +247,8 @@ pub fn create_step2_callback(
 
 ### 收尾
 
-- [ ] `cargo check` 三 crate 全绿
-- [ ] 视情况更新 `docs/chat-flexible-多会话保活设计.md` §3 D，加指向本文件的回链
+- [x] `cargo check` 三 crate 全绿（`planned-agent` / `planned-agent-gui` / `planned-agent-tool-manager`）
+- [x] 已更新 `docs/chat-flexible-多会话保活设计.md` §3 D，加指向本文件的回链
 
 ## 12. 相关发现（不在本方案范围，但同属灵活模式流程）
 
@@ -266,3 +266,20 @@ pub fn create_step2_callback(
    - `builtin_read_documentation` 相关条目（`:66-71` 注释说明为触顶复现测试用）。
 
 > 这两项建议单独修，不与本方案混提。
+
+## 13. 实施记录
+
+阶段 1–3（step2 路径）已落地，三 crate 编译通过（`planned-agent` / `planned-agent-gui` / `planned-agent-tool-manager`）：
+
+- **核心库**：新增 `SubAgentCallContext`（`agent_name` / `tool_call_id` / `arguments`）并扩 `SubAgentResultCallback::on_result` 签名；`collect_until_outcome` 增 `arguments` 形参，`Suspended` 分支随 `ChatSubAgentSession` 保存、`resume()` 回传；`SubAgentRunner::start()` 透传。
+- **控制字段隔离**：未在核心库硬编码字段名，而是新增 `ChatConfig.hidden_args: Vec<String>`（默认空 ⇒ 行为不变），由 GUI 在 step2/3/4 配置里声明 `host_session_id`，`runner` 据此在拼接 task 文本前剔除。
+- **服务层去重**：新增 `PlansFlexibleService::merge_state`（读-改-写合并，值为 `null` ⇒ 删除），`flexible_state` 工具的 `save` 改为复用它。
+- **回调**：`FlexibleStep2Callback` 携带 `plan_id` + `service`，按契约判定定稿后登记 `executed`（写入 `execution_trace`/`compressed_context`，并清 `field_selection_result`/`parameter_confirmation_result`）；`error` / 非 JSON 不推进。**回调统一放在 `pages/plan/flexible/step_callback/` 目录**（`mod.rs` 存共享的 `HOST_SESSION_ID_FIELD` / `read_host_session_id`，各 step 回调一个子模块），便于 step3/step4 后续扩展。
+- **契约收紧**：`flexible_step3.toml` 非定稿输出改严格首行标记。
+
+待办 / 偏差：
+
+- **step3 / step4 的回调下沉未做**（需各自新建回调 + 首行标记解析 + `page.rs` 注册）；这两步的状态登记目前仍由协调器 `flexible_state` 工具完成。
+- §10 的**并发归属**与**挂起-恢复归属**属运行时验收，尚未执行（需启动应用手测）。
+- §12 的两项现存问题未修。
+- 协调器 prompt 中「step2 成功后 `flexible_state` save(executed)」的步骤**保留**（与回调双写且语义幂等）——回调失败时它仍是兜底。

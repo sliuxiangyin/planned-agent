@@ -3,6 +3,7 @@
 //! - `page` — `FlexiblePage` 组件（壳：会话集合 + plan 级注册/模板）
 //! - `session_host` — `FlexibleSessionHost` 组件（单会话常驻宿主）
 //! - `tool` — 协调器旁路工具（`flexible_state` / `flexible_save_template`）
+//! - `step_callback` — step 子 agent 完成回调（用参数里的 `host_session_id` 定位归属会话）
 
 pub(crate) mod chat_flexible_message_storage;
 pub(crate) mod chat_service_factory;
@@ -10,24 +11,7 @@ pub(crate) mod controller;
 pub(crate) mod page;
 pub(crate) mod session_boot;
 pub(crate) mod session_host;
-pub(crate) mod step2_callback;
+pub(crate) mod step_callback;
 pub(crate) mod tool;
 
 pub(crate) use page::FlexiblePage;
-
-/// 子 agent 调用参数中承载「宿主会话 id」的字段名。
-///
-/// 见 `docs/chat-flexible-回调会话归属设计.md` §5：该字段由父协调器把 system prompt
-/// 「会话上下文」里的 session_id **原样照抄**进 step 子 agent 的调用参数，供子 agent
-/// 完成回调（`SubAgentResultCallback`）定位「本次执行属于哪个会话」。
-///
-/// 注意：不要与子 agent 挂起-恢复用的 `session_id`（`SubAgentSessionStore` 的内存键）
-/// 混用 —— 那个是运行期句柄，这个是宿主会话（落库归属）。
-pub(crate) const HOST_SESSION_ID_FIELD: &str = "host_session_id";
-
-/// 从子 agent 调用参数里读取宿主会话 id（字段缺失或类型不符时返回 `None`）。
-pub(crate) fn read_host_session_id(args: &serde_json::Value) -> Option<String> {
-    args.get(HOST_SESSION_ID_FIELD)
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
-}
