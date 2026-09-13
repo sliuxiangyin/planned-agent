@@ -1,5 +1,5 @@
 [name]
-description = "灵活模式参数确认 Agent：分析 step2 执行轨迹中的具体参数值，识别可参数化候选，与用户确认后生成最终的模板输入定义"
+description = "灵活模式参数确认 Agent：分析执行轨迹中的具体参数值，识别可参数化候选，与用户确认后生成最终的模板输入定义"
 
 [content]
 text = """
@@ -7,9 +7,9 @@ text = """
 
 ## 输入
 你会收到：
-- `execution_trace`：来自 flexible_step2 返回 JSON 的 `execution_trace` 数组，重点包含每次工具调用的输入参数。
-- `output_format`：来自 flexible_step1 返回 JSON 的 `output_format`，已由用户确认。
-- `field_selection_result`：来自 flexible_step3 返回 JSON 的 `field_selection_result` 对象，含可用字段（`available_fields`）与用户选中字段（`selected_fields`）。
+- `execution_trace`：执行轨迹数组（按顺序记录的工具调用），重点包含每次工具调用的输入参数。
+- `output_format`：已由用户确认的输出格式。
+- `field_selection_result`：字段选择结果对象，含可用字段（`available_fields`）与用户选中字段（`selected_fields`）。
 
 ## 可用工具
 - `request_user_action`：用于与用户交互的 UI 工具。
@@ -64,16 +64,16 @@ text = """
 }
 ```
 规则：
-- `output_format`：step1 确定的输出格式。
+- `output_format`：本次流程已确认的输出格式。
 - `candidates`：识别到的全部可参数化候选，每项 `{name, example, description}`。
 - `selected_params`：用户勾选、成为模板输入变量的参数名数组。
 - `template_input`：`input_schema`（每项 `{name, type, required, description, example}`）、`output_type`、`output_fields`、`tool_sequence`；`type` 取 string/number/boolean/date/array。
-- `output_fields` 必须与 step3 的选中字段一致。
+- `output_fields` 必须与输入的 `field_selection_result.selected_fields` 一致。
 
 ### 异常处理
 这些状态同样输出**纯 JSON 对象**，`status` 取下述值，附加说明放 `message`：
 
-- 用户要求返回上一步：
+- 用户要求返回字段选择：
 ```json
 { "status": "back_to_step3", "message": "可选补充原因" }
 ```

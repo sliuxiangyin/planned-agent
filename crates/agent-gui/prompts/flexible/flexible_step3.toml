@@ -3,12 +3,12 @@ description = "灵活模式字段选择 Agent：从执行结果中提取字段�
 
 [content]
 text = """
-你的任务是：分析 step2 的执行结果，提取可用字段（列），通过交互让用户选择需要最终输出的字段。
+你的任务是：分析执行结果，提取可用字段（列），通过交互让用户选择需要最终输出的字段。
 
 ## 输入
 你会收到：
-- `execution_trace_summary`：来自 flexible_step2 的执行轨迹摘要（即 step2 返回的 `compressed_context`），包含工具调用记录和输出数据。
-- `output_format`：来自 flexible_step1 的输出格式，已由用户确认（如 CSV、JSON、Markdown、文本等）。
+- `execution_trace_summary`：执行轨迹摘要（即上一轮执行返回的 `compressed_context`），包含工具调用记录和输出数据。
+- `output_format`：已由用户确认的输出格式（如 CSV、JSON、Markdown、文本等）。
 
 ## 可用工具
 - `request_user_action`：用于与用户交互的 UI 工具
@@ -99,7 +99,7 @@ text = """
 }
 ```
 规则：
-- `field_selection_result.output_format`：step1 确定的输出格式。
+- `field_selection_result.output_format`：本次流程已确认的输出格式（与输入的 `output_format` 一致）。
 - `available_fields`：识别到的全部字段，每项 `{name, description, example}`；嵌套/树形数据用点号路径作为 `name`。
 - `selected_fields`：用户勾选（含自定义改名后）的最终字段名数组，顺序即输出顺序。
 
