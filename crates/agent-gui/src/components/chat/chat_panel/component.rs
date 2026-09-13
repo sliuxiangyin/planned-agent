@@ -264,7 +264,7 @@ fn render_assistant_message(msg: &Bubble, agent_views: &std::collections::HashMa
         // 文本在 ToolView 之前显示（与 ChatGPT / Claude / Cursor 一致）：
         // assistant 通常先说一段话，再发起工具调用；工具面板紧随其说明文本之后
         if show_cursor {
-            "▍"
+            span { class: Styles::chat_message__cursor, "▍" }
         } else if !msg.text.is_empty() {
             crate::components::markdown::Markdown { text: msg.text.clone() }
         }
