@@ -1,4 +1,8 @@
-/* ── ChatUIActionsView 组件样式 ─────────────────────────────────────── */
+/* ── ChatUIActionsView 组件样式 ─────────────────────────────────────────
+   Qoder 风格：单选 / 多选共用同一套「选项行」列表样式。
+   选中态、推荐角标、自定义答案行都靠 data-* 属性区分（css module 会重写类名，
+   属性选择器不受影响）。
+   ──────────────────────────────────────────────────────────────────── */
 
 /* 整卡：作为一张悬浮卡片（圆角 + 阴影 + 外间距），与消息流分离 */
 .chat-ui-actions {
@@ -10,10 +14,13 @@
     box-shadow: 0 3px 14px rgba(0, 0, 0, 0.12);
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 10px;
+    /* 卡片可聚焦（聚焦后键盘 A–F 选行），但不要默认焦点外框 */
+    outline: none;
 }
 
-/* 卡头一行：左侧引导 message，右侧进度 */
+/* ── 卡头：左侧引导 message，右侧页码 ─────────────────────────────── */
+
 .wizard-header {
     display: flex;
     justify-content: space-between;
@@ -32,136 +39,197 @@
 
 .wizard-progress {
     flex-shrink: 0;
-    font-size: 0.72rem;
-    color: var(--secondary-color-4);
+    font-size: 0.74rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--secondary-color-5);
     white-space: nowrap;
 }
 
-/* 底部导航：左「取消」、右「上一步 / 下一步」 */
+/* ── 当前问题卡片 ─────────────────────────────────────────────────── */
+
+.question-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+/* 标题行：header 小标签 + 问题正文 + 单选/多选标注 */
+.question-title-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.question-header {
+    flex-shrink: 0;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--secondary-color-4);
+    background: var(--primary-color-4);
+    border-radius: 999px;
+    padding: 1px 8px;
+    line-height: 1.5;
+}
+
+.question-text {
+    font-size: 0.85rem;
+    color: var(--secondary-color-3);
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    min-width: 0;
+}
+
+.question-kind {
+    flex-shrink: 0;
+    font-size: 0.72rem;
+    color: var(--secondary-color-5);
+}
+
+/* ── 选项列表（单选 / 多选同款） ───────────────────────────────────── */
+
+.options-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.option-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--primary-color-4);
+    border-radius: 8px;
+    background: var(--primary-color-1);
+    cursor: pointer;
+    user-select: none;
+    min-width: 0;
+    transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+/* 未选中时 hover 反馈（自定义答案行是输入行，不做整行变色） */
+.option-row:not([data-picked="true"]):not([data-custom="true"]):hover {
+    background: var(--primary-color-3);
+    border-color: var(--primary-color-6);
+}
+
+/* 选中态：整行高亮 + 主色描边 + 左侧强调条 */
+.option-row[data-picked="true"] {
+    background: var(--primary-color-5);
+    border-color: var(--focused-border-color);
+    box-shadow: inset 2px 0 0 0 var(--focused-border-color);
+}
+
+/* 行首字母序号 A/B/C/D… */
+.option-letter {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.25rem;
+    height: 1.25rem;
+    border-radius: 5px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    line-height: 1;
+    color: var(--secondary-color-5);
+    background: var(--primary-color-5);
+    transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.option-row[data-picked="true"] .option-letter {
+    color: var(--primary-color);
+    background: var(--focused-border-color);
+}
+
+.option-body {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    flex: 1;
+    min-width: 0;
+}
+
+.option-label {
+    font-size: 0.82rem;
+    color: var(--secondary-color-4);
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
+
+.option-row[data-picked="true"] .option-label {
+    color: var(--secondary-color-1);
+}
+
+.option-desc {
+    font-size: 0.74rem;
+    color: var(--secondary-color-5);
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+/* 「推荐」角标（options[].recommended == true） */
+.recommended-badge {
+    flex-shrink: 0;
+    font-size: 0.68rem;
+    line-height: 1.5;
+    padding: 0 6px;
+    border-radius: 999px;
+    color: var(--secondary-success-color);
+    background: var(--primary-success-color);
+    border: 1px solid var(--secondary-success-color);
+}
+
+/* ── 「输入自定义答案」行：行内常驻输入框（没有展开态） ─────────── */
+
+/* 这一行整体是输入行：光标用文本形，不暗示"整行可点" */
+.option-row[data-custom="true"] {
+    cursor: text;
+}
+
+/* 输入框占满内容区，字号/行高与 .option-label 对齐；无边框、透明底 */
+.custom-input {
+    flex: 1;
+    min-width: 0;
+    padding: 0;
+    border: none;
+    background: transparent;
+    outline: none;
+    font-family: inherit;
+    font-size: 0.82rem;
+    line-height: 1.4;
+    color: var(--secondary-color-4);
+}
+
+.custom-input::placeholder {
+    color: var(--secondary-color-5);
+    opacity: 1;
+}
+
+/* 输入非空时整行 data-picked="true"，输入文字与选中选项行同色 */
+.option-row[data-picked="true"] .custom-input {
+    color: var(--secondary-color-1);
+}
+
+/* ── 底部操作栏：左「推荐选项」，右「取消 / 上一步 / 继续」 ──────── */
+
 .wizard-nav {
     display: flex;
     justify-content: space-between;
     align-items: center;
     gap: 8px;
-    padding-top: 2px;
+    padding-top: 8px;
+    border-top: 1px solid var(--primary-color-4);
+}
+
+.recommend-btn {
+    flex-shrink: 0;
+    white-space: nowrap;
 }
 
 .wizard-nav-actions {
     display: flex;
     gap: 6px;
-}
-
-/* 单选按钮组：同行 flex-wrap 排列 */
-.action-buttons {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-}
-
-/* Select 类型：虚线边框区分（wrapper span → 内层 Button 组件的 button 元素） */
-.select-btn button {
-    border-style: dashed;
-}
-
-/* Input 类型：独占整行，输入框自动填充剩余宽度 */
-.input-row {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    width: 100%;
-}
-
-.input-row input {
-    flex: 1;
-    min-width: 0;
-}
-
-/* 「自定义回答」按钮态：整行，主按钮宽 100%，可清除 */
-.custom-trigger-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-}
-
-/* 触发按钮撑满可用宽度（已填时作为摘要显示） */
-.custom-trigger-row button,
-.custom-trigger-row .custom-trigger-btn {
-    flex: 1;
-    width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.custom-clear-btn {
-    flex-shrink: 0;
-}
-
-/* 展开后的输入区 */
-.custom-edit-row {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    width: 100%;
-}
-
-.custom-edit-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 6px;
-}
-
-/* 多选复选框组 */
-.multi-select-group {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding: 4px 0;
-}
-
-.checkbox-label {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 0.82rem;
-    color: var(--secondary-color-5);
-    cursor: pointer;
-    user-select: none;
-    min-width: 0;
-    overflow-wrap: anywhere;
-}
-
-.checkbox-label input[type="checkbox"] {
-    accent-color: var(--primary-color);
-    cursor: pointer;
-}
-
-/* ── 当前问题卡片 ───────────────────────────────────────────── */
-
-.question-card {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding: 8px 10px;
-    border-left: 3px solid var(--primary-color-4);
-    background: var(--primary-color-1);
-    border-radius: 6px;
-}
-
-/* 小节标题（header）—— 答案键/短标签 */
-.question-header {
-    font-weight: 600;
-    font-size: 0.8rem;
-    color: var(--primary-color);
-}
-
-/* 问题全文 */
-.question-text {
-    font-size: 0.85rem;
-    color: var(--secondary-color-5);
-    line-height: 1.4;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    min-width: 0;
 }

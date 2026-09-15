@@ -119,15 +119,22 @@ pub struct UIQuestion {
     pub header: String,          // 短标签（≤4 字，同批内唯一），答案回传键
     pub question: String,        // 问题全文
     pub options: Vec<UIOption>,  // 用户可点的选项（2..5 个）
-    pub multi: bool,             // false=单选（默认）；true=多选，前端自动补「提交」
-    pub allow_input: bool,       // 默认 true=带「自定义回答」输入框
+    pub multi: bool,             // false=单选（默认，点选即自动进下一题）；true=多选，需手动点「继续」
+    pub allow_input: bool,       // 默认 true=选项列表末尾附一行行内输入框（placeholder「输入自定义答案」）
 }
 pub struct UIOption {
-    pub label: String,            // 人看的文本
-    pub description: Option<String>, // 可选 tooltip
+    pub label: String,            // 人看的文本（行主文案）
+    pub description: Option<String>, // 可选补充说明（行内灰色副文案）
     pub value: Option<String>,    // 机器用的实际值，缺省回 label
+    pub recommended: bool,        // true=推荐项（每题至多一个）；前端加「推荐」角标 + 左下角「推荐选项」可点
 }
 ```
+
+前端渲染（`chat_ui_actions_view`，Qoder 风格逐题向导卡片）：卡头 = `message` + 右上角页码 `x/N`；
+当前题 = `header` 小标签 + `question` + `(单选)/(多选)` 标注；**单选/多选共用同一套选项行样式**
+（行首 `A/B/C/D` 字母序号 + `label` 主文案 + `description` 灰色副文案 + 可选「推荐」角标，整行高亮表示选中）；
+底部 = 左「✏️ 推荐选项」、右「取消 / 上一步 / 继续」（**当前题未作答时「继续」置灰**，末题「继续」即提交）。
+卡片聚焦时支持键盘 `A`–`F` 直接选中对应行（按到自定义答案行则把光标移进其输入框）。
 
 ---
 

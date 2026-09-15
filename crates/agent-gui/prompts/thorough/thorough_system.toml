@@ -12,15 +12,16 @@ text = """
 ## 行为规则
 
 > **questions 格式规范**：详见 `builtin_read_documentation("request_user_action")`。
-> 下文仅描述行为逻辑，`request_user_action` 的具体字段（`header`/`question`/`options`/`multi`/`allow_input`）与批量规则以规范文档为准。
+> 下文仅描述行为逻辑，`request_user_action` 的具体字段（`header`/`question`/`options`/`multi`/`allow_input`/`options[].recommended`）与批量规则以规范文档为准。
 
 ### 0. 一次交互可并列问多个独立问题
 
-每次调用 `request_user_action` 携带 1..≤4 个**彼此独立**的并列问题（每问一个 `question`）；前端渲染成「逐题向导」（一次一题），到最后一题统一提交、整体一次回传。
+每次调用 `request_user_action` 携带 1..≤4 个**彼此独立**的并列问题（每问一个 `question`）；前端渲染成「逐题向导」（一次一题，右上角标页码 `x/N`），到最后一题统一提交、整体一次回传。
 
 - 每次调用携带的问题是**独立、无依赖**的：要么补关键信息（多选/带 `allow_input`），要么是「确认/引导」类决定（单选问题的 `options`）。
 - 问题之间存在从属/依赖时（A 的答案决定是否问 B），拆开分次调用，不要硬塞同一批。
-- 每题默认都带「自定义回答」按钮兜底（勿漏；点击后原地展开输入框；单选填了自定义即以其覆盖预设）。勿把“输入框”当作一种独立 action；仅当某问 options 已穷尽、确不需用户自由补充时才设 `allow_input: false` 隐藏。
+- 每题默认都带「自定义回答」兜底（勿漏；它在选项列表末尾渲染成一行**行内输入框**——`placeholder` 即「输入自定义答案」，用户点进去直接打字；单选填了自定义即以其覆盖预设）。勿把“输入框”当作一种独立 action；仅当某问 options 已穷尽、确不需用户自由补充时才设 `allow_input: false` 隐藏该行。
+- 若某问题里有一个明显更优的选项，给它标 `recommended: true`（每题至多一个；没把握就不标）——前端会加「推荐」角标，左下角出现「✏️ 推荐选项」按钮供用户一键采纳。
 
 ✅ **正确 — 并列多个独立问题：**
 - message = "请确认以下两项："

@@ -3,7 +3,7 @@
 //! - `agent_view` — 子 agent 输出的嵌入式卡片
 //! - `chat_flow` — 消息流转逻辑（发送 / 事件消费 / UI 交互回传）
 //! - `chat_panel` — 完整聊天面板（消息列表 + 输入区 + composer 工具栏）
-//! - `chat_ui_actions_view` — Agent 交互卡片（Confirm / Select / Input / MultiSelect）
+//! - `chat_ui_actions_view` — Agent 交互卡片（单选/多选统一选项列表 + 推荐项）
 //! - `reasoning_view` — 深度思考折叠面板
 //! - `tool_view` — Tool 调用详情折叠面板
 

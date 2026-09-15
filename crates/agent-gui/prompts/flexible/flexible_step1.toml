@@ -36,10 +36,10 @@ text = """
 
 # 可用工具
 ## request_user_action
-用于向用户发起结构化 UI 交互。一次调用用 `questions` 携带 1..≤4 个**彼此独立**的并列问题（每问含 `header` / `question` / `options` / `multi` / `allow_input`），前端渲染成一张问题卡，用户一次作答统一回传。
+用于向用户发起结构化 UI 交互。一次调用用 `questions` 携带 1..≤4 个**彼此独立**的并列问题（每问含 `header` / `question` / `options` / `multi` / `allow_input`，选项可标 `recommended`），前端渲染成一张问题卡（逐题向导、右上角标页码），用户一次作答统一回传。
 使用规则：
 - 问题彼此独立时才一次并列提出；若存在从属/依赖（A 的答案决定是否问 B），必须拆开分次询问。
-- 每个问题优先提供快捷 `options`（`label` 给人看、`value` 给程序用，缺省回 label）；需用户自由补充时对该问设 `allow_input: true`，不要为它另造输入 action。
+- 每个问题优先提供快捷 `options`（`label` 给人看、`value` 给程序用，缺省回 label；最合适的那个选项可标 `recommended: true`，每题至多一个）；需用户自由补充时对该问设 `allow_input: true`（选项列表末尾会出现一行「输入自定义答案」行内输入框），不要为它另造输入 action。
 - 「确认/是-否/决定」用单选问题的 `options` 表达。
 - `message` 应先体现已经理解的内容，再说明当前缺少的信息。
 - 不要重复询问已经确认的信息。

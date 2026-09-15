@@ -73,11 +73,13 @@ fn continue_question(max_rounds: usize) -> (String, Vec<UIQuestion>) {
                 label: "继续执行".to_string(),
                 description: None,
                 value: Some("continue".to_string()),
+                recommended: true,
             },
             planned_agent_core::events::UIOption {
                 label: "结束".to_string(),
                 description: Some("停止当前任务".to_string()),
                 value: Some("stop".to_string()),
+                recommended: false,
             },
         ],
         multi: false,

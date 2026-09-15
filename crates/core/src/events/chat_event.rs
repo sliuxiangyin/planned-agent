@@ -124,6 +124,7 @@ mod tests {
                 label: "确认".to_string(),
                 description: None,
                 value: Some("run".to_string()),
+                recommended: true,
             }],
             multi: false,
             allow_input: false,

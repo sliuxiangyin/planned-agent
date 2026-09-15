@@ -151,14 +151,15 @@ fn request_user_action_tool() -> Tool {
     Tool {
         name: "request_user_action".into(),
         description:
-            "向用户发起一批并列问题（1-4 个，彼此独立），前端渲染成逐题向导卡片：一次只显示一题并带步骤进度，用户逐题作答，到最后一题才统一提交、整体回传一次。调用后必须等待用户作答，不得自行假设或套用默认值。\n\
+            "向用户发起一批并列问题（1-4 个，彼此独立），前端渲染成逐题向导卡片：一次只显示一题、右上角标页码（如 1/4），用户逐题作答，到最后一题才统一提交、整体回传一次。调用后必须等待用户作答，不得自行假设或套用默认值。\n\
              \n\
-             每个问题（question）提供若干选项（options）供用户选择：\n\
-             - multi=false（默认）单选：点选即选中并自动进入下一题。需要「确认/跳过/执行」类决定时，把它们做成单选 options（如「执行 / 暂不执行」）。\n\
-             - multi=true 多选：勾选后需点「下一步」继续。\n\
-             - allow_input：每题**默认都带**一个「自定义回答」按钮（点击后原地展开输入框），供用户对预设都不满意时自由填写。单选场景下只要用户填了自定义文本，就**以该文本覆盖所选预设**作为该题答案（单选仍为单值）；仅当某问 options 已穷尽、确不需用户补充时才设 allow_input=false 隐藏。\n\
-             - 卡片底部有「取消」（跳过整批）/「上一步」；若用户取消整批，回传为空串，按未作答处理。\n\
-             - options[].label 给人看，options[].value 给程序用；回传用 value（缺省回 label）。每问 2-5 项，推荐项放第一个。\n\
+             每个问题（question）提供若干选项（options），渲染成一列选项行（单选/多选外观一致，行首带 A/B/C/D 字母）：\n\
+             - multi=false（默认）单选：选项行互斥，点选即选中并自动进入下一题。需要「确认/跳过/执行」类决定时，把它们做成单选 options（如「执行 / 暂不执行」）。\n\
+             - multi=true 多选：可勾选多项，勾选后点底部「继续」进入下一题。\n\
+             - 卡片底部有「继续」/「上一步」/「取消」：**当前题未作答时「继续」是置灰的（不能空题跳过）**；「上一步」回退一题，「取消」跳过整批。\n\
+             - allow_input：每题**默认都带**，在选项列表末尾附一行**行内输入框**（`placeholder` 即「输入自定义答案」，用户点进去直接打字），供用户对预设都不满意时自由填写。单选场景下只要用户填了自定义文本，就**以该文本覆盖所选预设**作为该题答案（单选仍为单值）；仅当某问 options 已穷尽、确不需用户补充时才设 allow_input=false 隐藏。\n\
+             - 推荐项：把你认为最合适的那个选项标 recommended=true（**每题至多一个**；没有把握就都不标）。标了之后卡片左下角会出现可点的「推荐选项」按钮，用户点它即一键采纳（单选=选中并推进、多选=勾上该行）。\n\
+             - options[].label 给人看，options[].value 给程序用；回传用 value（缺省回 label）。每问 2-5 项。\n\
              - 同批问题必须彼此独立、不可存在依赖；一次调用只发起一次用户交互，作答统一在最后一题一次性回传。"
                 .into(),
             input_schema: json!({
@@ -177,18 +178,19 @@ fn request_user_action_tool() -> Tool {
                         "properties": {
                             "header": { "type": "string", "description": "短标签（建议 ≤4 字）；同批内唯一，作为该题答案的键" },
                             "question": { "type": "string", "description": "问题全文，说明需要用户做什么决定" },
-                            "multi": { "type": "boolean", "description": "false=单选（默认，点选即自动进入下一题）；true=多选（勾选后需点「下一步」）" },
-                            "allow_input": { "type": "boolean", "description": "默认 true = 选项下显示「自定义回答」按钮（点击原地展开输入框；单选填了自定义即以其覆盖预设）。仅当该问 options 已穷尽、确不需用户补充时设 false 隐藏" },
+                            "multi": { "type": "boolean", "description": "false=单选（默认，点选即自动进入下一题）；true=多选（勾选后需点底部「继续」）" },
+                            "allow_input": { "type": "boolean", "description": "默认 true = 选项列表末尾附一行行内输入框（placeholder「输入自定义答案」；单选填了自定义即以其覆盖预设）。仅当该问 options 已穷尽、确不需用户补充时设 false 隐藏" },
                             "options": {
                                 "type": "array",
-                                "description": "可选答案（2-5 项；推荐项放第一个）",
+                                "description": "可选答案（2-5 项）",
                                 "items": {
                                     "type": "object",
                                     "required": ["label"],
                                     "properties": {
-                                        "label": { "type": "string", "description": "人看的展示文本" },
-                                        "description": { "type": "string", "description": "tooltip 补充说明，可选" },
-                                        "value": { "type": "string", "description": "程序用实际数据值（可选）；回传用 value，缺省回 label" }
+                                        "label": { "type": "string", "description": "人看的展示文本（行主文案）" },
+                                        "description": { "type": "string", "description": "补充说明，可选；会作为该行的灰色副文案展示" },
+                                        "value": { "type": "string", "description": "程序用实际数据值（可选）；回传用 value，缺省回 label" },
+                                        "recommended": { "type": "boolean", "description": "true = 该选项是推荐项（每题至多一个，没把握就不标）；前端会加「推荐」角标并让底部「推荐选项」按钮可点" }
                                     }
                                 }
                             }

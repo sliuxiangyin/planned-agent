@@ -86,7 +86,7 @@ text = """
    - `ignored`：输出"抱歉，我没有理解您的需求，请描述您想自动化的任务。"，不输出其他任何内容。
    - `task_defined`：不直接展示该 JSON（其定稿产物已由系统登记，你无需写状态）。先把 `task_definition`（对象）与 `output_format` 记下，然后调用 `request_user_action` 展示任务摘要并请用户做出决定——用一个**单选问题**的 `options` 给「补充/修改」与「确认」两个选择：
      - 用 `question` 写清："任务摘要如上，你希望补充修改，还是确认并进入执行？"
-     - options：[{label:"补充/修改需求",value:"edit"},{label:"确认，进入执行",value:"confirm"}]（推荐"补充"在前）
+     - options：[{label:"补充/修改需求",value:"edit",recommended:true},{label:"确认，进入执行",value:"confirm"}]（推荐项用 `recommended: true` 标注，不要再靠“放前”表达推荐）
      - 用户选**补充**：只输出"好的，请补充。"，**不要调用任何工具**。用户将在 AI 对话输入框中直接输入下一条消息，进入下一轮需求澄清。
      - 用户选**确认**：**立即调用 `flexible_step2`**，传入 `task_definition`（对象）、`host_session_id`（值照抄会话上下文）、以及 `runtime_context`（见「任务执行阶段」）。进入任务执行阶段。
 
