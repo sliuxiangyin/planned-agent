@@ -99,7 +99,7 @@ impl SubAgentResultCallback for StepCallback {
         // ── 定稿判定：step 契约约定输出为纯 JSON ──
         // 子 agent 常把 JSON 包进 markdown 代码块（```json ... ```）或前后带说明文字，
         // 故先做宽松提取；仍失败才要求它重新输出（由 planned-agent 的重试循环兜底，最多 2 次）。
-        let Some((parsed, cleaned)) = parse_step_output(text) else {
+        let Some((parsed, dirty)) = parse_step_output(text) else {
             let preview: String = text.chars().take(500).collect();
             tracing::warn!(
                 "[{}] 输出不是可解析的 JSON，要求子 agent 重新输出。原文前 500 字符：{}",
@@ -147,10 +147,17 @@ impl SubAgentResultCallback for StepCallback {
             }
         }
 
-        // 原文本若带 ``` 围栏或额外说明，替换为规范化 JSON，免得父 agent 再去猜格式。
-        match cleaned {
-            Some(canonical) => ResultDecision::Transform(canonical),
-            None => ResultDecision::Accept,
+        // 返回给父 agent 的文本做两件事：
+        //   1. 原文本带 ``` 围栏或额外说明 → 换成紧凑 JSON，免得父 agent 再去猜格式；
+        //   2. **Windows 路径统一改成正斜杠** —— 协调器会照抄我们返回的文本传给下一个 step，
+        //      而它转抄时会把 JSON 里已转义的 `\\` 再转义一次（实测 `C:\Users\…` 传一轮变成
+        //      `C:\\Users\\…`）。正斜杠没有可转义的形态，从根上断掉这类翻倍。
+        let canonical_value = canonicalize_windows_paths(&parsed);
+        let paths_changed = canonical_value != parsed;
+        if dirty || paths_changed {
+            ResultDecision::Transform(canonical_value.to_string())
+        } else {
+            ResultDecision::Accept
         }
     }
 }
@@ -166,13 +173,13 @@ fn build_patch(spec: &StepSpec, parsed: &Value) -> Map<String, Value> {
     for key in spec.products {
         match parsed.get(*key).filter(|v| !v.is_null()) {
             Some(value) => {
-                patch.insert((*key).to_string(), value.clone());
+                patch.insert((*key).to_string(), canonicalize_windows_paths(value));
             }
             None => tracing::warn!("[{}] 定稿但缺产物 '{}'，跳过该产物写入", spec.agent, key),
         }
     }
     if let Some(key) = spec.payload_key {
-        patch.insert(key.to_string(), parsed.clone());
+        patch.insert(key.to_string(), canonicalize_windows_paths(parsed));
     }
     for key in spec.clear {
         patch.insert((*key).to_string(), Value::Null);
@@ -183,16 +190,85 @@ fn build_patch(spec: &StepSpec, parsed: &Value) -> Map<String, Value> {
 /// 输出格式不合契约时发给子 agent 的纠正消息（触发其重新生成）。
 const RETRY_PROMPT: &str = "你的上一条输出不是合法 JSON。请只输出一个 JSON 对象：不要用 markdown 代码块包裹（不要 ```），不要任何说明文字，也不要前后空行；字段与取值保持与上一次输出一致。";
 
-/// 解析子 agent 的流程 JSON，返回 `(解析结果, 需要替换父 agent 所见内容时的规范化 JSON)`。
+/// 把 JSON 里所有「看起来像 Windows 路径」的字符串片段中的 `\` 换成 `/`。
+///
+/// 背景：协调器 LLM 在 step 之间转抄数据时，会把 JSON 里已经转义过的 `\\` 当成值本身再
+/// 转义一次 —— 每传一手，反斜杠翻一倍（实测：`C:\Users\…` 传一轮变 `C:\\Users\\…`，
+/// 老/新会话都被污染）。正斜杠没有可转义的形态，于是从源头断掉这类污染；
+/// PowerShell 与 Rust `std::fs` 均已实测接受正斜杠路径。
+///
+/// 只识别以盘符（`C:\`）或 UNC（`\\`）开头的片段，遇到引号 / 真换行 / `;` / `|` /
+/// `<` / `>` 等明显不属于路径的字符即停止；最坏情况是「少改」（漏掉末尾被误判为
+/// 转义序列的部分），不会把普通文本改坏（正则 `\d`、字面量 `\n` 都不会被碰到）。
+fn canonicalize_windows_paths(value: &Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(canonicalize_paths_in_text(text)),
+        Value::Array(items) => Value::Array(items.iter().map(canonicalize_windows_paths).collect()),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), canonicalize_windows_paths(v)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn canonicalize_paths_in_text(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        match windows_path_len(&chars[i..]) {
+            Some(len) => {
+                out.extend(
+                    chars[i..i + len]
+                        .iter()
+                        .map(|&c| if c == '\\' { '/' } else { c }),
+                );
+                i += len;
+            }
+            None => {
+                out.push(chars[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// 从 `chars` 起始处若是一个 Windows 路径片段，返回它的字符长度。
+fn windows_path_len(chars: &[char]) -> Option<usize> {
+    let drive_prefixed =
+        chars.len() >= 3 && chars[0].is_ascii_alphabetic() && chars[1] == ':' && chars[2] == '\\';
+    let unc_prefixed = chars.len() >= 2 && chars[0] == '\\' && chars[1] == '\\';
+    if !drive_prefixed && !unc_prefixed {
+        return None;
+    }
+    let mut n = if drive_prefixed { 3 } else { 2 };
+    while n < chars.len() && !is_path_boundary(chars[n]) {
+        n += 1;
+    }
+    Some(n)
+}
+
+/// 明显不属于路径、出现即结束路径片段的字符。
+fn is_path_boundary(c: char) -> bool {
+    matches!(
+        c,
+        '"' | '\'' | '\n' | '\r' | '\t' | ';' | '|' | '<' | '>' | '`' | '，' | '。' | '；'
+    )
+}
+
+/// 解析子 agent 的流程 JSON，返回 `(解析结果, 原文是否不干净)`。
 ///
 /// 逐级放宽：严格解析 → 剥 markdown 代码块围栏 → 取首个花括号平衡的对象片段。
-/// 后两级命中说明原文本不「干净」（带 ``` 围栏或说明文字），此时返回规范化的紧凑 JSON，
-/// 供回调以 `Transform` 替换，父 agent 便不必再面对脏格式。均失败则返回 `None`。
-fn parse_step_output(text: &str) -> Option<(Value, Option<String>)> {
+/// 后两级命中说明原文本带 ``` 围栏或说明文字（不干净），回调应以 `Transform`
+/// 换成紧凑 JSON，父 agent 便不必再面对脏格式。均失败则返回 `None`。
+fn parse_step_output(text: &str) -> Option<(Value, bool)> {
     let trimmed = text.trim();
     if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
         if value.is_object() {
-            return Some((value, None));
+            return Some((value, false));
         }
     }
     for candidate in [strip_code_fence(trimmed), extract_first_object(trimmed)]
@@ -201,8 +277,7 @@ fn parse_step_output(text: &str) -> Option<(Value, Option<String>)> {
     {
         if let Ok(value) = serde_json::from_str::<Value>(candidate.trim()) {
             if value.is_object() {
-                let canonical = value.to_string();
-                return Some((value, Some(canonical)));
+                return Some((value, true));
             }
         }
     }
@@ -266,13 +341,61 @@ mod tests {
     fn parses_json_wrapped_in_code_fence_with_leading_blank_lines() {
         let raw = "\n\n```json\n{\n  \"status\": \"task_defined\",\n  \"output_format\": \"text\"\n}\n```";
         assert_eq!(status_of(raw).as_deref(), Some("task_defined"));
-        let (_, cleaned) = parse_step_output(raw).unwrap();
-        assert!(cleaned.is_some(), "带围栏时应返回可替换的规范化 JSON");
+        let (_, dirty) = parse_step_output(raw).unwrap();
+        assert!(dirty, "带围栏时应标记为不干净（需要替换）");
     }
 
     #[test]
     fn clean_json_is_accepted_without_rewrite() {
-        assert!(parse_step_output("{\"status\":\"success\"}").unwrap().1.is_none());
+        assert!(!parse_step_output("{\"status\":\"success\"}").unwrap().1);
+    }
+
+    #[test]
+    fn windows_paths_become_forward_slashes() {
+        // 复现线上污染：反斜杠路径经协调器转抄后翻倍。规范化后不再有可转义的 `\`。
+        let raw = r#"{"task":{"params":{"path":"C:\\Users\\woddp\\Desktop\\Downloads"}}}"#;
+        let parsed: Value = serde_json::from_str(raw).unwrap();
+        let canonical = canonicalize_windows_paths(&parsed);
+        assert_eq!(
+            canonical["task"]["params"]["path"],
+            Value::String("C:/Users/woddp/Desktop/Downloads".into())
+        );
+        assert!(!canonical.to_string().contains("\\\\"), "不应再残留双反斜杠");
+    }
+
+    #[test]
+    fn path_inside_command_string_is_rewritten_but_quotes_kept() {
+        let value = Value::String(
+            r"Add-Content -Path 'C:\Users\woddp\Desktop\Downloads\text.txt' -Value $line".into(),
+        );
+        assert_eq!(
+            canonicalize_windows_paths(&value),
+            Value::String(
+                r"Add-Content -Path 'C:/Users/woddp/Desktop/Downloads/text.txt' -Value $line"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn non_path_backslashes_are_left_alone() {
+        // 正则、转义序列、普通文本里的 `\` 不得被改动。
+        for text in [r"^\d{4}-\d{2}-\d{2}$", r"换行符是 \n", r"路径在 C: 盘"] {
+            assert_eq!(
+                canonicalize_windows_paths(&Value::String(text.into())),
+                Value::String(text.into()),
+                "不应改动非路径文本: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_and_unc_paths_are_handled() {
+        let value = Value::String(r"从 C:\a\b 复制到 D:\c\d 完成".into());
+        assert_eq!(
+            canonicalize_windows_paths(&value),
+            Value::String("从 C:/a/b 复制到 D:/c/d 完成".into())
+        );
     }
 
     #[test]
