@@ -32,7 +32,30 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
     let storage: Arc<StorageContext> = use_context();
 
     // ── 会话状态管理中心：plan 级共享单例，注入到 context，供 flexible / 会话抽屉等订阅当前会话切换 ──
-    use_provide_session_manager();
+    let session_mgr = use_provide_session_manager();
+
+    // ── 当前会话持久化：切换会话即写回 `plans.current_session_id`（下次进入的默认定位）──
+    // 钩子在**渲染期**重新注册（覆盖式、幂等）：闭包恒捕获最新 `plan_id`，即使同一组件
+    // 实例换了 plan 也不会把旧会话写到新计划上。落库走后台任务，失败仅记日志 —— 指针丢失
+    // 只影响「下次进入默认定位哪个会话」，不应阻断当前交互。
+    // 两点约定：
+    // 1) 钩子内用 dioxus `spawn`，故 `SessionManager::set` 必须在 dioxus runtime 内调用
+    //    （事件回调 / dioxus 任务均可）；从纯 tokio 任务直接 set 需自备 RuntimeGuard。
+    // 2) 这里不刷新 `plan_resource`：内存 `plan_model.current_session_id` 保持陈旧无害，
+    //    该指针只在「下次进入」时被 `init_session` 读取。
+    {
+        let repo = storage.plan_repo();
+        let pid = plan_id.clone();
+        session_mgr.set_persist(Arc::new(move |sid: Option<String>| {
+            let repo = repo.clone();
+            let pid = pid.clone();
+            spawn(async move {
+                if let Err(e) = repo.update_current_session_id(&pid, sid).await {
+                    tracing::error!("更新 plans.current_session_id 失败: {e}");
+                }
+            });
+        }));
+    }
 
     // ── 清除消息确认弹窗 ──
     let mut show_clear_dialog = use_signal_sync(|| false);

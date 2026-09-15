@@ -11,12 +11,20 @@
 //! - 本模块**不认识** `ChatService` / `ChatServiceFactory` / 任何 flexible 类型；
 //! - `SessionSlot` 从 `flexible/` 提升为 plan 级共享（原结构即 watch 多订阅者），
 //!   仅补 dioxus `current` 信号这一 UI 桥；
-//! - `set()` 是唯一写入入口，同时同步 watch 与 dioxus 信号，保证双通道一致。
+//! - `set()` 是唯一写入入口，同时同步 watch 与 dioxus 信号，保证双通道一致；
+//!   并在值真正变化时回调**后置注入的持久化钩子**（页面层注册，见 `set_persist`），
+//!   把「当前会话」写回 `plans.current_session_id`（下次进入的默认定位）。
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use dioxus::prelude::*;
 use tokio::sync::watch;
+
+/// 当前会话变化时的持久化钩子：由页面层注入（页面同时知道 `plan_id` 与仓储）。
+///
+/// `SessionManager` 只把它当作不透明回调，仍**不认识** storage / flexible 类型；
+/// 由钩子自己决定怎么落库（通常是 spawn 一个异步 update）。
+pub type SessionPersistHook = Arc<dyn Fn(Option<String>) + Send + Sync>;
 
 /// 会话状态管理中心：承载「当前 session id」的 watch + dioxus 双通道。
 ///
@@ -30,16 +38,41 @@ pub struct SessionManager {
     value_rx: watch::Receiver<Option<String>>,
     /// dioxus 信号：UI 侧（drawer 高亮等）响应式读当前 id。
     current: Signal<Option<String>, SyncStorage>,
+    /// 持久化钩子（后置注入、可替换）：仅在「当前会话」**真正变化**时被调用。
+    persist: Mutex<Option<SessionPersistHook>>,
 }
 
 impl SessionManager {
-    /// 写入当前会话（唯一写入入口）：同步 watch 与 dioxus 信号。
+    /// 写入当前会话（唯一写入入口）：同步 watch 与 dioxus 信号，并在值真正变化时
+    /// 调用持久化钩子（若已注入）。
     ///
     /// `session_id` 为 `Some` 表示定位到某会话；`None` 表示无当前会话（清空）。
+    /// `None` 不触发持久化：`plans.current_session_id` 的语义是「下次进入的默认
+    /// 定位会话」，清空当前会话只是页面内的临时取消定位，不应抹掉该指针。
+    /// 前提：当前没有「删除单个会话」的路径；若将来支持，需在此同步清空指针，
+    /// 否则 `PlanRepo::init_session` 会复用已不存在的会话 id。
     pub fn set(&self, session_id: Option<String>) {
+        // 值未变则钩子不触发：Signal::set / watch::send 本身不做相等判断，
+        // 同值重复 set 若也落库会产生无谓写与 updated_at 噪音。
+        let changed = *self.slot.borrow() != session_id;
         let mut cur = self.current;
         cur.set(session_id.clone());
-        let _ = self.slot.send(session_id);
+        let _ = self.slot.send(session_id.clone());
+        if !changed || session_id.is_none() {
+            return;
+        }
+        // 先克隆出 Arc 再释放锁，避免持锁调用外部回调。
+        let hook = self.persist.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook(session_id);
+        }
+    }
+
+    /// 注入 / 替换持久化钩子（由页面层注册；可随 `plan_id` 变化重新注册）。
+    ///
+    /// 未注册时 `set()` 只改内存状态，不落库（如组件单测 / 预览场景）。
+    pub fn set_persist(&self, hook: SessionPersistHook) {
+        *self.persist.lock().unwrap() = Some(hook);
     }
 
     /// 便捷：定位到某会话。
@@ -88,14 +121,19 @@ pub fn use_session_manager() -> Arc<SessionManager> {
             slot,
             value_rx,
             current,
+            persist: Mutex::new(None),
         })
     })
 }
 
 /// 在组件中创建并把 SessionManager 注入 dioxus context，供整棵子树共享。
-pub fn use_provide_session_manager() {
+///
+/// 返回同一实例，方便提供方（`PlanPage`）继续调用 `set_persist` 注册持久化钩子。
+pub fn use_provide_session_manager() -> Arc<SessionManager> {
     let mgr = use_session_manager();
-    use_context_provider(move || mgr.clone());
+    let provided = mgr.clone();
+    use_context_provider(move || provided.clone());
+    mgr
 }
 
 /// 自定义 hook：把 `SessionManager` 的「当前会话」同步到传入的 `session_id` 信号。

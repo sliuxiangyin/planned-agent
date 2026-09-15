@@ -10,10 +10,12 @@
 //!
 //! 会话 id 与 `FlexiblePage` 一致：本组件自持 `Signal<String>`（初值来自 props），
 //! 经 `use_listen_session_manager` 跟随 `SessionManager` 的「当前会话」变化；
-//! **点选某行即通过 `SessionManager::set_active` 修改当前会话**（不向上抛事件）。
+//! **点选某行即通过 `SessionManager::set_active` 修改当前会话**（不向上抛事件）——
+//! 该切换由 `PlanPage` 注入的持久化钩子写回 `plans.current_session_id`（下次进入默认定位）。
 //!
 //! **新建会话**：点「新建会话」→ 弹 `Dialog` 输入标题 → 确定/取消；
-//! 确定后调用 `PlansFlexibleSessionsRepo::create` 落库，**成功后 restart 列表 resource 刷新**。
+//! 确定后调用 `PlansFlexibleSessionsRepo::create` 落库，**成功后 restart 列表 resource 刷新**，
+//! 并 `set_active` 到新会话（即「新建即进入」，持久化同上）。
 
 use std::sync::Arc;
 
@@ -115,11 +117,12 @@ pub fn SessionPanel(props: SessionPanelProps) -> Element {
     let mut new_title = use_signal_sync(String::new);
     let mut create_error = use_signal_sync(|| None::<String>);
 
-    // 弹窗「确定」：校验 → create 落库 → 成功则 restart 列表 resource 刷新并关窗；
+    // 弹窗「确定」：校验 → create 落库 → 成功则切换为当前会话、restart 列表 resource 刷新并关窗；
     // 失败保留弹窗并提示错误。
     let on_create_confirm = {
         let repo = sessions_repo.clone();
         let pid = props.plan_id.clone();
+        let mgr = session_mgr.clone();
         move |_: MouseEvent| {
             let title = new_title.read().trim().to_string();
             if title.is_empty() {
@@ -128,12 +131,16 @@ pub fn SessionPanel(props: SessionPanelProps) -> Element {
             }
             let repo = repo.clone();
             let pid = pid.clone();
+            let mgr = mgr.clone();
             // Resource 为 Copy：复制一份进 async 任务，不影响渲染侧继续读同一资源。
             let mut resource = sessions_resource;
             spawn(async move {
                 match repo.create(&pid, &title).await {
-                    Ok(_) => {
+                    Ok(session) => {
                         resource.restart();
+                        // 新建即切换为当前会话（仍走 SessionManager 这个唯一写入入口）；
+                        // 其持久化钩子会把 plans.current_session_id 一并写回，无需在此重复落库。
+                        mgr.set_active(session.id);
                         show_create.set(false);
                         new_title.set(String::new());
                         create_error.set(None);
