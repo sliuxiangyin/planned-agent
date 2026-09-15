@@ -1,11 +1,15 @@
-//! step 子 agent 的完成回调（`SubAgentResultCallback`）与共享工具。
+//! step 子 agent 的完成回调（`SubAgentResultCallback`）与启动前注入（`SubAgentBeforeCallback`）及共享工具。
 //!
 //! 每个 `flexible_stepN` 子 agent 在完成后把「定稿」登记到流程状态，各自一个子模块
 //! （`step1_callback` ~ `step5_callback`）；它们的差异只有 [`step_commit::StepSpec`]
 //! 里的契约，通用流程见 [`step_commit`]。多个回调共用的「会话归属」读取工具放在本文件。
 //!
+//! 启动前注入见 [`before_inject`]：把 state 里已定稿的产物直接塞给子 agent，
+//! 取代「协调器 LLM 转抄」。
+//!
 //! 设计背景见 `docs/chat-flexible-回调会话归属设计.md`。
 
+pub(crate) mod before_inject;
 pub(crate) mod step1_callback;
 pub(crate) mod step2_callback;
 pub(crate) mod step3_callback;
@@ -13,6 +17,7 @@ pub(crate) mod step4_callback;
 pub(crate) mod step5_callback;
 pub(crate) mod step_commit;
 
+pub(crate) use before_inject::StateInjectCallback;
 pub(crate) use step1_callback::create_step1_callback;
 pub(crate) use step2_callback::create_step2_callback;
 pub(crate) use step3_callback::create_step3_callback;

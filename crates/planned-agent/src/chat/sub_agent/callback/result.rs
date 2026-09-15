@@ -1,8 +1,9 @@
-//! 子 agent 结果回调：trait 定义 + 决策枚举。
+//! 子 agent **完成后**回调：决定最终 tool result 的内容。
 
 use async_trait::async_trait;
 use planned_agent_core::mcp::types::ToolResult;
-use serde_json::Value;
+
+use super::SubAgentCallContext;
 
 /// 子 agent 结果处理决策。
 ///
@@ -34,23 +35,6 @@ pub enum ResultDecision {
     /// 与 [`Retry`](Self::Retry) 的分工：`Retry` 是「模型输出不对，让它重做」；
     /// `Abort` 是「模型没错，但外部动作失败了，立刻收场并如实上报」。
     Abort(String),
-}
-
-/// 本次子 agent 调用的上下文。
-///
-/// 由 `collect_until_outcome` 在触发回调前构造。核心库只做**透传**：它不理解
-/// `arguments` 里各字段的业务含义，具体取哪个字段（如宿主/会话标识）由回调自行决定。
-///
-/// 注意：`arguments` 是**父 agent 传入本子 agent 的原始工具参数**，与子 agent 自身的
-/// 挂起-恢复会话（`session_id` / `run_id`）是不同概念，不要混用。
-#[derive(Debug, Clone)]
-pub struct SubAgentCallContext {
-    /// 子 agent 工具名（如 `"flexible_step2"`）。
-    pub agent_name: String,
-    /// 本次调用的 tool_call_id（等于 `run_id` / invocation id）。
-    pub tool_call_id: String,
-    /// 父 agent 传给该子 agent 的原始参数（LLM tool_call 的 `arguments`）。
-    pub arguments: Value,
 }
 
 /// 子 agent 结果回调：完成后可获取最终 tool result（用于外部解析/提取）。

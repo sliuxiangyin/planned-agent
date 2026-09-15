@@ -11,11 +11,13 @@ use planned_agent_tool_manager::{
     SubAgentRunOutcome, SubAgentSessionRunner, ToolRegistry, ToolStreamSender,
 };
 use serde_json::Value;
-use tracing::info;
+use tracing::{error, info, warn};
 
 use crate::chat::service::{ChatConfig, ChatService};
 
-use super::callback::SubAgentResultCallback;
+use super::callback::{
+    BeforeDecision, SubAgentBeforeCallback, SubAgentCallContext, SubAgentResultCallback,
+};
 use super::collect::collect_until_outcome;
 
 /// 子 agent runner：持有 `ChatService` 工厂参数，每次 `start()`
@@ -34,6 +36,8 @@ pub struct SubAgentRunner {
     max_depth: u32,
     /// 结果回调：子 agent 完成后通知外部
     result_callback: Option<Arc<dyn SubAgentResultCallback>>,
+    /// 启动前回调链：在 task 文本生成前按顺序注入系统侧数据（只碰入参，不碰产物）
+    before_callbacks: Vec<Arc<dyn SubAgentBeforeCallback>>,
 }
 
 impl SubAgentRunner {
@@ -45,6 +49,7 @@ impl SubAgentRunner {
         depth: u32,
         max_depth: u32,
         result_callback: Option<Arc<dyn SubAgentResultCallback>>,
+        before_callbacks: Vec<Arc<dyn SubAgentBeforeCallback>>,
     ) -> Self {
         Self {
             ai_manager,
@@ -54,6 +59,7 @@ impl SubAgentRunner {
             depth,
             max_depth,
             result_callback,
+            before_callbacks,
         }
     }
 }
@@ -84,7 +90,37 @@ impl SubAgentSessionRunner for SubAgentRunner {
         }
 
         // 提取 task 参数（剔除不进入 task 文本的控制字段，如宿主注入的会话标识）
-        let task_arguments = strip_hidden_args(&arguments, &self.config.hidden_args);
+        let mut task_arguments = strip_hidden_args(&arguments, &self.config.hidden_args);
+
+        // ── 启动前回调链：在 task 文本生成前注入系统侧数据 ──
+        // 注入只改写「发给子 agent 的参数」，不读也不写子 agent 的输出，
+        // 因此与结果回调（`result_callback`）互不影响。
+        // 位置刻意放在 `strip_hidden_args` 之后：注入字段不受 hidden_args 剔除影响。
+        if !self.before_callbacks.is_empty() {
+            let ctx = SubAgentCallContext {
+                agent_name: stream.tool_name().to_string(),
+                tool_call_id: stream.invocation_id().to_string(),
+                arguments: arguments.clone(),
+            };
+            for cb in &self.before_callbacks {
+                match cb.before_start(&ctx).await {
+                    BeforeDecision::Continue => {}
+                    BeforeDecision::Inject(extra) => {
+                        merge_into_object(&mut task_arguments, &extra, cb.name());
+                    }
+                    BeforeDecision::Abort(reason) => {
+                        // before 阶段没有模型输出可重做，重试无意义：立即以失败结果收场。
+                        error!("[子agent] before 回调 {} 中断本次调用：{}", cb.name(), reason);
+                        return Ok(SubAgentRunOutcome::Done(ToolResult {
+                            call_id: String::new(),
+                            is_error: true,
+                            content: Value::String(reason),
+                        }));
+                    }
+                }
+            }
+        }
+
         let task = serde_json::to_string_pretty(&task_arguments)
             .unwrap_or_else(|_| "请完成指定任务".to_string());
         info!("[子agent] 准备发送任务: {}", task);
@@ -137,6 +173,24 @@ impl SubAgentSessionRunner for SubAgentRunner {
 /// 从父 agent 传入的 `arguments` 中剔除「不进入子 agent task 文本」的控制字段。
 ///
 /// `hidden` 为空（默认）时原样返回，保持既有行为。
+/// 把 `extra` 的**顶层字段合并**进 `base`：不同名各自保留，同名 key 由 `extra` 覆盖。
+///
+/// 只做顶层浅合并，不做深合并——同名 key **整块替换**。深合并会产出「半个对象来自
+/// LLM、半个来自系统」的混合态，谁都预期不到；整块替换才是可预测的。
+fn merge_into_object(base: &mut Value, extra: &Value, who: &str) {
+    let Some(extra_map) = extra.as_object() else {
+        warn!("[子agent] before 回调 {} 注入的不是对象，已忽略：{}", who, extra);
+        return;
+    };
+    let Some(base_map) = base.as_object_mut() else {
+        warn!("[子agent] before 回调 {} 注入失败：task 参数不是对象", who);
+        return;
+    };
+    for (k, v) in extra_map {
+        base_map.insert(k.clone(), v.clone());
+    }
+}
+
 fn strip_hidden_args(args: &Value, hidden: &[String]) -> Value {
     if hidden.is_empty() {
         return args.clone();
@@ -150,5 +204,71 @@ fn strip_hidden_args(args: &Value, hidden: &[String]) -> Value {
             Value::Object(map)
         }
         other => other.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 走一遍真实的合并路径：把 `extra` 注入 `base`，返回合并结果。
+    fn merge(base: Value, extra: Value) -> Value {
+        let mut base = base;
+        merge_into_object(&mut base, &extra, "test");
+        base
+    }
+
+    #[test]
+    fn inject_keeps_disjoint_fields() {
+        let out = merge(
+            json!({ "host_session_id": "s1", "output_format": "文本" }),
+            json!({ "execution_trace": [1, 2] }),
+        );
+        assert_eq!(
+            out,
+            json!({ "host_session_id": "s1", "output_format": "文本", "execution_trace": [1, 2] })
+        );
+    }
+
+    #[test]
+    fn inject_overwrites_same_key() {
+        // 父 agent 传了空/脏数据时，系统注入的真实数据必须赢（防污染保证）。
+        let out = merge(
+            json!({ "host_session_id": "s1", "execution_trace": [] }),
+            json!({ "execution_trace": [{ "tool": "builtin_write_file" }] }),
+        );
+        assert_eq!(
+            out,
+            json!({ "host_session_id": "s1", "execution_trace": [{ "tool": "builtin_write_file" }] })
+        );
+    }
+
+    #[test]
+    fn inject_replaces_same_key_wholesale() {
+        // 浅合并：同名 key 整块替换，不与父 agent 传的对象深合并。
+        let out = merge(
+            json!({ "field_selection_result": { "a": 1, "b": 2 } }),
+            json!({ "field_selection_result": { "c": 3 } }),
+        );
+        assert_eq!(out, json!({ "field_selection_result": { "c": 3 } }));
+    }
+
+    #[test]
+    fn inject_ignores_non_object_extra() {
+        let out = merge(json!({ "a": 1 }), json!("not an object"));
+        assert_eq!(out, json!({ "a": 1 }));
+    }
+
+    #[test]
+    fn inject_into_non_object_base_is_ignored() {
+        let out = merge(json!("plain text"), json!({ "a": 1 }));
+        assert_eq!(out, json!("plain text"));
+    }
+
+    #[test]
+    fn empty_extra_leaves_base_untouched() {
+        let out = merge(json!({ "a": 1 }), json!({}));
+        assert_eq!(out, json!({ "a": 1 }));
     }
 }

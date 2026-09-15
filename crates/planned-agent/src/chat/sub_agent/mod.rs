@@ -15,7 +15,7 @@
 //! ```text
 //! sub_agent/
 //! ├── mod.rs        模块声明 + 对外重导出
-//! ├── callback.rs   结果回调 trait + 决策枚举
+//! ├── callback/      回调 trait + 决策枚举（before.rs 启动前 / result.rs 完成后）
 //! ├── runner.rs     SubAgentRunner（工厂 + start 实现）
 //! ├── session.rs    ChatSubAgentSession（挂起-恢复）
 //! └── collect.rs    事件收集 + 回调决策 + 重试循环
@@ -26,6 +26,9 @@ mod collect;
 mod runner;
 mod session;
 
-pub use callback::{ResultDecision, SubAgentCallContext, SubAgentResultCallback};
+pub use callback::{
+    BeforeDecision, ResultDecision, SubAgentBeforeCallback, SubAgentCallContext,
+    SubAgentResultCallback,
+};
 pub use runner::SubAgentRunner;
 pub use session::ChatSubAgentSession;

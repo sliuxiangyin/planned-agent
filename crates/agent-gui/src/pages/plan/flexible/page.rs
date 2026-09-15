@@ -27,7 +27,7 @@ use crate::services::plans_flexible_service::PlansFlexibleService;
 use super::session_host::FlexibleSessionHost;
 use super::step_callback::{
     create_step1_callback, create_step2_callback, create_step3_callback, create_step4_callback,
-    create_step5_callback, HOST_SESSION_ID_FIELD,
+    create_step5_callback, StateInjectCallback, HOST_SESSION_ID_FIELD,
 };
 use super::tool::{
     flexible_state_tool, flexible_save_template, FlexibleStateExecutor, FlexibleSaveTemplateExecutor,
@@ -165,6 +165,7 @@ fn use_plan_agent_registrations(plan_id: String) {
             1, // depth
             2, // max_depth
             None,
+            vec![], // before 回调：测试用子 agent 不需要注入
         );
         // 测试用：子 agent max_tool_rounds 触顶复现。
         register_sub_agent(
@@ -194,6 +195,7 @@ fn use_plan_agent_registrations(plan_id: String) {
             1, // depth
             2, // max_depth
             None,
+            vec![], // before 回调：测试用子 agent 不需要注入
         );
         register_sub_agent(
             &ai_ctx,
@@ -237,6 +239,7 @@ fn use_plan_agent_registrations(plan_id: String) {
             1, // depth
             2, // max_depth
             create_step1_callback(plan_id.clone(), plans_flexible_service.clone()),
+            vec![],
         );
         register_sub_agent(
             &ai_ctx,
@@ -274,6 +277,7 @@ fn use_plan_agent_registrations(plan_id: String) {
             1, // depth
             2, // max_depth
             create_step2_callback(plan_id.clone(), plans_flexible_service.clone()),
+            vec![],
         );
         register_sub_agent(
             &ai_ctx,
@@ -309,6 +313,13 @@ fn use_plan_agent_registrations(plan_id: String) {
             1, // depth
             2, // max_depth
             create_step3_callback(plan_id.clone(), plans_flexible_service.clone()),
+            // 轨迹摘要从 flexible_state 直取注入，取代「协调器 LLM 转抄」：
+            // 合并语义下注入方赢，故协调器即使仍传该字段也污染不了。
+            vec![Arc::new(StateInjectCallback::new(
+                plan_id.clone(),
+                plans_flexible_service.clone(),
+                vec![("compressed_context", "execution_trace_summary")],
+            ))],
         );
         register_sub_agent(
             &ai_ctx,
@@ -348,6 +359,12 @@ fn use_plan_agent_registrations(plan_id: String) {
             1, // depth
             2, // max_depth
             create_step4_callback(plan_id.clone(), plans_flexible_service.clone()),
+            // 执行轨迹从 flexible_state 直取注入，取代「协调器 LLM 转抄」。
+            vec![Arc::new(StateInjectCallback::new(
+                plan_id.clone(),
+                plans_flexible_service.clone(),
+                vec![("execution_trace", "execution_trace")],
+            ))],
         );
         register_sub_agent(
             &ai_ctx,
@@ -392,6 +409,7 @@ fn use_plan_agent_registrations(plan_id: String) {
             2, // max_depth
             // 回调只推进 current_step="templated"；模板落库仍由 flexible_save_template 工具负责。
             create_step5_callback(plan_id.clone(), plans_flexible_service.clone()),
+            vec![],
         );
     });
 
