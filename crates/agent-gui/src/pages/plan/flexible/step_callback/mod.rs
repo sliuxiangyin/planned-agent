@@ -10,9 +10,13 @@
 //! ├── prelude.rs          通用：FlexibleStepPrelude（默认前置分析 + 守门）
 //! ├── before_inject.rs    通用：StateInjectCallback
 //! └── stepN/              各 step 自己的东西（N = 1..5）
-//!     ├── mod.rs             链组装（create_stepN_callback）+ 本 step 的定稿登记回调 + 单测
-//!     └── …                  该 step 专属回调（目前只有 step2 有：execution_trace.rs / tool_trace.rs）
+//!     ├── mod.rs                 组装点：只写 create_stepN_callback
+//!     ├── stepN_callback.rs      定稿登记回调 + 本 step 的常量 + 单测
+//!     └── …                      该 step 专属文件（step2 另有 step2_execution_trace_callback.rs、tool_trace.rs）
 //! ```
+//!
+//! 命名：文件 = 其中主要类型的 snake_case（`StepNCallback` → `stepN_callback.rs`）；
+//! 只装函数的文件按职责命名（`commit.rs` / `tool_trace.rs`）。
 //!
 //! 判断新代码放哪：**只有某个 step 用**就放进 `stepN/`；**多个 step 共用**才提到本层。
 //!
@@ -24,7 +28,7 @@
 //!   → 可选的额外回调（step2 的轨迹提取，排在定稿登记**之前**：轨迹失败要 Abort 且状态未推进）
 //! ```
 //!
-//! **「保存状态」不共用实现**：每个 `stepN/mod.rs` 自己写 `on_result` 全流程（取分析结论、
+//! **「保存状态」不共用实现**：每个 `stepN/stepN_callback.rs` 自己写 `on_result` 全流程（取分析结论、
 //! 组产物补丁、`merge_state`、错误处理、决策）。五个 step 的产物 / 清理 / 推进规则只会越来越
 //! 不一样，共享一份实现只会被特例字段撑变形；冗余换来的是各 step 能自由演化。
 //! 本层只保留两种「跨 step 的约定」，它们不是保存状态、而是接口与把关：
@@ -44,6 +48,9 @@
 //! 3. **产物值为 `null` 或字段缺失 ⇒ 跳过写入**（`merge_state` 把 `null` 当「删除」）→ [`commit::build_patch`]
 //! 4. **决策只看 `call.is_last`**：非末位 `Next(call.text())`、末位 `Accept` → [`commit::hand_off`]
 //! 5. **解析 / 定稿判定 / 会话定位一律用 prelude 的结论**（[`analysis::StepAnalysis`]），不重复实现。
+//!
+//! 各 step 的 `stepN/mod.rs` 只剩「挂哪几环」（[`step1`]~[`step5`]），回调与常量在
+//! `stepN/stepN_callback.rs`。
 //!
 //! 启动前注入见 [`before_inject`]：把 state 里已定稿的产物直接塞给子 agent，
 //! 取代「协调器 LLM 转抄」。

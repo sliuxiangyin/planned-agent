@@ -912,4 +912,126 @@ mod tests {
         // g2 也 drop：彻底干净
         drop(g2);
     }
+
+    /// 「子 agent 触顶 → 点继续」后 history 是否仍然合法。
+    ///
+    /// 复现 GUI 上的 `chat_completion_stream 失败: 400 ... tool result's tool id(...) not found`：
+    /// 该报错表示 history 里存在**孤儿 tool 结果**（其 tool_call_id 在任何 assistant 的
+    /// tool_calls 里都找不到），而不是工具执行失败。
+    #[tokio::test(flavor = "current_thread")]
+    async fn sub_agent_max_rounds_continue_keeps_tool_protocol_valid() {
+        // 第 1 批：文本 + 一个真实工具调用 → 因 max_tool_rounds=1 立即触顶
+        let mut batch0 = ScriptedAiClient::text_chunk("[ROUND-PROBE] 本会话累计第 1 轮");
+        batch0.extend(ScriptedAiClient::tool_calls_chunk(&[(
+            "call_A",
+            "builtin_read_documentation",
+            json!({"name": "request_user_action"}),
+        )]));
+        // 第 2 批：resume 重放本批后 round=2 的收尾
+        let batch1 = ScriptedAiClient::text_chunk("收尾");
+
+        let mut config = ChatConfig::new();
+        // 贴近真实子 agent：有 system（会被 push_front_system 插到 inner[0]）
+        config.system_prompt = Some(SystemPrompt::Template("probe_system".to_string()));
+        config.run_id = Some("run-1".to_string()); // 子 agent → EmitAndSuspend
+        config.max_tool_rounds = 1;
+
+        let svc = ChatService::from_ai_client(
+            Arc::new(ScriptedAiClient::new(vec![batch0, batch1])),
+            Arc::new(ToolRegistry::new()),
+            Arc::new(MockPromptManager),
+            config,
+        )
+        .await;
+        svc.start_driver().expect("启动 driver 失败");
+
+        let outcome = svc.send_text("go").unwrap().wait_outcome().await;
+        println!("[test] 首次 outcome = {outcome:?}");
+        dump_history(&svc, "触顶挂起后");
+
+        let outcome2 = svc
+            .resume("继续？ => continue", "submit")
+            .unwrap()
+            .wait_outcome()
+            .await;
+        println!("[test] resume outcome = {outcome2:?}");
+        dump_history(&svc, "点继续之后");
+
+        // 核心断言：history 必须仍满足 tool 协议
+        let history = svc.history();
+
+        // (a) 首条不得是 Tool —— InMemoryStore 的 store_id 全是 ""，upsert_tool
+        //     命中 inner[0]（system）并把它覆盖成 tool 结果，导致首条成了 role=tool。
+        assert!(
+            matches!(history[0].role, MessageRole::System),
+            "history 首条应为 System（被 upsert_tool 覆盖了）: {history:#?}"
+        );
+
+        // (b) 同一 tool_call_id 不得出现两条 tool 结果（本应 upsert 覆盖，却变成 append）
+        let mut seen = HashSet::new();
+        let dups: Vec<String> = history
+            .iter()
+            .filter(|m| matches!(m.role, MessageRole::Tool))
+            .filter_map(|m| m.tool_call_id.clone())
+            .filter(|id| !seen.insert(id.clone()))
+            .collect();
+        assert!(
+            dups.is_empty(),
+            "同一 tool_call_id 出现多条 tool 结果: {dups:?}"
+        );
+
+        // (c) 不得存在孤儿 tool 结果（tool_call_id 找不到对应 assistant.tool_calls）
+        let assistant_ids: HashSet<String> = history
+            .iter()
+            .filter(|m| matches!(m.role, MessageRole::Assistant))
+            .flat_map(|m| m.tool_calls.clone().unwrap_or_default())
+            .map(|tc| tc.id)
+            .collect();
+        let orphans: Vec<String> = history
+            .iter()
+            .filter(|m| matches!(m.role, MessageRole::Tool))
+            .filter_map(|m| m.tool_call_id.clone())
+            .filter(|id| !assistant_ids.contains(id))
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "存在孤儿 tool 结果（→ 400 tool id not found）: {orphans:?}"
+        );
+        assert!(!assistant_ids.is_empty(), "第 1 批的 tool_call 应已入库");
+    }
+
+    /// 打印 history 概览（role / tool_calls ids / tool_call_id），便于失败时人工判读。
+    fn dump_history(svc: &ChatService<MockPromptManager>, tag: &str) {
+        let history = svc.history();
+        let mut lines = vec![format!("---- history @{tag} ({} 条) ----", history.len())];
+        for (i, m) in history.iter().enumerate() {
+            let tcs = m
+                .tool_calls
+                .as_ref()
+                .map(|v| {
+                    v.iter()
+                        .map(|tc| format!("{}:{}", tc.id, tc.function.name))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            let text = match &m.content {
+                Some(MessageContent::Text { text }) => text.chars().take(24).collect::<String>(),
+                Some(MessageContent::ToolResult {
+                    tool_call_id,
+                    content,
+                }) => format!(
+                    "tool→{}: {}",
+                    tool_call_id,
+                    content.chars().take(24).collect::<String>()
+                ),
+                _ => String::new(),
+            };
+            lines.push(format!(
+                "  [{i}] {:?} tcid={:?} tcs=[{tcs}] {text}",
+                m.role, m.tool_call_id
+            ));
+        }
+        println!("{}", lines.join("\n"));
+    }
 }

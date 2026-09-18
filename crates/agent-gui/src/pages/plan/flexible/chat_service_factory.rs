@@ -77,6 +77,7 @@ pub(crate) async fn new_chat_service(
                 // "builtin_read_documentation".to_string(),
                 // "flexible_step_rua_demo".to_string(),
                 // "flexible_step_max_rounds_demo".to_string(),
+                "flexible_step_rounds_probe".to_string(),
             ]),
             max_tool_rounds: 10,
             ..Default::default()

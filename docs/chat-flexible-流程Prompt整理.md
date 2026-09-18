@@ -26,14 +26,14 @@ none → task_defined → executed → fields_selected → params_confirmed → 
 | `params_confirmed` | `parameter_confirmation_result` |
 | `templated` | `template_payload`（整段模板副本，供 `flexible_save_template` 直接读取落库） |
 
-规则（现由各 step 的完成回调各自执行，见 `step_callback/stepN/mod.rs`）：
+规则（现由各 step 的完成回调各自执行，见 `step_callback/stepN/stepN_callback.rs`）：
 
 - **读-改-写合并**：`merge_state` 未传的 key 保留、传 `null` 的 key 清除、`current_step` 未传则保留原值。
 - **只增不减**：`current_step` 仅在明确「重做 / 返回」上游时回退；该 step 一旦定稿，回调会在同一次写入里把其下游产物传 `null` 清除。
 - 失败不推进：任何 step 返回非定稿 status 时，不写产物、不动 `current_step`。
 - **协调器不写状态**：`flexible_state` 工具已改为只读，状态只由回调登记。
 
-出处：`crates/agent-gui/src/pages/plan/flexible/step_callback/stepN/mod.rs`、`tool/flexible_state.rs`、`prompts/flexible/flexible_global_system.toml`。
+出处：`crates/agent-gui/src/pages/plan/flexible/step_callback/stepN/stepN_callback.rs`、`tool/flexible_state.rs`、`prompts/flexible/flexible_global_system.toml`。
 
 ---
 
@@ -89,7 +89,7 @@ step → `status` → 定稿档位：
 { "status": "cancelled" }    // 用户取消
 ```
 
-- **落 state**：由 **`flexible_step1` 完成回调**自动登记——`status:"task_defined"` ⇒ 写 `task_definition` / `output_format`、清 step2~4 全部下游产物、推进 `task_defined`（`step_callback/step1/mod.rs`）；协调器不再写状态。
+- **落 state**：由 **`flexible_step1` 完成回调**自动登记——`status:"task_defined"` ⇒ 写 `task_definition` / `output_format`、清 step2~4 全部下游产物、推进 `task_defined`（`step_callback/step1/step1_callback.rs`）；协调器不再写状态。
 - **强约束**：`output_format` 必须由用户明确确认，禁止默认值 / 推断；缺基线且用户未指定时必须用单选 `request_user_action` 询问。
 
 ### 3.2 `flexible_step2` — 任务执行
@@ -116,8 +116,8 @@ step → `status` → 定稿档位：
 
 - **落 state**：由 `flexible_step2` 的**结果链**自动登记，三环顺序不可颠倒：
   1. **前置分析**（`step_callback/prelude.rs` 的 `FlexibleStepPrelude`，所有 step 默认共用）：解析输出、定位 `host_session_id`、判定 `status == "success"`；解析失败 ⇒ 要求重新输出（最多 2 次，且要求**不得重跑工具**），非定稿 / 缺会话 ⇒ **链终止，一个产物都不登记**。
-  2. **轨迹提取**（`step_callback/step2/execution_trace.rs`）：从**子 agent 会话历史**导出真实工具调用（`planned-agent/src/chat/trace.rs` 的 `export_tool_trace`），经 `step2/tool_trace.rs` 过滤 `request_user_action`、截断超长输出后写入 `execution_trace`（每条含 `name` / `arguments` / `output` / `outcome`）。模型自述的轨迹一律不采信；本轮一个工具都没调用就落**空数组**。
-  3. **定稿登记**（`step_callback/step2/mod.rs`）：写 `compressed_context`，`current_step = "executed"`，并把 `field_selection_result`、`parameter_confirmation_result` 清掉（重跑 step2 ⇒ step3/step4 定稿作废）。
+  2. **轨迹提取**（`step_callback/step2/step2_execution_trace_callback.rs`）：从**子 agent 会话历史**导出真实工具调用（`planned-agent/src/chat/trace.rs` 的 `export_tool_trace`），经 `step2/tool_trace.rs` 过滤 `request_user_action`、截断超长输出后写入 `execution_trace`（每条含 `name` / `arguments` / `output` / `outcome`）。模型自述的轨迹一律不采信；本轮一个工具都没调用就落**空数组**。
+  3. **定稿登记**（`step_callback/step2/step2_callback.rs`）：写 `compressed_context`，`current_step = "executed"`，并把 `field_selection_result`、`parameter_confirmation_result` 清掉（重跑 step2 ⇒ step3/step4 定稿作废）。
 
   第 2 环排在第 3 环**之前**：轨迹落库失败即 `Abort`，那时状态尚未推进（重跑 step2 即自愈）；反之会留下「已 `executed` 却没有轨迹」的状态。
 
@@ -148,7 +148,7 @@ step → `status` → 定稿档位：
 ```
 
 - 规则：`selected_fields` 顺序即输出顺序；嵌套数据用点号路径作 `name`；字段必须来自真实执行结果。
-- **落 state**：由 **`flexible_step3` 完成回调**自动登记——`status:"fields_selected"` ⇒ 写 `field_selection_result`、清 `parameter_confirmation_result`、推进 `fields_selected`（`step_callback/step3/mod.rs`）；协调器不再写状态。
+- **落 state**：由 **`flexible_step3` 完成回调**自动登记——`status:"fields_selected"` ⇒ 写 `field_selection_result`、清 `parameter_confirmation_result`、推进 `fields_selected`（`step_callback/step3/step3_callback.rs`）；协调器不再写状态。
 
 ### 3.4 `flexible_step4` — 参数确认
 
@@ -182,12 +182,12 @@ step → `status` → 定稿档位：
 ```
 
 - 约束：`input_schema[].type` 取 string / number / boolean / date / array；**`output_fields` 必须与 step3 的 `selected_fields` 一致**；候选必须来自真实轨迹。
-- **落 state**：由 **`flexible_step4` 完成回调**自动登记——`status:"params_confirmed"` ⇒ 写 `parameter_confirmation_result`、推进 `params_confirmed`（`step_callback/step4/mod.rs`）；协调器不再写状态。
+- **落 state**：由 **`flexible_step4` 完成回调**自动登记——`status:"params_confirmed"` ⇒ 写 `parameter_confirmation_result`、推进 `params_confirmed`（`step_callback/step4/step4_callback.rs`）；协调器不再写状态。
 
 ### 3.5 `flexible_step5` — 模板序列化
 
 - **职责**：把 4 份上游产物编译成**混合模板**——`steps`（硬编码、零推理可跑）+ `execution_plan`（1:1 对应的智能修复说明书）。无用户交互。
-- **允许工具**：`request_user_action`（实际不使用）；**有完成回调**（`step_callback/step5/mod.rs`）：推进 `templated` + 登记模板副本；落库仍由协调器调 `flexible_save_template` 执行。
+- **允许工具**：`request_user_action`（实际不使用）；**有完成回调**（`step_callback/step5/step5_callback.rs`）：推进 `templated` + 登记模板副本；落库仍由协调器调 `flexible_save_template` 执行。
 - **入参 schema**（`page.rs:350-371`）
 
 | 参数 | 类型 | 必需 | 说明 |
@@ -220,7 +220,7 @@ step → `status` → 定稿档位：
   - `steps` 与 `execution_plan` **等长且 `steps[i].id == execution_plan[i].step_id`**；`params` 里**只允许两类占位符**：① 来自 `input_schema` 的输入参数写成 `{{input.<参数名>}}`（**每一次出现都要替换**，含嵌在长字符串内部的部分）；② 上游输出写成 `{{step_N.output}}`。其余值（工具固定选项、命令名、时间格式串）一律硬编码。
   - 字段必须来自输入，禁止臆造工具名 / 字段名 / 参数值（prompt 内的示例已标注为虚构）。
   - `input_schema` 为空时写成 `{}`。
-- **落 state**：**状态推进 + 模板副本**由 `flexible_step5` 完成回调负责——`status:"success"` ⇒ 把 `current_step` 置为 `templated`，并把**整段输出**登记为产物 `template_payload`（`step_callback/step5/mod.rs`）。**落库**（写 `plans_flexible_sessions`）仍由 `flexible_save_template` 执行，但它改为**从 `flexible_state` 读这份副本**，不再由协调器转抄模板 JSON（见 §六-14）。回调先于协调器调 `flexible_save_template` 触发，故 `current_step` 会先到 `templated`。
+- **落 state**：**状态推进 + 模板副本**由 `flexible_step5` 完成回调负责——`status:"success"` ⇒ 把 `current_step` 置为 `templated`，并把**整段输出**登记为产物 `template_payload`（`step_callback/step5/step5_callback.rs`）。**落库**（写 `plans_flexible_sessions`）仍由 `flexible_save_template` 执行，但它改为**从 `flexible_state` 读这份副本**，不再由协调器转抄模板 JSON（见 §六-14）。回调先于协调器调 `flexible_save_template` 触发，故 `current_step` 会先到 `templated`。
 
 ---
 

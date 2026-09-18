@@ -43,7 +43,10 @@ impl ToolExecutor for FlexibleSaveTemplateExecutor {
         };
 
         // 模板来源：step5 回调登记的 `template_payload`（见模块头注释：不经协调器转抄）。
-        let (current_step, products) = match self.service.load_state(&self.plan_id, &session_id).await
+        let (current_step, products) = match self
+            .service
+            .load_state(&self.plan_id, &session_id)
+            .await
         {
             Ok(Some((step, products))) => (step, products),
             Ok(None) => {
@@ -54,6 +57,19 @@ impl ToolExecutor for FlexibleSaveTemplateExecutor {
             }
             Err(e) => return error_result(&format!("读取会话流程状态失败: {}", e)),
         };
+
+        // 模板副本必须属于**本轮**定稿。上游任何一步被重跑（需求 / 字段 / 参数变更）都会把
+        // 副本作废（各 step 的 `CLEAR` 会清掉 `template_payload`），因此 `current_step` 不是
+        // `templated` 就说明副本不是当前定稿的产物 —— 这条校验专门拦住「用残留副本落库」
+        // 这条路径（清库 + 校验两道防线互补）。
+        // （`"templated"` 与 `step_callback::step5_callback` 的 `NEXT_STEP` 一致。）
+        if current_step != "templated" {
+            return error_result(&format!(
+                "会话 {} 的当前阶段是 `{}`，不是 step5 定稿态：模板副本只在 step5 定稿后有效。请先运行 flexible_step5，确认其返回 status=success 后再调用本工具。",
+                session_id, current_step
+            ));
+        }
+
         let products: Value = serde_json::from_str(&products).unwrap_or_else(|e| {
             tracing::warn!(
                 "[flexible_save_template] 会话 {} 的 products 不是合法 JSON（{}），按空对象处理",

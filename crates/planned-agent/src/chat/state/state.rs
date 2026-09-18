@@ -296,16 +296,16 @@ impl History {
         content: &Value,
         is_error_type: ErrorType,
     ) -> String {
-        // 先查是否已有同 id 的 tool 消息（短暂持锁，不跨 await）
-        let existing = {
+        // 定位已有同 id 的 tool 消息时**用下标**，不要用 store_id 反查：
+        // store 的 id 可能重复或为哨兵值（如 InMemoryStore 曾返回空串），
+        // 用 `id == store_id` 反查会命中 `inner[0]`（子 agent 里是 system 消息）
+        // 并把它覆盖成 tool 结果，导致下一次 LLM 请求被 400 拒绝。
+        let existing_idx = {
             let inner = self.inner.lock().unwrap();
-            inner
-                .iter()
-                .find(|(_, m)| {
-                    matches!(m.message.role, MessageRole::Tool)
-                        && m.message.tool_call_id.as_deref() == Some(tool_call_id)
-                })
-                .map(|(id, _)| id.clone())
+            inner.iter().position(|(_, m)| {
+                matches!(m.message.role, MessageRole::Tool)
+                    && m.message.tool_call_id.as_deref() == Some(tool_call_id)
+            })
         };
 
         let json = serde_json::to_string(content).unwrap_or_else(|_| content.to_string());
@@ -323,16 +323,11 @@ impl History {
         };
         let sm = StoreMessage::new(msg, is_error_type);
 
-        match existing {
-            Some(store_id) => {
+        match existing_idx {
+            Some(idx) => {
+                let store_id = self.inner.lock().unwrap()[idx].0.clone();
                 self.store.update(&store_id, &sm).await;
-                if let Some(entry) = self
-                    .inner
-                    .lock()
-                    .unwrap()
-                    .iter_mut()
-                    .find(|(id, _)| *id == store_id)
-                {
+                if let Some(entry) = self.inner.lock().unwrap().get_mut(idx) {
                     entry.1 = sm;
                 }
                 store_id

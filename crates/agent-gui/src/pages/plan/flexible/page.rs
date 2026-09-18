@@ -197,6 +197,41 @@ fn use_plan_agent_registrations(plan_id: String) {
             SubAgentResultChain::default(), // 结果链：测试用子 agent 不需要
             vec![], // before 回调链：测试用子 agent 不需要注入
         );
+        // 测试用：子 agent 轮次探针（专门核验「触顶继续」是否延续同一会话）。
+        // 与 max_rounds_demo 的区别：本子 agent 每轮会先输出可读的
+        // `[ROUND-PROBE] 本会话累计第 N 轮` —— 点「继续」后编号**接着涨**=同一会话（上下文保留），
+        // **从 1 重来**=被新建了子 agent（上下文丢失）。`max_tool_rounds` 故意设为 1，
+        // 让每点一次「继续」恰好推进一轮、探针编号每次 +1，便于在 GUI 上逐轮观察。
+        // 由引导模板 chat/sub_agent_rounds_probe_driver.toml 驱动的协调器去调用它。
+        register_sub_agent(
+            &ai_ctx,
+            &tools_ctx,
+            &prompt_ctx,
+            "flexible_step_rounds_probe",
+            "子 agent 轮次探针测试：被调用后每轮先输出 `[ROUND-PROBE] 本会话累计第 N 轮` 再调用 builtin_read_documentation，直到轮次上限触顶（用于在 GUI 核验子 agent 触顶「继续」是在同一会话内延续、还是被新建会话）。",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "user_message": {
+                        "type": "string",
+                        "description": "来自协调器的测试指令（一般无需传业务内容）"
+                    }
+                },
+                "required": []
+            }),
+            ChatConfig {
+                system_prompt: Some(SystemPrompt::Template(
+                    "chat/sub_agent_rounds_probe".into(),
+                )),
+                allowed_tools: Some(vec!["builtin_read_documentation".to_string()]),
+                max_tool_rounds: 1,
+                ..Default::default()
+            },
+            1, // depth
+            2, // max_depth
+            SubAgentResultChain::default(), // 结果链：测试用子 agent 不需要
+            vec![], // before 回调链：测试用子 agent 不需要注入
+        );
         register_sub_agent(
             &ai_ctx,
             &tools_ctx,

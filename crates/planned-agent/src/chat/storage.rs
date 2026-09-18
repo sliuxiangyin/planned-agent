@@ -13,7 +13,9 @@
 //! - **snapshot 不经 store**：LLM 请求构造的 `history.snapshot()` 直接读内存，
 //!   store 只负责写穿透持久化。
 //! - **统一 `String` ID**：所有实现使用 `String` 作为持久化 ID 类型，
-//!   InMemoryStore 内部转为 `index.to_string()`，SQLite 实现直接返回 UUID。
+//!   `InMemoryStore` 返回进程内唯一自增序号，SQLite 实现直接返回 UUID。
+
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use planned_agent_core::ai::types::Message;
@@ -82,7 +84,7 @@ impl StoreMessage {
 /// 消息级持久化接口，与 `History` 的操作一一对应。
 ///
 /// 使用 `String` 作为持久化 ID 类型：
-/// - `InMemoryStore` 返回 `index.to_string()`；
+/// - `InMemoryStore` 返回唯一自增序号（不落盘，但 id 仍须唯一）；
 /// - SQLite 实现返回 UUID 主键。
 #[async_trait]
 pub trait ChatHistoryStore: Send + Sync {
@@ -101,9 +103,20 @@ pub trait ChatHistoryStore: Send + Sync {
 
 // ── InMemoryStore ─────────────────────────────────────────────────────────
 
-/// 默认内存实现：不持久化，所有操作为空操作。
+/// `InMemoryStore` 的进程内自增 id 计数器。
+///
+/// 内存实现不落盘，但 **store_id 必须唯一** —— `History` 里按 id 定位的路径
+/// （如 `upsert_tool` 的就地更新）依赖它；否则会命中错误条目、覆盖别的消息。
+static NEXT_MEMORY_STORE_ID: AtomicUsize = AtomicUsize::new(0);
+
+/// 默认内存实现：不持久化消息内容，但 `append` 仍返回**唯一** id。
 ///
 /// 用于子 agent 临时会话、纯内存测试、以及不需要跨重启恢复的场景。
+///
+/// **id 唯一性是契约要求**：`History` 里按 id 定位的路径（如 `upsert_tool`）依赖它。
+/// 历史 bug：这里曾返回空串，导致 `upsert_tool` 用 `id == ""` 命中 `inner[0]`
+/// （子 agent 里是 system 消息）并把它覆盖成 tool 结果 —— 表现为子 agent
+/// 「触顶 → 继续」重放后请求被 400 `tool result's tool id(...) not found` 拒绝。
 pub struct InMemoryStore;
 
 impl InMemoryStore {
@@ -125,7 +138,8 @@ impl ChatHistoryStore for InMemoryStore {
     }
 
     async fn append(&self, _msg: &StoreMessage) -> String {
-        String::new() // 内存实现不实际存储
+        // 不落盘，但仍按 trait 契约返回**唯一** id（进程内自增）。
+        NEXT_MEMORY_STORE_ID.fetch_add(1, Ordering::Relaxed).to_string()
     }
 
     async fn update(&self, _id: &str, _msg: &StoreMessage) {

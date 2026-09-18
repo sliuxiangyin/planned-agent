@@ -4,7 +4,7 @@
 //!
 //! `execution_trace` 与其它产物的**来源根本不同**：它不来自子 agent 的输出 JSON（模型自述），
 //! 而来自**会话历史**（系统记录）。把它做成链上独立一环，好处是：
-//! - 定稿登记回调（`Step2Callback`，见同目录 `mod.rs`）保持「只从输出 JSON 取产物」的单一职责；
+//! - 定稿登记回调（`Step2Callback`，见同目录 `step2_callback.rs`）保持「只从输出 JSON 取产物」的单一职责；
 //! - 轨迹导出/清洗的策略（[`export_cleaned_trace`]）与 prompt 无关，可单独测试；
 //! - 将来别的 step 要写轨迹类产物，照抄这一环即可。
 //!
@@ -29,14 +29,14 @@ use crate::services::plans_flexible_service::PlansFlexibleService;
 
 use super::super::analysis::require_analysis;
 use super::super::commit::hand_off;
+use super::step2_callback::AGENT;
 use super::tool_trace::export_cleaned_trace;
-use super::AGENT;
 
 /// 轨迹产物的 key（`flexible_state.products` 里的名字）。
 const EXECUTION_TRACE_KEY: &str = "execution_trace";
 
 /// 轨迹提取回调：从会话历史导出真实工具轨迹并落库。
-pub(crate) struct Step2ExecutionTraceCallback {
+pub(super) struct Step2ExecutionTraceCallback {
     /// 该 plan 的 id（plan 级注册时已知，是常量）。
     plan_id: String,
     /// 灵活计划聚合服务（写流程中间状态）。
@@ -44,7 +44,7 @@ pub(crate) struct Step2ExecutionTraceCallback {
 }
 
 impl Step2ExecutionTraceCallback {
-    pub(crate) fn new(plan_id: String, service: Arc<PlansFlexibleService>) -> Self {
+    pub(super) fn new(plan_id: String, service: Arc<PlansFlexibleService>) -> Self {
         Self { plan_id, service }
     }
 }
