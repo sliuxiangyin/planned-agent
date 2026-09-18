@@ -59,11 +59,7 @@ pub(crate) struct StepCallback {
 }
 
 impl StepCallback {
-    pub(crate) fn new(
-        plan_id: String,
-        service: Arc<PlansFlexibleService>,
-        spec: StepSpec,
-    ) -> Self {
+    pub(crate) fn new(plan_id: String, service: Arc<PlansFlexibleService>, spec: StepSpec) -> Self {
         Self {
             plan_id,
             service,
@@ -74,7 +70,12 @@ impl StepCallback {
 
 #[async_trait]
 impl SubAgentResultCallback for StepCallback {
-    async fn on_result(&self, ctx: &SubAgentCallContext, result: &ToolResult) -> ResultDecision {
+    async fn on_result(
+        &self,
+        ctx: &SubAgentCallContext,
+        result: &ToolResult,
+        _history: &[planned_agent::chat::storage::StoreMessage],
+    ) -> ResultDecision {
         let spec = &self.spec;
         let text = result.content.as_str().unwrap_or("");
         tracing::info!(
@@ -360,7 +361,10 @@ mod tests {
             canonical["task"]["params"]["path"],
             Value::String("C:/Users/woddp/Desktop/Downloads".into())
         );
-        assert!(!canonical.to_string().contains("\\\\"), "不应再残留双反斜杠");
+        assert!(
+            !canonical.to_string().contains("\\\\"),
+            "不应再残留双反斜杠"
+        );
     }
 
     #[test]
@@ -457,9 +461,15 @@ mod tests {
         )
         .unwrap();
         let patch = build_patch(&spec, &parsed);
-        assert_eq!(patch["compressed_context"], Value::String("已追加一行".into()));
+        assert_eq!(
+            patch["compressed_context"],
+            Value::String("已追加一行".into())
+        );
         assert_eq!(patch.get("field_selection_result"), Some(&Value::Null));
-        assert_eq!(patch.get("parameter_confirmation_result"), Some(&Value::Null));
+        assert_eq!(
+            patch.get("parameter_confirmation_result"),
+            Some(&Value::Null)
+        );
     }
 
     #[test]

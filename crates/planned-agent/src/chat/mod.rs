@@ -45,6 +45,7 @@ mod driver;
 mod service;
 mod state;
 pub mod storage;
+pub mod trace;
 mod sub_agent;
 mod tools;
 

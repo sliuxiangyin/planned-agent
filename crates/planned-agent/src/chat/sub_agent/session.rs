@@ -23,7 +23,8 @@ pub struct ChatSubAgentSession {
     service: ChatService<FilePromptManager>,
     depth: u32,
     max_depth: u32,
-    result_callback: Option<Arc<dyn SubAgentResultCallback>>,
+    /// 结果回调链：挂起-恢复后仍要用同一份，故随会话保留。
+    result_callbacks: Vec<Arc<dyn SubAgentResultCallback>>,
     /// 父 agent 传入本子 agent 的原始参数（挂起时保留，resume 后回调仍需用它定位归属）。
     arguments: Value,
 }
@@ -33,14 +34,14 @@ impl ChatSubAgentSession {
         service: ChatService<FilePromptManager>,
         depth: u32,
         max_depth: u32,
-        result_callback: Option<Arc<dyn SubAgentResultCallback>>,
+        result_callbacks: Vec<Arc<dyn SubAgentResultCallback>>,
         arguments: Value,
     ) -> Self {
         Self {
             service,
             depth,
             max_depth,
-            result_callback,
+            result_callbacks,
             arguments,
         }
     }
@@ -78,7 +79,7 @@ impl SubAgentSession for ChatSubAgentSession {
             &stream,
             self.depth,
             self.max_depth,
-            self.result_callback.clone(),
+            self.result_callbacks.clone(),
             self.arguments.clone(),
         )
         .await

@@ -3,6 +3,8 @@
 use async_trait::async_trait;
 use planned_agent_core::mcp::types::ToolResult;
 
+use crate::chat::storage::StoreMessage;
+
 use super::SubAgentCallContext;
 
 /// 子 agent 结果处理决策。
@@ -35,9 +37,25 @@ pub enum ResultDecision {
     /// 与 [`Retry`](Self::Retry) 的分工：`Retry` 是「模型输出不对，让它重做」；
     /// `Abort` 是「模型没错，但外部动作失败了，立刻收场并如实上报」。
     Abort(String),
+    /// 交给链上的**下一个**回调继续处理。
+    ///
+    /// `String` 成为链内传递值：下游回调在 `result.content` 里看到它，但**它不改变对外
+    /// 结果** —— 父 agent / GUI / 持久化看到的仍是子 agent 的原始输出。
+    ///
+    /// 与 [`Transform`](Self::Transform) 的分工：`Next` 是「我处理完了，交给下一位」，
+    /// 不影响父 agent；`Transform` 是「最终对外就用我这份」。
+    ///
+    /// 链上**最后一个**回调返回 `Next` 时已无消费者：记 warn，对外结果保持不变
+    /// （等价于 [`Accept`](Self::Accept)）。
+    Next(String),
 }
 
 /// 子 agent 结果回调：完成后可获取最终 tool result（用于外部解析/提取）。
+///
+/// 多个实现可**串行**挂在同一次调用上（`Vec<Arc<dyn SubAgentResultCallback>>`）：
+/// 每个回调按顺序跑，只有 [`Next`](ResultDecision::Next) 会把链交给下一个，其余决策
+/// 一律终止链。链的执行细节（两个传值通道、终止规则、末位 `Next` 的处理）见
+/// `collect::run_chain`。
 ///
 /// `on_result` 为 **async**：它在触发方的异步上下文（`collect_until_outcome`）中被
 /// `await`，回调实现因此可以直接 `await` 持久化等异步副作用，无需自行 `tokio::spawn`
@@ -47,12 +65,29 @@ pub trait SubAgentResultCallback: Send + Sync {
     /// 子 agent 完成后触发。
     ///
     /// - `ctx`：本次调用的上下文（工具名 / tool_call_id / 父 agent 传入的原始参数）
-    /// - `result`：最终 tool result（`content` 即为 `extract_last_assistant_text` 的文本）
+    /// - `result`：链内传递值 —— 链首为 `extract_last_assistant_text` 的文本，之后为
+    ///   上一个回调 `Next` 的产物。注意它**不一定**是对外结果（对外结果只由
+    ///   [`Transform`](ResultDecision::Transform) 决定）。
+    /// - `history`：本子 agent 到目前为止的**完整对话历史**（本轮迭代开始时快照，
+    ///   重试后会刷新）。用 [`export_tool_trace`](crate::chat::trace::export_tool_trace)
+    ///   可从它导出**真实**的工具执行轨迹 —— 这是轨迹类产物的唯一可信来源，不要
+    ///   改用模型自述。
     ///
     /// 返回 [`ResultDecision`]：
-    /// - `Accept`：接受结果
-    /// - `Transform(text)`：替换 content
-    /// - `Retry(msg)`：发送纠正消息给子 agent，重试后再次回调
+    /// - `Accept`：接受结果（终止链，对外保持原文本）
+    /// - `Transform(text)`：替换对外 content（终止链）
+    /// - `Next(text)`：把 `text` 传给下一个回调（终止链仅当它是末位）
+    /// - `Retry(msg)`：发送纠正消息给子 agent，重试后链从头再走一遍
     /// - `Abort(reason)`：中断本次调用，`reason` 作为失败结果返回（不重试）
-    async fn on_result(&self, ctx: &SubAgentCallContext, result: &ToolResult) -> ResultDecision;
+    async fn on_result(
+        &self,
+        ctx: &SubAgentCallContext,
+        result: &ToolResult,
+        history: &[StoreMessage],
+    ) -> ResultDecision;
+
+    /// 回调名，仅用于日志。
+    fn name(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
 }

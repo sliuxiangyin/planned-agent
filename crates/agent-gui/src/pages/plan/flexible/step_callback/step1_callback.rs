@@ -36,10 +36,12 @@ const SPEC: StepSpec = StepSpec {
     ],
 };
 
-/// 创建 `flexible_step1` 回调实例（方便传给 `register_sub_agent`）。
+/// 创建 `flexible_step1` 回调链（方便传给 `register_sub_agent`）。
+///
+/// 返回 `Vec`：结果回调支持多实现串行（见 `collect::run_chain`），本 step 目前只挂一个。
 pub fn create_step1_callback(
     plan_id: String,
     service: Arc<PlansFlexibleService>,
-) -> Option<Arc<dyn SubAgentResultCallback>> {
-    Some(Arc::new(StepCallback::new(plan_id, service, SPEC)))
+) -> Vec<Arc<dyn SubAgentResultCallback>> {
+    vec![Arc::new(StepCallback::new(plan_id, service, SPEC))]
 }

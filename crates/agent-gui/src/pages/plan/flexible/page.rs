@@ -164,8 +164,8 @@ fn use_plan_agent_registrations(plan_id: String) {
             },
             1, // depth
             2, // max_depth
-            None,
-            vec![], // before 回调：测试用子 agent 不需要注入
+            vec![], // 结果回调链：测试用子 agent 不需要
+            vec![], // before 回调链：测试用子 agent 不需要注入
         );
         // 测试用：子 agent max_tool_rounds 触顶复现。
         register_sub_agent(
@@ -194,8 +194,8 @@ fn use_plan_agent_registrations(plan_id: String) {
             },
             1, // depth
             2, // max_depth
-            None,
-            vec![], // before 回调：测试用子 agent 不需要注入
+            vec![], // 结果回调链：测试用子 agent 不需要
+            vec![], // before 回调链：测试用子 agent 不需要注入
         );
         register_sub_agent(
             &ai_ctx,
