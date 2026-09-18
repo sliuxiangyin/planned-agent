@@ -16,7 +16,7 @@ use tracing::{error, info, warn};
 use crate::chat::service::{ChatConfig, ChatService};
 
 use super::callback::{
-    BeforeDecision, SubAgentBeforeCallback, SubAgentCallContext, SubAgentResultCallback,
+    BeforeDecision, SubAgentBeforeCallback, SubAgentCallContext, SubAgentResultChain,
 };
 use super::collect::collect_until_outcome;
 
@@ -34,8 +34,8 @@ pub struct SubAgentRunner {
     config: ChatConfig,
     depth: u32,
     max_depth: u32,
-    /// 结果回调链：子 agent 完成后按顺序串行执行（见 `collect::run_chain`）
-    result_callbacks: Vec<Arc<dyn SubAgentResultCallback>>,
+    /// 结果链：前置分析 + 串行业务回调（见 `collect::run_chain`）
+    result_chain: SubAgentResultChain,
     /// 启动前回调链：在 task 文本生成前按顺序注入系统侧数据（只碰入参，不碰产物）
     before_callbacks: Vec<Arc<dyn SubAgentBeforeCallback>>,
 }
@@ -48,7 +48,7 @@ impl SubAgentRunner {
         config: ChatConfig,
         depth: u32,
         max_depth: u32,
-        result_callbacks: Vec<Arc<dyn SubAgentResultCallback>>,
+        result_chain: SubAgentResultChain,
         before_callbacks: Vec<Arc<dyn SubAgentBeforeCallback>>,
     ) -> Self {
         Self {
@@ -58,7 +58,7 @@ impl SubAgentRunner {
             config,
             depth,
             max_depth,
-            result_callbacks,
+            result_chain,
             before_callbacks,
         }
     }
@@ -94,7 +94,7 @@ impl SubAgentSessionRunner for SubAgentRunner {
 
         // ── 启动前回调链：在 task 文本生成前注入系统侧数据 ──
         // 注入只改写「发给子 agent 的参数」，不读也不写子 agent 的输出，
-        // 因此与结果回调链（`result_callbacks`）互不影响。
+        // 因此与结果链（`result_chain`）互不影响。
         // 位置刻意放在 `strip_hidden_args` 之后：注入字段不受 hidden_args 剔除影响。
         if !self.before_callbacks.is_empty() {
             let ctx = SubAgentCallContext {
@@ -163,7 +163,7 @@ impl SubAgentSessionRunner for SubAgentRunner {
             &stream,
             self.depth,
             self.max_depth,
-            self.result_callbacks.clone(),
+            self.result_chain.clone(),
             arguments,
         )
         .await

@@ -1,18 +1,14 @@
 //! 子 agent 会话：持有独立的 `ChatService`，支持挂起-恢复。
 
-use std::sync::Arc;
-
 use anyhow::Result;
 use async_trait::async_trait;
 use planned_agent_prompt_manager::FilePromptManager;
-use planned_agent_tool_manager::{
-    SubAgentRunOutcome, SubAgentSession, SubAgentSessionRunner, ToolStreamSender,
-};
+use planned_agent_tool_manager::{SubAgentRunOutcome, SubAgentSession, ToolStreamSender};
 use serde_json::Value;
 
 use crate::chat::service::ChatService;
 
-use super::callback::SubAgentResultCallback;
+use super::callback::SubAgentResultChain;
 use super::collect::collect_until_outcome;
 
 /// 子 agent 会话：持有独立的 `ChatService`（由 `start()` 创建），支持 resume。
@@ -23,8 +19,8 @@ pub struct ChatSubAgentSession {
     service: ChatService<FilePromptManager>,
     depth: u32,
     max_depth: u32,
-    /// 结果回调链：挂起-恢复后仍要用同一份，故随会话保留。
-    result_callbacks: Vec<Arc<dyn SubAgentResultCallback>>,
+    /// 结果链（前置分析 + 业务回调）：挂起-恢复后仍要用同一份，故随会话保留。
+    result_chain: SubAgentResultChain,
     /// 父 agent 传入本子 agent 的原始参数（挂起时保留，resume 后回调仍需用它定位归属）。
     arguments: Value,
 }
@@ -34,14 +30,14 @@ impl ChatSubAgentSession {
         service: ChatService<FilePromptManager>,
         depth: u32,
         max_depth: u32,
-        result_callbacks: Vec<Arc<dyn SubAgentResultCallback>>,
+        result_chain: SubAgentResultChain,
         arguments: Value,
     ) -> Self {
         Self {
             service,
             depth,
             max_depth,
-            result_callbacks,
+            result_chain,
             arguments,
         }
     }
@@ -79,7 +75,7 @@ impl SubAgentSession for ChatSubAgentSession {
             &stream,
             self.depth,
             self.max_depth,
-            self.result_callbacks.clone(),
+            self.result_chain.clone(),
             self.arguments.clone(),
         )
         .await

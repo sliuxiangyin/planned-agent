@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use dioxus::prelude::*;
-use planned_agent::chat::{ChatConfig, SystemPrompt};
+use planned_agent::chat::{ChatConfig, SubAgentResultChain, SystemPrompt};
 use planned_agent_core::prompt::PromptManager;
 use planned_agent_core::tool_registry::ToolCategory;
 
@@ -164,7 +164,7 @@ fn use_plan_agent_registrations(plan_id: String) {
             },
             1, // depth
             2, // max_depth
-            vec![], // 结果回调链：测试用子 agent 不需要
+            SubAgentResultChain::default(), // 结果链：测试用子 agent 不需要
             vec![], // before 回调链：测试用子 agent 不需要注入
         );
         // 测试用：子 agent max_tool_rounds 触顶复现。
@@ -194,7 +194,7 @@ fn use_plan_agent_registrations(plan_id: String) {
             },
             1, // depth
             2, // max_depth
-            vec![], // 结果回调链：测试用子 agent 不需要
+            SubAgentResultChain::default(), // 结果链：测试用子 agent 不需要
             vec![], // before 回调链：测试用子 agent 不需要注入
         );
         register_sub_agent(
@@ -246,7 +246,7 @@ fn use_plan_agent_registrations(plan_id: String) {
             &tools_ctx,
             &prompt_ctx,
             "flexible_step2",
-            "灵活模式任务执行 Agent：根据需求澄清结果执行工具调用并记录轨迹。",
+            "灵活模式任务执行 Agent：根据需求澄清结果执行工具调用。",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -332,7 +332,7 @@ fn use_plan_agent_registrations(plan_id: String) {
                 "properties": {
                     "execution_trace": {
                         "type": "array",
-                        "description": "来自 flexible_step2 返回 JSON 的 execution_trace 数组，包含每次工具调用的输入参数"
+                        "description": "来自 flexible_step2 会话历史导出的真实工具调用轨迹（每条含 id / name / arguments / output / outcome），包含每次工具调用的输入参数"
                     },
                     "output_format": {
                         "type": "string",
@@ -381,7 +381,7 @@ fn use_plan_agent_registrations(plan_id: String) {
                     },
                     "execution_trace": {
                         "type": "array",
-                        "description": "来自 flexible_step2 返回 JSON 的 execution_trace 数组（按顺序的工具调用及输入参数）"
+                        "description": "来自 flexible_step2 会话历史导出的真实工具调用轨迹（按声明顺序，每条含 id / name / arguments / output / outcome）"
                     },
                     "field_selection_result": {
                         "type": "object",

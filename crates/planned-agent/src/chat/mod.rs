@@ -54,6 +54,7 @@ mod tests;
 
 pub use service::{ChatConfig, ChatEvent, ChatService, SendTicket, SubscriptionGuard, SubscriptionId, SystemPrompt};
 pub use sub_agent::{
-    BeforeDecision, ChatSubAgentSession, ResultDecision, SubAgentBeforeCallback,
-    SubAgentCallContext, SubAgentResultCallback, SubAgentRunner,
+    BeforeDecision, ChatSubAgentSession, PreludeOutcome, ResultDecision, SubAgentBeforeCallback,
+    SubAgentCall, SubAgentCallContext, SubAgentChainPrelude, SubAgentResultCallback,
+    SubAgentResultChain, SubAgentRunner,
 };

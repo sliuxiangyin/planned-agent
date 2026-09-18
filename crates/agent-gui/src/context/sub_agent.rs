@@ -8,7 +8,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use planned_agent::chat::{
-    ChatConfig, SubAgentBeforeCallback, SubAgentResultCallback, SubAgentRunner,
+    ChatConfig, SubAgentBeforeCallback, SubAgentResultChain, SubAgentRunner,
 };
 use planned_agent_core::mcp::types::Tool;
 
@@ -25,8 +25,8 @@ use super::{AiContext, PromptContext, ToolsContext};
 /// - `config` — 子 agent 的 `ChatConfig`（含 `system_prompt` 等）
 /// - `depth` — 当前嵌套深度（通常为 1）
 /// - `max_depth` — 最大允许嵌套深度（通常为 2）
-/// - `result_callbacks` — 结果回调链：子 agent 完成后**按顺序串行**执行
-///   （只有 `Transform` 会改对外结果；见 `collect::run_chain`）
+/// - `result_chain` — 结果链：**前置分析**（解析 + 守门，各 step 默认带上）+ 串行业务回调，
+///   由各 step 的 `create_stepN_callback` 组装（见 `step_callback` 模块）
 /// - `before_callbacks` — 启动前回调链：在 task 文本生成前按顺序注入系统侧数据
 ///   （只碰入参；与结果回调链互不影响）
 pub fn register_sub_agent(
@@ -39,7 +39,7 @@ pub fn register_sub_agent(
     config: ChatConfig,
     depth: u32,
     max_depth: u32,
-    result_callbacks: Vec<Arc<dyn SubAgentResultCallback>>,
+    result_chain: SubAgentResultChain,
     before_callbacks: Vec<Arc<dyn SubAgentBeforeCallback>>,
 ) {
     let tool = Tool {
@@ -55,7 +55,7 @@ pub fn register_sub_agent(
         config,
         depth,
         max_depth,
-        result_callbacks,
+        result_chain,
         before_callbacks,
     );
 

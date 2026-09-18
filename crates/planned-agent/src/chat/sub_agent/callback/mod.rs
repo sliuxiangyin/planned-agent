@@ -13,14 +13,18 @@
 //! callback/
 //! ├── mod.rs     模块声明 + 重导出 + 共享上下文
 //! ├── before.rs   启动前注入：BeforeDecision + SubAgentBeforeCallback
-//! └── result.rs   完成后决策：ResultDecision + SubAgentResultCallback
+//! └── result.rs   完成后决策：ResultDecision + SubAgentChainPrelude +
+//!                 SubAgentResultCallback + SubAgentResultChain
 //! ```
 
 mod before;
 mod result;
 
 pub use before::{BeforeDecision, SubAgentBeforeCallback};
-pub use result::{ResultDecision, SubAgentResultCallback};
+pub use result::{
+    PreludeOutcome, ResultDecision, SubAgentCall, SubAgentChainPrelude, SubAgentResultCallback,
+    SubAgentResultChain,
+};
 
 use serde_json::Value;
 

@@ -60,7 +60,10 @@ impl SubAgentBeforeCallback for StateInjectCallback {
         let raw = match self.service.load_state(&self.plan_id, &session_id).await {
             Ok(Some((_, products))) => products,
             Ok(None) => {
-                tracing::warn!("[flexible] {} 注入跳过：flexible_state 无该会话记录", ctx.agent_name);
+                tracing::warn!(
+                    "[flexible] {} 注入跳过：flexible_state 无该会话记录",
+                    ctx.agent_name
+                );
                 return BeforeDecision::Continue;
             }
             Err(e) => {
@@ -152,7 +155,10 @@ mod tests {
     #[test]
     fn mapping_can_rename() {
         let p = products(json!({ "compressed_context": "摘要" }));
-        let out = pick_injections(Some(&p), &[("compressed_context", "execution_trace_summary")]);
+        let out = pick_injections(
+            Some(&p),
+            &[("compressed_context", "execution_trace_summary")],
+        );
         assert_eq!(
             Value::Object(out),
             json!({ "execution_trace_summary": "摘要" })

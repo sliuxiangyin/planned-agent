@@ -7,7 +7,7 @@ text = """
 
 ## 输入
 - `task_definition`：任务定义对象（含 `task` 任务描述与 `params` 参数）。
-- `execution_trace`：数组，按顺序记录的工具调用及输入参数。
+- `execution_trace`：**真实**工具调用轨迹数组（由系统从执行会话记录导出，按声明顺序）。每条含 `id`、`name`（工具名）、`arguments`（该次调用的参数）、`output`（输出，过长时被截断）、`outcome`（`ok` / `error` / `cancelled` / `pending`）；用户交互（`request_user_action`）不在其中。
 - `field_selection_result`：字段选择结果对象，含 `available_fields` 与 `selected_fields`。
 - `parameter_confirmation_result`：参数确认结果对象，含 `candidates` / `selected_params` / `template_input`。
 
@@ -32,9 +32,9 @@ text = """
 - 基于 `execution_trace` 生成，每个步骤对应一次工具调用。
 - 每个步骤对象包含：
   - `id`：如 `step_1`, `step_2` ……
-  - `tool`：工具名称（原样取自 `execution_trace`）。
-  - `params`：该工具的具体参数值（来自 `execution_trace` 中的 `input`）。其中**来自模板输入参数的值必须写成占位符**（规则见下），其余值硬编码。
-  - `params` 中每个参数的**类型必须与该工具在 `execution_trace` 里的真实输入一致**：真实输入是数组就写数组（如 `["a", "b"]`），是对象就写对象，是字符串就写字符串。**严禁改变容器类型**——尤其不要把数组包成对象：真实输入 `["x"]` 必须写成 `["x"]`，不得写成 `{"item": "x"}`（也不得把对象拆成数组）。
+  - `tool`：工具名称（原样取自 `execution_trace` 里该步骤的 `name`）。
+  - `params`：该工具的具体参数值（来自 `execution_trace` 中该步骤的 `arguments`）。其中**来自模板输入参数的值必须写成占位符**（规则见下），其余值硬编码。
+  - `params` 中每个参数的**类型必须与该工具在 `execution_trace` 的 `arguments` 里的真实值一致**：真实值是数组就写数组（如 `["a", "b"]`），是对象就写对象，是字符串就写字符串。**严禁改变容器类型**——尤其不要把数组包成对象：真实值 `["x"]` 必须写成 `["x"]`，不得写成 `{"item": "x"}`（也不得把对象拆成数组）。
 - **`params` 里只允许两类占位符，不得自创其它写法**：
   1. **模板输入参数**：凡是取值来自 `input_schema` 中声明的参数（运行时由用户提供，本次执行只是恰好用了某个具体值或 `example` 值）的，必须写成 {% raw %}`"{{input.<参数名>}}"`{% endraw %}。例如 `input_schema` 声明了 `file_path`，而 `execution_trace` 里用到 `C:/data/in.txt`，则必须写 {% raw %}`"{{input.file_path}}"`{% endraw %}。
      - **同一个参数的每一次出现都要替换**，包括**嵌在长字符串内部**的部分：命令串里的 `-Path 'C:/data/in.txt'` 要改成 {% raw %}`-Path '{{input.file_path}}'`{% endraw %}；文件名 `orders_2026-09.csv` 要改成 {% raw %}`orders_{{input.month}}.csv`{% endraw %}。**漏掉任何一处，执行时都会新旧值混用**。

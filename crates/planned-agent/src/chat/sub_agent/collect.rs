@@ -16,16 +16,20 @@ use tracing::{error, info, warn};
 use crate::chat::service::{ChatEvent, ChatService, SendOutcome, SendTicket};
 use crate::chat::storage::StoreMessage;
 
-use super::callback::{ResultDecision, SubAgentCallContext, SubAgentResultCallback};
+use super::callback::{
+    PreludeOutcome, ResultDecision, SubAgentCall, SubAgentCallContext, SubAgentResultChain,
+};
 use super::session::ChatSubAgentSession;
 
 /// 监听子 agent 的事件流，转发到 `ToolStreamSender`，
 /// 直到对话完成（`Completed`）或挂起（`Suspended`）。
 ///
-/// `Completed` 分支会调用回调，根据 [`ResultDecision`] 决定：
-/// - `Accept`：接受原始结果
-/// - `Transform`：替换 content
-/// - `Retry`：重发纠正消息给子 agent（最多重试 2 次）
+/// `Completed` 分支先跑**前置分析**（`SubAgentChainPrelude`：解析输出、判定定稿、定稿
+/// 对外文本，或直接收场），再串行跑业务回调，按 [`ResultDecision`] 决定：
+/// - `Accept`：接受结果
+/// - `Transform`：替换对外 content
+/// - `Next`：把值交给链上下一个回调（链尾时不改变对外结果）
+/// - `Retry`：重发纠正消息给子 agent（最多重试 2 次，重试后链**从头再走**，前置分析也会重跑）
 /// - `Abort`：不重试，直接以失败结果收场（内容为失败原因）
 pub(super) async fn collect_until_outcome(
     service: &ChatService<FilePromptManager>,
@@ -33,7 +37,7 @@ pub(super) async fn collect_until_outcome(
     stream: &ToolStreamSender,
     depth: u32,
     max_depth: u32,
-    result_callbacks: Vec<Arc<dyn SubAgentResultCallback>>,
+    result_chain: SubAgentResultChain,
     // 父 agent 传给该子 agent 的原始参数；仅用于填充回调的 `SubAgentCallContext`，
     // 或随挂起会话保留到 resume（见 `ChatSubAgentSession`）。
     arguments: Value,
@@ -91,8 +95,8 @@ pub(super) async fn collect_until_outcome(
 
             // ── 回调决策 + 重试循环 ──
             let max_retries = 2;
-            let final_text = if result_callbacks.is_empty() {
-                // 无回调：直接用原始结果（等价于单元素链的 Accept）
+            let final_text = if result_chain.is_empty() {
+                // 空链（既无前置分析也无回调）：直接用原始结果
                 last_text
             } else {
                 // 本次调用上下文：核心库只透传参数，具体取哪个字段由回调决定。
@@ -108,7 +112,7 @@ pub(super) async fn collect_until_outcome(
                 loop {
                     // 每轮重新取历史：重试会跑出新的工具调用，轨迹必须跟着刷新。
                     let history = service.history_store();
-                    match run_chain(&result_callbacks, &call_ctx, &last_text, &history).await {
+                    match run_chain(&result_chain, &call_ctx, &last_text, &history).await {
                         ChainOutcome::Done(text) => break text,
                         ChainOutcome::Abort(reason) => {
                             // 外部动作失败（如流程状态写库）：重试同样会失败，立即以失败结果收场，
@@ -167,7 +171,7 @@ pub(super) async fn collect_until_outcome(
                     service.clone(),
                     depth,
                     max_depth,
-                    result_callbacks.clone(),
+                    result_chain.clone(),
                     arguments,
                 )),
                 message,
@@ -209,17 +213,24 @@ enum ChainOutcome {
     Abort(String),
 }
 
-/// 串行跑完回调链，返回最终去向。
+/// 跑完结果链（前置分析 → 业务回调），返回最终去向。
+///
+/// # 执行顺序
+///
+/// 1. **前置分析**（[`SubAgentChainPrelude`]，已挂时）：跑一次，产物交给链上每个回调，
+///    并可**定稿对外文本**（`outer`），或直接收场（`Stop`，链一个回调都不跑）。
+/// 2. **业务回调**：按注册顺序串行。
 ///
 /// # 两个独立的传值通道
 ///
 /// - `pipeline_value`：**链内**传递值，初始为 `last_text`，只由 [`Next`] 改写。
 ///   下游回调在 `result.content` 里看到它 —— 所以链是「处理管道」，而不是每个回调
 ///   都复核同一份原文。
-/// - `final_content`：**对外**结果，初始为 `last_text`，且**全程不再变化** —— 唯一能
-///   换掉它的是 [`Transform`]，而它走的是直接 return 的分支。因此「链上没有任何回调
-///   换掉对外结果」时，结果恒为原文：这正是 `Accept`、空链、末位 `Next` 三者对外
-///   表现一致的原因。
+/// - `final_content`：**对外**结果，初始为 `last_text`，可被前置分析的 `outer` 定稿
+///   （去 markdown 围栏、紧凑 JSON、路径规范化这类「出口清洗」），此后只有
+///   [`Transform`] 能改写它 —— 而它走的是直接 return 的分支。因此「链上没有任何回调
+///   换掉对外结果」时，结果就是 prelude 定稿的那份（没挂 prelude 则为原文）：这正是
+///   `Accept`、空链、末位 `Next` 三者对外表现一致的原因。
 ///
 /// 这条分工让回调既能「只做副作用、不改对外呈现」（返回 `Next` / `Accept`），
 /// 也能「最终对外就用我这份」（返回 `Transform`）。
@@ -233,28 +244,57 @@ enum ChainOutcome {
 /// [`Next`]: ResultDecision::Next
 /// [`Transform`]: ResultDecision::Transform
 async fn run_chain(
-    chain: &[Arc<dyn SubAgentResultCallback>],
+    chain: &SubAgentResultChain,
     ctx: &SubAgentCallContext,
     last_text: &str,
     history: &[StoreMessage],
 ) -> ChainOutcome {
     // 链内传递值：只被 `Next` 改写，下游回调看到的就是它。
     let mut pipeline_value = last_text.to_string();
-    // 对外结果：初始即原始文本，且全程不变（改动它的 `Transform` 是直接 return 的）。
-    let final_content = last_text.to_string();
+    // 对外结果：初始为原文，等待前置分析定稿（出口清洗）。
+    let mut final_content = last_text.to_string();
+    // 前置分析产物：未挂 prelude 时为 Null —— 回调可以安全读它，不必自己判空。
+    let mut analysis = Value::Null;
 
-    for (i, cb) in chain.iter().enumerate() {
+    // ── 前置分析：链跑之前一次 ──
+    if let Some(prelude) = chain.prelude() {
+        let probe = chain_probe(&pipeline_value);
+        match prelude.analyze(ctx, &probe, history).await {
+            PreludeOutcome::Proceed {
+                analysis: produced,
+                outer,
+            } => {
+                analysis = produced;
+                if let Some(text) = outer {
+                    final_content = text;
+                }
+            }
+            PreludeOutcome::Stop(decision) => {
+                info!(
+                    "[子agent] 前置分析 {} 要求直接收场，链不执行",
+                    prelude.name()
+                );
+                return stop_outcome(decision, final_content, prelude.name());
+            }
+        }
+    }
+
+    let callbacks = chain.callbacks();
+    for (i, cb) in callbacks.iter().enumerate() {
         // 下游回调看到的是链内传递值（上一个 `Next` 的产物），不是原始 last_text。
-        let probe = ToolResult {
-            call_id: String::new(),
-            is_error: false,
-            content: Value::String(pipeline_value.clone()),
+        let probe = chain_probe(&pipeline_value);
+        let call = SubAgentCall {
+            ctx,
+            result: &probe,
+            history,
+            analysis: &analysis,
+            is_last: i + 1 == callbacks.len(),
         };
-        match cb.on_result(ctx, &probe, history).await {
+        match cb.on_result(&call).await {
             ResultDecision::Accept => return ChainOutcome::Done(final_content),
             ResultDecision::Transform(new) => return ChainOutcome::Done(new),
             ResultDecision::Next(next) => {
-                if i + 1 == chain.len() {
+                if call.is_last {
                     warn!(
                         "[子agent] 回调链末位的 {} 返回 Next，但无后续消费者；对外结果保持不变",
                         cb.name()
@@ -267,13 +307,46 @@ async fn run_chain(
         }
     }
 
-    // 空链，或整条链都以 Next 收尾：对外结果保持原样。
+    // 空链，或整条链都以 Next 收尾：对外结果保持原样（= prelude 定稿的那份或原文）。
     ChainOutcome::Done(final_content)
+}
+
+/// 把前置分析 `Stop` 携带的决策翻译成链的收场方式。
+///
+/// `Stop` 的语义是「链不跑」，所以只有终止型决策有意义；若给了 [`Next`]，链上并没有
+/// 「下一位」可以交给（回调一个都不会执行），故记 warn 并按 `Accept` 处理。
+///
+/// [`Next`]: ResultDecision::Next
+fn stop_outcome(decision: ResultDecision, outer: String, prelude_name: &str) -> ChainOutcome {
+    match decision {
+        ResultDecision::Accept => ChainOutcome::Done(outer),
+        ResultDecision::Transform(new) => ChainOutcome::Done(new),
+        ResultDecision::Retry(msg) => ChainOutcome::Retry(msg),
+        ResultDecision::Abort(reason) => ChainOutcome::Abort(reason),
+        ResultDecision::Next(_) => {
+            warn!(
+                "[子agent] 前置分析 {} 返回 Stop(Next)，但链上没有下一位可交给；按 Accept 处理",
+                prelude_name
+            );
+            ChainOutcome::Done(outer)
+        }
+    }
+}
+
+/// 构造链内传值的载体：链首为子 agent 原始输出，之后为上一个 `Next` 的产物。
+fn chain_probe(text: &str) -> ToolResult {
+    ToolResult {
+        call_id: String::new(),
+        is_error: false,
+        content: Value::String(text.to_string()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 这两个 trait 只在测试里用来造回调 / 分析器（生产路径不需要在本模块可见）。
+    use crate::chat::{SubAgentChainPrelude, SubAgentResultCallback};
 
     /// 预设行为脚本（`ResultDecision` 未实现 `Clone`，故用可复制的脚本来描述）。
     #[derive(Clone, Copy)]
@@ -294,13 +367,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SubAgentResultCallback for Recorder {
-        async fn on_result(
-            &self,
-            _ctx: &SubAgentCallContext,
-            result: &ToolResult,
-            _history: &[StoreMessage],
-        ) -> ResultDecision {
-            let content = match &result.content {
+        async fn on_result(&self, call: &SubAgentCall<'_>) -> ResultDecision {
+            let content = match &call.result.content {
                 Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
@@ -330,10 +398,7 @@ mod tests {
     /// 构造链，并返回「各回调依次看到的 content」记录。
     fn chain(
         scripts: Vec<(&'static str, Script)>,
-    ) -> (
-        Vec<Arc<dyn SubAgentResultCallback>>,
-        Arc<Mutex<Vec<String>>>,
-    ) {
+    ) -> (SubAgentResultChain, Arc<Mutex<Vec<String>>>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let cbs = scripts
             .into_iter()
@@ -345,12 +410,12 @@ mod tests {
                 }) as Arc<dyn SubAgentResultCallback>
             })
             .collect();
-        (cbs, seen)
+        (SubAgentResultChain::new(cbs), seen)
     }
 
     #[tokio::test]
     async fn empty_chain_keeps_last_text() {
-        let out = run_chain(&[], &ctx(), "原始", &[]).await;
+        let out = run_chain(&SubAgentResultChain::default(), &ctx(), "原始", &[]).await;
         assert!(matches!(out, ChainOutcome::Done(t) if t == "原始"));
     }
 
@@ -414,5 +479,194 @@ mod tests {
         let out = run_chain(&cbs, &ctx(), "原始", &[]).await;
         assert!(matches!(out, ChainOutcome::Abort(m) if m == "写库失败"));
         assert_eq!(seen.lock().unwrap().len(), 1, "Abort 之后不应再执行后续回调");
+    }
+
+    // ── 前置分析（SubAgentChainPrelude）──
+
+    /// 记录回调看到的 `analysis` / `is_last`，并按脚本决策。
+    struct Spy {
+        label: &'static str,
+        script: Script,
+        seen: Arc<Mutex<Vec<String>>>,
+        seen_analysis: Arc<Mutex<Vec<Value>>>,
+        seen_last: Arc<Mutex<Vec<bool>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SubAgentResultCallback for Spy {
+        async fn on_result(&self, call: &SubAgentCall<'_>) -> ResultDecision {
+            self.seen_analysis
+                .lock()
+                .unwrap()
+                .push(call.analysis.clone());
+            self.seen_last.lock().unwrap().push(call.is_last);
+            self.seen
+                .lock()
+                .unwrap()
+                .push(call.result.content.as_str().unwrap_or("").to_string());
+            match self.script {
+                Script::Accept => ResultDecision::Accept,
+                Script::Transform(s) => ResultDecision::Transform(s.to_string()),
+                Script::Next(s) => ResultDecision::Next(s.to_string()),
+                Script::Retry(s) => ResultDecision::Retry(s.to_string()),
+                Script::Abort(s) => ResultDecision::Abort(s.to_string()),
+            }
+        }
+
+        fn name(&self) -> &str {
+            self.label
+        }
+    }
+
+    /// Spy 链的观察记录。
+    struct SpyChain {
+        chain: SubAgentResultChain,
+        seen: Arc<Mutex<Vec<String>>>,
+        analyses: Arc<Mutex<Vec<Value>>>,
+        last_flags: Arc<Mutex<Vec<bool>>>,
+        runs: Arc<Mutex<u32>>,
+    }
+
+    /// 固定产出的前置分析：给什么就产出什么；`stop` 非空时直接收场。
+    impl SpyChain {
+        fn new(scripts: &[Script], prelude: Option<(Value, Option<&str>, Option<Script>)>) -> Self {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let seen_analysis = Arc::new(Mutex::new(Vec::new()));
+            let seen_last = Arc::new(Mutex::new(Vec::new()));
+            let cbs: Vec<Arc<dyn SubAgentResultCallback>> = scripts
+                .iter()
+                .map(|script| {
+                    Arc::new(Spy {
+                        label: "spy",
+                        script: *script,
+                        seen: seen.clone(),
+                        seen_analysis: seen_analysis.clone(),
+                        seen_last: seen_last.clone(),
+                    }) as Arc<dyn SubAgentResultCallback>
+                })
+                .collect();
+            let runs = Arc::new(Mutex::new(0u32));
+            let mut chain = SubAgentResultChain::new(cbs);
+            if let Some((analysis, outer, stop)) = prelude {
+                chain.set_prelude(Arc::new(FixedPrelude {
+                    analysis,
+                    outer: outer.map(str::to_string),
+                    stop,
+                    runs: runs.clone(),
+                }));
+            }
+            Self {
+                chain,
+                seen,
+                analyses: seen_analysis,
+                last_flags: seen_last,
+                runs,
+            }
+        }
+    }
+
+    /// 固定产出的前置分析实现。
+    struct FixedPrelude {
+        analysis: Value,
+        outer: Option<String>,
+        stop: Option<Script>,
+        runs: Arc<Mutex<u32>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SubAgentChainPrelude for FixedPrelude {
+        async fn analyze(
+            &self,
+            _ctx: &SubAgentCallContext,
+            result: &ToolResult,
+            _history: &[StoreMessage],
+        ) -> PreludeOutcome {
+            *self.runs.lock().unwrap() += 1;
+            // 链首交给分析器的永远是子 agent 的原始输出（文本）。
+            assert!(
+                result.content.as_str().is_some(),
+                "前置分析应收到链首的文本"
+            );
+            if let Some(stop) = self.stop {
+                return PreludeOutcome::Stop(match stop {
+                    Script::Accept => ResultDecision::Accept,
+                    Script::Transform(s) => ResultDecision::Transform(s.to_string()),
+                    Script::Next(s) => ResultDecision::Next(s.to_string()),
+                    Script::Retry(s) => ResultDecision::Retry(s.to_string()),
+                    Script::Abort(s) => ResultDecision::Abort(s.to_string()),
+                });
+            }
+            PreludeOutcome::Proceed {
+                analysis: self.analysis.clone(),
+                outer: self.outer.clone(),
+            }
+        }
+
+        fn name(&self) -> &str {
+            "fixed-prelude"
+        }
+    }
+
+    #[tokio::test]
+    async fn prelude_outer_defines_outer_result_while_callbacks_see_pipeline() {
+        // step2 形态：prelude 定稿对外文本（出口清洗），业务回调只做副作用并续链。
+        let h = SpyChain::new(
+            &[Script::Next("下一位"), Script::Accept],
+            Some((serde_json::json!({ "status": "success" }), Some("紧凑JSON"), None)),
+        );
+        let out = run_chain(&h.chain, &ctx(), "原始带围栏", &[]).await;
+        // 对外 = prelude 定稿的那份，而不是原文
+        assert!(matches!(out, ChainOutcome::Done(t) if t == "紧凑JSON"));
+        // 链内传值不受影响：第三个回调看到上一个 Next 的产物
+        assert_eq!(
+            *h.seen.lock().unwrap(),
+            vec!["原始带围栏".to_string(), "下一位".to_string()]
+        );
+        // 每个回调都拿到同一份前置分析产物
+        assert_eq!(*h.analyses.lock().unwrap(), vec![serde_json::json!({ "status": "success" }); 2]);
+        // 框架正确标注链尾
+        assert_eq!(*h.last_flags.lock().unwrap(), vec![false, true]);
+        assert_eq!(*h.runs.lock().unwrap(), 1, "前置分析只跑一次");
+    }
+
+    #[tokio::test]
+    async fn transform_overrides_prelude_outer() {
+        let h = SpyChain::new(&[Script::Transform("回调改写")], Some((Value::Null, Some("prelude定稿"), None)));
+        let out = run_chain(&h.chain, &ctx(), "原始", &[]).await;
+        assert!(matches!(out, ChainOutcome::Done(t) if t == "回调改写"));
+    }
+
+    #[tokio::test]
+    async fn prelude_stop_accept_skips_all_callbacks() {
+        let h = SpyChain::new(&[Script::Transform("不该被执行")], Some((Value::Null, None, Some(Script::Accept))));
+        let out = run_chain(&h.chain, &ctx(), "原始", &[]).await;
+        assert!(matches!(out, ChainOutcome::Done(t) if t == "原始"));
+        assert!(h.seen.lock().unwrap().is_empty(), "Stop 之后回调不应执行");
+    }
+
+    #[tokio::test]
+    async fn prelude_stop_retry_and_transform() {
+        let retry = SpyChain::new(&[Script::Accept], Some((Value::Null, None, Some(Script::Retry("请重做")))));
+        let out = run_chain(&retry.chain, &ctx(), "原始", &[]).await;
+        assert!(matches!(out, ChainOutcome::Retry(m) if m == "请重做"));
+
+        let transform = SpyChain::new(&[Script::Accept], Some((Value::Null, None, Some(Script::Transform("分析器改写")))));
+        let out = run_chain(&transform.chain, &ctx(), "原始", &[]).await;
+        assert!(matches!(out, ChainOutcome::Done(t) if t == "分析器改写"));
+    }
+
+    #[tokio::test]
+    async fn prelude_stop_next_is_treated_as_accept() {
+        // `Stop(Next)` 没有下一位可交给：按 Accept 处理，且**不做定稿**（定稿只走 Proceed）。
+        let h = SpyChain::new(&[], Some((Value::Null, None, Some(Script::Next("无人消费")))));
+        let out = run_chain(&h.chain, &ctx(), "原始", &[]).await;
+        assert!(matches!(out, ChainOutcome::Done(t) if t == "原始"));
+    }
+
+    #[tokio::test]
+    async fn callbacks_see_null_analysis_without_prelude() {
+        let h = SpyChain::new(&[Script::Accept], None);
+        let _ = run_chain(&h.chain, &ctx(), "原始", &[]).await;
+        assert_eq!(*h.analyses.lock().unwrap(), vec![Value::Null]);
     }
 }

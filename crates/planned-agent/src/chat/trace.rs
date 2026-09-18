@@ -13,12 +13,16 @@
 use std::collections::HashMap;
 
 use planned_agent_core::ai::types::{MessageContent, MessageRole};
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::chat::storage::{ErrorType, StoreMessage};
 
 /// 一次**真实**的工具调用。
-#[derive(Debug, Clone)]
+///
+/// `Serialize` 供上层把轨迹直接落库（如 flexible 流程的 `execution_trace` 产物）；
+/// 序列化只反映本结构，不改导出语义（仍是零策略）。
+#[derive(Debug, Clone, Serialize)]
 pub struct ToolInvocation {
     /// `tool_call_id` —— assistant 的声明与 tool 结果配对的键。
     pub id: String,
@@ -37,7 +41,11 @@ pub struct ToolInvocation {
 }
 
 /// 工具调用的结局。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// 序列化为小写下划线（`"ok"` / `"error"` / `"cancelled"` / `"pending"`），供落库后
+/// 的下游（模板生成）区分「成功 / 执行失败 / 被取消 / 未跑完」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolOutcome {
     /// 正常返回。
     Ok,
@@ -299,6 +307,56 @@ mod tests {
         assert_eq!(
             trace.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
             vec!["first", "second"]
+        );
+    }
+
+    /// 落库契约：序列化后的字段名与 `outcome` 取值是下游（模板生成）读取的依据。
+    #[test]
+    fn serializes_to_stable_json_shape() {
+        let history = vec![
+            assistant(&[("c1", "builtin_read_file", r#"{"path":"a.txt"}"#)]),
+            tool_result("c1", r#""line1""#, ErrorType::None),
+            assistant(&[("c2", "builtin_write_file", r#"{"path":"b.txt"}"#)]),
+        ];
+        let value = serde_json::to_value(export_tool_trace(&history)).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!([
+                {
+                    "id": "c1",
+                    "name": "builtin_read_file",
+                    "arguments": { "path": "a.txt" },
+                    "output": "line1",
+                    "outcome": "ok"
+                },
+                {
+                    "id": "c2",
+                    "name": "builtin_write_file",
+                    "arguments": { "path": "b.txt" },
+                    "output": null,
+                    "outcome": "pending"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn outcome_serializes_to_lowercase() {
+        for (et, expected) in [
+            (ErrorType::None, "ok"),
+            (ErrorType::ExecutionError, "error"),
+            (ErrorType::Cancelled, "cancelled"),
+        ] {
+            let history = vec![
+                assistant(&[("c1", "t", "{}")]),
+                tool_result("c1", r#""x""#, et),
+            ];
+            let value = serde_json::to_value(export_tool_trace(&history)).unwrap();
+            assert_eq!(value[0]["outcome"], serde_json::json!(expected));
+        }
+        assert_eq!(
+            serde_json::to_value(ToolOutcome::Pending).unwrap(),
+            serde_json::json!("pending")
         );
     }
 }

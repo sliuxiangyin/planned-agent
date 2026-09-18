@@ -329,3 +329,63 @@ pub fn create_step2_callback(
 **顺带澄清（非缺陷）**：同一会话的 `flexible_state` 里没有 `field_selection_result`，不是登记失败 —— `seq=13` 显示 step3 返回 `empty_result`（无可提取的结构化字段），回调按契约**正确地**不登记；随后用户选「继续推进」，协调器直接把 `field_selection_result` 从 step3 返回内容构造后传给 step4。判定原则「宁可「不写」也不写错」在此按预期生效。
 
 验证：`cargo check -p planned-agent-gui` 0 error；`cargo test --bin planned-agent-gui` 20 passed（含 `build_patch` 的 3 个新单测：整段复制保留 `null`、`products` + `clear` 组合、缺产物不写 `null`）。
+
+## 16. 结果链：前置分析槽位 + 轨迹从会话历史导出（阶段 7）
+
+**问题**：两件事各自缺一个「正确的落点」。
+1. `execution_trace` 由**模型自述**（`flexible_step2.toml` 原先要求它逐条记录 `tool` / `input` / `output_summary`）。模型会漏步骤、编参数、甚至宣称调用过从未调用的工具 —— 而轨迹是产品核心资产，不能建立在一份「回忆」上。
+2. 五个 step 的机械活（解析输出、判 `status`、定位 `host_session_id`）挤在 `step_commit.rs` 里；某个 step 想插一条自己的产物（如 step2 的 `execution_trace`），就只能往通用 `StepSpec` 上加特例字段，或让每个注册点自己记得挂一个「拦截器」。
+
+**方案**（planned-agent 核心库只给槽位，不解释业务规则）：
+- 新增 `SubAgentChainPrelude` + `PreludeOutcome { Proceed { analysis, outer }, Stop(decision) }`：**前置分析槽位** —— 链跑之前跑一次，产物随 `on_result` 交给每个回调；`outer` 可**定稿对外文本**（去围栏 / 紧凑 JSON / 路径正斜杠），`Stop` 则直接收场、链一个回调都不跑。
+- `on_result` 签名聚合成 `SubAgentCall { ctx, result, history, analysis, is_last }`（`is_last` 让回调不必关心自己在链上的位置）。
+- 注册侧：`Vec<Arc<dyn SubAgentResultCallback>>` → `SubAgentResultChain`（prelude + callbacks）。
+- `run_chain`：先跑 prelude（**重试后每轮重跑**，分析永远对应当前输出），`final_content` 初值取 `outer`；末位 `Next` 仍等价 `Accept`。
+
+**方案**（agent-gui：默认前置分析，业务代码看不见它）：
+- `step_callback/analysis.rs`（新）：解析 + 规范化**纯函数**层（从 `step_commit.rs` 搬出，后者在阶段 9 被删除），`StepAnalysis` 是回调读取分析产物的视图（字段契约见 `analysis::keys`）。
+- `step_callback/prelude.rs`（新）：`FlexibleStepPrelude` = 各 step 的**默认**前置分析 + 守门 —— 解析失败 ⇒ `Retry`（最多 2 次）；非定稿 `status` / 缺 `host_session_id` ⇒ `Stop(Accept)`（**不写任何产物**）。由各 step 的 `create_stepN_callback` 统一挂上，业务代码里看不到它，也无从漏挂。
+- `step_callback/step_commit.rs`：曾把五个 step 的定稿登记收敛成一份 `StepCallback` + `StepSpec`；**阶段 9 已删除**，改为各 step 在 `stepN/mod.rs` 里自己写（见 16.1）。
+- `step_callback/step2/tool_trace.rs`（新）：`export_cleaned_trace` —— 在零策略的 `export_tool_trace` 之上做产品策略：过滤 `request_user_action`（UI 交互不是执行步骤）、单条输出截断 2000 字符、路径转正斜杠。
+- `step_callback/step2/execution_trace.rs`（新）：step2 结果链的一环（排在定稿登记**之前**），从**会话历史**导出真实轨迹写 `execution_trace`；写库失败 ⇒ `Abort`（如实上报，不静默）。
+- **目录结构**（阶段 8）：`step_callback/` 根只留通用件（`analysis` / `prelude` / `before_inject`），各 step 收进 `stepN/`（`mod.rs` = 链组装 + 本 step 的定稿登记回调 + 单测，step 专属回调放同目录）—— 判断依据：只有某个 step 用就进 `stepN/`，多个 step 共用才提到根。对外接口（`step_callback::{create_stepN_callback, StateInjectCallback, HOST_SESSION_ID_FIELD}`）不变。
+- `flexible_step2.toml`：删除 `execution_trace` 自述要求与输出字段，输出收敛为 `status` + `compressed_context` / `error_message`。
+
+**step2 结果链**（顺序不可颠倒）：前置分析（解析 + 守门 + 定稿对外文本）→ 轨迹提取（`execution_trace`）→ 定稿登记（`compressed_context` + 清下游 + 推进 `executed`）。轨迹排在定稿登记**之前**：它落库失败就 `Abort`，此刻状态尚未推进（协调器重跑 step2 即自愈）；反过来先推进再落轨迹会留下「已 `executed` 却没有轨迹」的状态，step4/step5 会在缺轨迹的情况下继续。「没定稿却落轨迹」则由前置分析挡住。
+
+**验证**：`cargo test -p planned-agent --lib chat::sub_agent` 20 passed（含 6 个 prelude / 链语义新单测）；`cargo test -p planned-agent-gui step_callback` 31 passed（含 `analysis` / `tool_trace` / `StepAnalysis` 契约 / 各 step 补丁构建新单测）。
+
+### 16.1 阶段 9：各 step 自己保存状态（拆掉 `step_commit.rs`）
+
+**问题**：`StepSpec` + `StepCallback` 把五个 step 的「保存状态」收敛成一份实现，而五者的产物 / 清理 / 推进规则只会越来越不一样 —— 它已经长出特例字段（step5 的 `payload_key` 就是为「整段输出」加的第一个口子）。继续这么长下去，通用结构会被特例撑变形。
+
+**决定**：`step_commit.rs` **删除**，每个 `stepN/mod.rs` 自己写 `on_result` 全流程（取分析结论、组产物补丁、`merge_state`、错误处理、决策）。用冗余换各 step 能自由演化。
+
+**边界**（不是保存状态、而是接口与把关，故不下放）：
+- `prelude.rs`：`FlexibleStepPrelude`（默认前置分析 + 守门）—— `SubAgentChainPrelude` 是框架槽位，业务规则（`host_session_id` / `status`）属 flexible，step 作者看不见；
+- `analysis.rs`：解析 / 规范化纯函数 + `StepAnalysis` —— prelude 产出、各回调消费的**跨文件契约**，各写一份迟早对不上。
+
+**各 step 回调必须共同遵守的行为契约**（已写进 `step_callback/mod.rs` 文档）：
+1. 前置分析产物缺失 ⇒ `Abort`（接线错误，不猜着写）；
+2. 写库失败 ⇒ `Abort`（不可重试，如实上报，不静默 `Accept`）；
+3. 决策只用 `call.is_last` 区分：非末位 `Next(call.text())`，末位 `Accept`（对外结果由前置分析定稿）；
+4. 产物值为 `null` 或字段缺失 ⇒ 跳过写入（`merge_state` 把 `null` 当删除，直接写会静默清掉已有产物）；
+5. 解析 / 定稿判定 / 会话定位一律用 `StepAnalysis`，不在回调里重复实现。
+
+**各 step 的差异就地可读**：step1 写 `task_definition` + `output_format` 并清四个下游产物；step2 只写 `compressed_context`（轨迹由同目录 `execution_trace.rs` 单独落库）；step3 写 `field_selection_result` 并清 `parameter_confirmation_result`；step4 写 `parameter_confirmation_result`、无下游可清；step5 整段输出存 `template_payload`（`null` 原样保留）。
+
+**验证**：`cargo check -p planned-agent-gui --all-targets` 0 error；`cargo test -p planned-agent-gui step_callback` 31 passed（另补回 `tool_trace` 的 5 个清洗测试：空历史空数组、过滤 `request_user_action`、短输出保结构、超长截断、路径转正斜杠）。
+
+### 16.2 阶段 10：抽出零策略纯工具（`commit.rs`）
+
+**问题**：阶段 9 把保存状态下放到各 step 后，出现了另一种重复 —— `on_result` 里四段**逐字相同**的代码（入口日志、取分析或 `Abort`、写库 + 错误处理、`is_last` 决策），五个文件各一份，合计约 250 行；`build_patch` 也在 step1~step3 逐字重复。
+
+**决定**：只抽**零策略纯工具**（同样的入参必然同样的行为，不含任何 step 语义），不动「回调编排」：
+- `step_callback/commit.rs`（新）：`build_patch(agent, parsed, products, clear)`、`commit_state(agent, service, plan_id, session_id, next_step, patch) -> Result<(), String>`、`hand_off(call)`；
+- `analysis.rs` 增 `require_analysis(agent, call) -> Result<StepAnalysis, ResultDecision>`（与 `StepAnalysis` 同处，是它的读取封装）。
+
+**边界**：**没有**恢复成 `StepSpec` / `StepCallback` —— 各 step 仍各自持有 `AGENT` / `OK_STATUS` / `NEXT_STEP` / `PRODUCTS` / `CLEAR` 常量与 `on_result` 编排，差异一眼可见；step5 的「整段输出存 `template_payload`」仍是它的私有函数（只此一处用）。`step_callback/mod.rs` 里的 5 条行为契约现在直接标注了对应的公共函数 —— 契约由函数**强制**，不再是「各写一遍的纪律」。
+
+**收益**：五个 step 文件合计约 700 → 400 行；公共行为只在 `commit.rs` 测一次（`null` 跳过 / 缺失跳过 / `clear` 覆盖 / 空补丁 / 原样克隆），各 step 只留「自己的常量取值正确」用例。
+
+**验证**：`cargo check -p planned-agent-gui --all-targets` 0 error；`cargo test -p planned-agent-gui step_callback` 31 passed（`commit` 4 例 + 各 step 各 1 例常量锁定期 + `analysis` 12 + `before_inject` 5 + `tool_trace` 5）。
