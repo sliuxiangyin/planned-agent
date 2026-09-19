@@ -11,7 +11,6 @@ use planned_agent_core::ai::AiClient;
 use planned_agent_core::prompt::{PromptManager, PromptContext};
 use planned_agent_core::ai::types::{ChatCompletionRequest, Message, MessageRole, MessageContent};
 use planned_agent_core::planner::types::PlanContext;
-use planned_agent_core::tool_registry::types::ToolCategory;
 use tracing::debug;
 
 /// 基于LLM的粗粒度计划器实现
@@ -97,6 +96,10 @@ impl<PM: PromptManager> LlmCoarsePlanner<PM> {
     /// 关键契约：`user_input` 必须原样保存用户原始输入字符串，不做任何归一化、
     /// 截断、实体提取或泛化处理。该变量由粗粒度计划 Prompt 用于生成步骤，
     /// 必须保证下游 CoarseGrainedStep 能追溯到原始关键词、人名、地名、URL、路径与数值。
+    ///
+    /// 不注入工具分类：提示词只产出四个核心字段（intent / expected_output /
+    /// result_reference / dependencies），不要求模型输出工具分类，因此
+    /// `ToolCategory::all()` 不再进入提示上下文（能力边界不属于“做什么”）。
     fn build_prompt_context(
         &self,
         input: &str,
@@ -114,14 +117,6 @@ impl<PM: PromptManager> LlmCoarsePlanner<PM> {
             format!("历史对话记录：\n{}", context.history.join("\n"))
         };
         prompt_context = prompt_context.with_variable("context", json!(context_str));
-        
-        // 可用工具分类列表
-        let categories = ToolCategory::all();
-        let categories_str = categories.iter()
-            .map(|c| format!("- {:?}（{}）", c, c.description()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        prompt_context = prompt_context.with_variable("available_categories", json!(categories_str));
         
         Ok(prompt_context)
     }
@@ -202,9 +197,13 @@ impl<PM: PromptManager> LlmCoarsePlanner<PM> {
         }
 
         // 6. 解析完整文本（复用 PromptManager 的 markdown 围栏剥离 / 引号修复）
-        let plan: CoarseGrainedPlan = self.prompt_manager
+        let mut plan: CoarseGrainedPlan = self.prompt_manager
             .parse_response("planning/coarse_plan", &full_text)
             .await?;
+
+        // 6.5 补齐模型未产出的派生字段
+        // （id / order / title / description；complexity、risk_level 由 serde 缺省值兜底）
+        plan.normalize();
 
         // 7. 验证步骤是否符合原子动作要求
         let validation_warnings = self.validate_atomic_steps(&plan);
@@ -298,6 +297,10 @@ impl<PM: PromptManager> LlmCoarsePlanner<PM> {
             plan.output_schema = Some(schema);
         }
 
+        // 6.6 补齐模型未产出的派生字段
+        // （id / order / title / description；complexity、risk_level 由 serde 缺省值兜底）
+        plan.normalize();
+
         // 7. 验证原子步骤
         let validation_warnings = self.validate_atomic_steps(&plan);
         if !validation_warnings.is_empty() {
@@ -352,8 +355,13 @@ impl<PM: PromptManager + Send + Sync> CoarsePlanner for LlmCoarsePlanner<PM> {
             errors.push("计划没有步骤".to_string());
         }
 
-        // 检查步骤ID唯一性
-        let step_ids: Vec<&str> = plan.steps.iter().map(|s| s.id.as_str()).collect();
+        // 检查步骤ID唯一性（空 ID 由 `CoarseGrainedPlan::normalize` 兜底，跳过以免误报）
+        let step_ids: Vec<&str> = plan
+            .steps
+            .iter()
+            .map(|s| s.id.as_str())
+            .filter(|id| !id.trim().is_empty())
+            .collect();
         let unique_ids: std::collections::HashSet<&str> = step_ids.iter().cloned().collect();
         if step_ids.len() != unique_ids.len() {
             errors.push("步骤ID不唯一".to_string());

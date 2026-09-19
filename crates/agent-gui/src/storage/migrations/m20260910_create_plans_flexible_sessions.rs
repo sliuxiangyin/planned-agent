@@ -11,7 +11,7 @@
 //! - `status` 表达定稿态：`active`（进行中/未定稿）→ `produced`（已定稿可回看/可执行）/
 //!   `abandoned`（被弃）。
 //! - `is_default` 标记该会话是否为 plan 的默认会话。
-//! - 定稿产物 `parameterized_task`（参数提取结果，整段 JSON）为**可空列**，
+//! - 定稿产物 `parameterized_task`（task + inputs + steps 打包 JSON）为**可空列**，
 //!   仅在 `status → produced` 定稿时写入；未定稿会话该列为 NULL。
 //! - `title` 为该版本会话标题。
 //!
@@ -68,7 +68,7 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .default(false),
                     )
-                    // 定稿产物：参数提取结果（parameterized_task 整段 JSON，可空，produced 时写入）
+                    // 定稿产物：三件套打包（parameterized_task 列内 task + inputs + steps，可空，produced 时写入）
                     .col(
                         ColumnDef::new(PlansFlexibleSessions::ParameterizedTask)
                             .string()

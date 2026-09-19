@@ -31,7 +31,7 @@ pub fn create_step2_callback(
     service: Arc<PlansFlexibleService>,
 ) -> SubAgentResultChain {
     SubAgentResultChain::new(vec![
-        // 定稿登记：写 parameterized_task、推进 parameterized
+        // 定稿登记：写 inputs 与占位后的 steps、推进 parameterized
         Arc::new(Step2Callback::new(plan_id, service)),
     ])
     // 前置分析：解析 + 守门 + 定稿对外文本
@@ -41,8 +41,10 @@ pub fn create_step2_callback(
 /// 启动前注入映射：`(state 产物字段名, 注入到子 agent 参数的字段名)`。
 ///
 /// - `task_definition` ← `flexible_state.products.task_definition`（step1 定稿产物）。
+/// - `steps` ← `flexible_state.products.steps`（计划步定稿产物，供就地占位）。
 pub(super) const INJECT_MAPPING: &[(&str, &str)] = &[
     ("task_definition", "task_definition"),
+    ("steps", "steps"),
 ];
 
 /// 创建 `flexible_step2` 的启动前注入回调（映射留在本 step）。
@@ -66,7 +68,7 @@ mod tests {
     fn inject_mapping_matches_step2_input_contract() {
         assert_eq!(
             INJECT_MAPPING,
-            &[("task_definition", "task_definition")]
+            &[("task_definition", "task_definition"), ("steps", "steps")]
         );
     }
 }

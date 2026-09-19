@@ -9,6 +9,7 @@ pub(crate) mod chat_flexible_message_storage;
 pub(crate) mod chat_service_factory;
 pub(crate) mod controller;
 pub(crate) mod page;
+pub(crate) mod placeholder;
 pub(crate) mod session_boot;
 pub(crate) mod session_host;
 pub(crate) mod step_callback;

@@ -22,7 +22,7 @@ pub struct Model {
     /// 是否为默认计划
     #[sea_orm(default_value = false)]
     pub is_default: bool,
-    /// 参数提取结果（parameterized_task）整段 JSON（定稿产物，可空）
+    /// 定稿三件套（task + inputs + steps）打包 JSON（定稿产物，可空；steps 内的可变值写成 ${name}）
     pub parameterized_task: Option<String>,
     pub created_at: String,
     pub updated_at: String,

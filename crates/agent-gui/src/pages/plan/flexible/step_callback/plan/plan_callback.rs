@@ -1,9 +1,9 @@
-//! `flexible_step2` 的定稿登记回调：参数化成功后写 `inputs` 与占位后的 `steps`，并推进 `parameterized`。
+//! `flexible_plan` 的定稿登记回调：计划定稿后写 `steps` 并推进 `planned`。
 //!
 //! 归属定位：从 `SubAgentCallContext.arguments` 读取 `host_session_id`
 //! （见 `docs/chat-flexible-回调会话归属设计.md`）。
 //!
-//! 定稿判定（与 `flexible_step2.toml` 的输出契约一致）：`{"status":"success", ...}` 才算定稿；
+//! 定稿判定（与 `flexible_plan.toml` 的输出契约一致）：`{"status":"planned", ...}` 才算定稿；
 //! 其它（`status:"error"` / 非 JSON）**不登记任何产物**，保持原阶段（协调器按 prompt 询问重试或取消）。
 //!
 //! 本 step 的差异全部写在下面几个常量里；编排用 [`super::super::commit`] 与
@@ -20,35 +20,37 @@ use super::super::analysis::require_analysis;
 use super::super::commit::{build_patch, commit_state, hand_off};
 
 /// 子 agent 工具名（日志用，链组装与轨迹回调也要用）。
-pub(super) const AGENT: &str = "flexible_step2";
+pub(super) const AGENT: &str = "flexible_plan";
 /// 定稿 status：输出顶层 `status` 等于它才算定稿（链组装要拿它建前置分析）。
-pub(super) const OK_STATUS: &str = "success";
+pub(super) const OK_STATUS: &str = "planned";
 /// 定稿后推进到的 `current_step` 档位。
-const NEXT_STEP: &str = "parameterized";
+const NEXT_STEP: &str = "planned";
 /// 定稿时要登记的产物 key（值取输出 JSON 中的同名字段）。
 ///
-/// - `inputs`：参数表（每项 `{name, default, description}`），供 `flexible_save` 校验与落库。
-/// - `steps`：参数化后的步骤骨架 —— 可变值已替换为 `${name}` 占位符，覆盖计划步产出的同名字段。
-const PRODUCTS: &[&str] = &["inputs", "steps"];
-/// 定稿时要清除（置 `null`）的下游产物 —— 本 step 之后无 flexible_state 下游产物。
-const CLEAR: &[&str] = &[];
+/// - `steps`：粗粒度步骤骨架（子目标 + 依赖 + 期望产出），供参数化步注入后就地占位。
+const PRODUCTS: &[&str] = &["steps"];
+/// 定稿时要清除（置 `null`）的下游产物。
+///
+/// 参数化步产出的 `inputs` 依赖本步的 `steps`：重跑本步即作废 —— 必须清除。
+/// `steps` 本身由本步覆盖写入，不在清除之列。
+const CLEAR: &[&str] = &["inputs"];
 
-/// `flexible_step2` 的定稿登记回调。
-pub(super) struct Step2Callback {
+/// `flexible_plan` 的定稿登记回调。
+pub(super) struct PlanCallback {
     /// 该 plan 的 id（plan 级注册时已知，是常量）。
     plan_id: String,
     /// 灵活计划聚合服务（写流程中间状态）。
     service: Arc<PlansFlexibleService>,
 }
 
-impl Step2Callback {
+impl PlanCallback {
     pub(super) fn new(plan_id: String, service: Arc<PlansFlexibleService>) -> Self {
         Self { plan_id, service }
     }
 }
 
 #[async_trait]
-impl SubAgentResultCallback for Step2Callback {
+impl SubAgentResultCallback for PlanCallback {
     async fn on_result(&self, call: &SubAgentCall<'_>) -> ResultDecision {
         tracing::info!(
             "[{}] 子 agent '{}' 完成, tool_call_id={}, content_len={}, is_error={}",
@@ -65,7 +67,7 @@ impl SubAgentResultCallback for Step2Callback {
             Err(decision) => return decision,
         };
 
-        // 登记 inputs 与占位后的 steps（本 step 之后无 flexible_state 下游产物需清）
+        // 登记 steps，并清除下游的 inputs（重跑计划步 ⇒ 参数化结果作废）
         let patch = build_patch(AGENT, analysis.parsed, PRODUCTS, CLEAR);
         if let Err(reason) = commit_state(
             AGENT,
@@ -77,8 +79,7 @@ impl SubAgentResultCallback for Step2Callback {
         )
         .await
         {
-            // 写库失败不可重试，如实上报。此刻上一环可能已写入新轨迹，留下
-            // 「新轨迹 + 未推进的 current_step」的中间态 —— 协调器重跑 step2 时会覆盖，无需补偿。
+            // 写库失败不可重试，如实上报。
             return ResultDecision::Abort(reason);
         }
 
@@ -95,21 +96,18 @@ impl SubAgentResultCallback for Step2Callback {
 mod tests {
     use super::*;
 
-    /// 本 step 独有的回归价值：**常量取值正确**（登记 inputs + 占位后的 steps、无下游清除）。
+    /// 本 step 独有的回归价值：**常量取值正确**（登记 steps、清除下游 inputs）。
     /// 公共行为见 `super::super::commit` 的测试，不在此重复。
     #[test]
-    fn commits_inputs_and_parameterized_steps() {
+    fn commits_steps_and_clears_downstream_inputs() {
         let parsed = serde_json::json!({
-            "status": "success",
-            "inputs": [
-                { "name": "filepath", "default": "C:/a/b/text.txt", "description": "日志路径" }
-            ],
+            "status": "planned",
             "steps": [
                 {
                     "result_reference": "#E1",
-                    "intent": "在 ${filepath} 维护日志",
-                    "expected_output": "${filepath} 新增一行",
-                    "dependencies": [],
+                    "intent": "读取 /var/log/app.log 内容",
+                    "expected_output": "得到 /var/log/app.log 的原始日志内容",
+                    "dependencies": []
                 }
             ],
         });
@@ -117,9 +115,9 @@ mod tests {
         let mut keys: Vec<&str> = patch.keys().map(String::as_str).collect();
         keys.sort_unstable();
         assert_eq!(keys, ["inputs", "steps"]);
-        assert_eq!(patch["inputs"][0]["name"], "filepath");
-        assert_eq!(patch["steps"][0]["intent"], "在 ${filepath} 维护日志");
-        assert_eq!(NEXT_STEP, "parameterized");
-        assert_eq!(OK_STATUS, "success");
+        assert!(patch["inputs"].is_null(), "下游 inputs 应被清除");
+        assert_eq!(patch["steps"][0]["result_reference"], "#E1");
+        assert_eq!(NEXT_STEP, "planned");
+        assert_eq!(OK_STATUS, "planned");
     }
 }

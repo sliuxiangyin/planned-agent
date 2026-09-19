@@ -102,7 +102,7 @@ impl PlansFlexibleSessionsRepo {
         Ok(res)
     }
 
-    /// 定稿：把参数提取结果（parameterized_task 整段 JSON）写入指定会话行，置 `status=produced`，
+    /// 定稿：把三件套打包（task + inputs + steps 整段 JSON）写入指定会话行的 `parameterized_task` 列，置 `status=produced`，
     /// 刷新 `updated_at` 并写 `closed_at`，返回更新后的 Model。
     ///
     /// 目标行由 `id`（= 会话/版本 id）定位；同一会话反复产出即覆盖同一行。

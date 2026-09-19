@@ -64,10 +64,12 @@ pub(crate) mod commit;
 pub(crate) mod prelude;
 
 // ── 各 step（一个 step 一个目录）──
+pub(crate) mod plan;
 pub(crate) mod save;
 pub(crate) mod step1;
 pub(crate) mod step2;
 
+pub(crate) use plan::{create_plan_callback, create_plan_inject};
 pub(crate) use save::{create_save_callback, create_save_inject};
 pub(crate) use step1::{create_step1_callback, create_step1_inject};
 pub(crate) use step2::{create_step2_callback, create_step2_inject};
@@ -96,7 +98,7 @@ mod tests {
     use planned_agent_core::prompt::PromptManager;
     use planned_agent_prompt_manager::{FilePromptManager, PromptManagerConfig};
 
-    /// 5 份 step prompt + 协调器 system prompt 必须能被**运行期的加载器**解析出来。
+    /// 4 份 step prompt + 协调器 system prompt 必须能被**运行期的加载器**解析出来。
     ///
     /// 这些文件只在运行期加载：字符串转义写错不会让编译失败，只会在用户点进流程时才炸
     /// （历史坑：TOML 的 `"""` 里 `\` 是转义符，示例里写 Windows 路径 `C:\data\in.txt`
@@ -120,8 +122,8 @@ mod tests {
 
         let loaded = manager.list_prompts().await.expect("应能列出已加载 prompt");
         assert!(
-            loaded.len() >= 4,
-            "flexible 目录应至少加载 4 份 prompt（step1 / step2 / save + 协调器 system），实际 {}",
+            loaded.len() >= 5,
+            "flexible 目录应至少加载 5 份 prompt（step1 / plan / step2 / save + 协调器 system），实际 {}",
             loaded.len()
         );
     }

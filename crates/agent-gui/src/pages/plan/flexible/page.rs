@@ -26,7 +26,8 @@ use crate::services::plans_flexible_service::PlansFlexibleService;
 
 use super::session_host::FlexibleSessionHost;
 use super::step_callback::{
-    create_save_callback, create_save_inject, create_step1_callback, create_step1_inject,
+    create_plan_callback, create_plan_inject, create_save_callback, create_save_inject,
+    create_step1_callback, create_step1_inject,
     create_step2_callback, create_step2_inject, HOST_SESSION_ID_FIELD,
 };
 use super::tool::{flexible_state_tool, FlexibleStateExecutor};
@@ -176,8 +177,8 @@ fn use_plan_agent_registrations(plan_id: String) {
             &ai_ctx,
             &tools_ctx,
             &prompt_ctx,
-            "flexible_step2",
-            "参数提取子 Agent：从需求澄清结果中识别可变参数，产出可复用的参数化任务（parameterized_task：占位符模板 + 参数表）。",
+            "flexible_plan",
+            "计划子 Agent：把任务描述展开为粗粒度步骤骨架（steps：子目标 + 依赖 + 期望产出）。",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -193,8 +194,49 @@ fn use_plan_agent_registrations(plan_id: String) {
                 "required": ["host_session_id"]
             }),
             ChatConfig {
+                system_prompt: Some(SystemPrompt::Template("flexible/flexible_plan".into())),
+                // 计划是纯文本分析，不调用任何工具（不执行、不交互）。
+                allowed_tools: Some(vec![]),
+                // host_session_id 是宿主注入的控制字段（供回调定位会话），不进子 agent 的 task 文本。
+                hidden_args: vec![HOST_SESSION_ID_FIELD.to_string()],
+                ..Default::default()
+            },
+            1, // depth
+            2, // max_depth
+            create_plan_callback(plan_id.clone(), plans_flexible_service.clone()),
+            // 任务定义由系统注入（见 plan/mod.rs 的 INJECT_MAPPING）。
+            vec![create_plan_inject(
+                plan_id.clone(),
+                plans_flexible_service.clone(),
+            )],
+        );
+        register_sub_agent(
+            &ai_ctx,
+            &tools_ctx,
+            &prompt_ctx,
+            "flexible_step2",
+            "参数化子 Agent：从步骤骨架中识别可变值，就地替换为 ${name} 占位符并给出参数表（inputs + 占位后的 steps）。",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_definition": {
+                        "type": "object",
+                        "description": "任务定义对象（含 task 任务描述）。**由系统自动注入**（取自本会话 flexible_state 的已定稿产物），你无需传"
+                    },
+                    "steps": {
+                        "type": "array",
+                        "description": "计划步定稿的步骤骨架（每项含 result_reference / intent / expected_output / dependencies）。**由系统自动注入**，你无需传"
+                    },
+                    "host_session_id": {
+                        "type": "string",
+                        "description": "本会话 ID，原样照抄 system prompt「会话上下文」中给出的值，不得改写"
+                    }
+                },
+                "required": ["host_session_id"]
+            }),
+            ChatConfig {
                 system_prompt: Some(SystemPrompt::Template("flexible/flexible_step2".into())),
-                // 参数提取是纯文本分析，不调用任何工具（不执行、不交互）。
+                // 参数化是纯文本分析，不调用任何工具（不执行、不交互）。
                 allowed_tools: Some(vec![]),
                 // host_session_id 是宿主注入的控制字段（供回调定位会话），不进子 agent 的 task 文本。
                 hidden_args: vec![HOST_SESSION_ID_FIELD.to_string()],
@@ -203,7 +245,7 @@ fn use_plan_agent_registrations(plan_id: String) {
             1, // depth
             2, // max_depth
             create_step2_callback(plan_id.clone(), plans_flexible_service.clone()),
-            // 任务定义由系统注入（见 step2/mod.rs 的 INJECT_MAPPING）。
+            // 任务定义与步骤骨架由系统注入（见 step2/mod.rs 的 INJECT_MAPPING）。
             vec![create_step2_inject(
                 plan_id.clone(),
                 plans_flexible_service.clone(),
@@ -214,13 +256,21 @@ fn use_plan_agent_registrations(plan_id: String) {
             &tools_ctx,
             &prompt_ctx,
             "flexible_save",
-            "保存子 Agent：校验参数提取结果（parameterized_task），确认后落库为可复用模板。",
+            "保存子 Agent：校验任务/参数/步骤三件套（task / inputs / steps），确认后落库为可复用模板。",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "parameterized_task": {
+                    "task_definition": {
                         "type": "object",
-                        "description": "step2 定稿的参数提取结果（含 template 与 parameters）。**由系统自动注入**，你无需传"
+                        "description": "任务定义对象（含 task 任务描述）。**由系统自动注入**（取自本会话 flexible_state 的已定稿产物），你无需传"
+                    },
+                    "inputs": {
+                        "type": "array",
+                        "description": "参数化产出的参数表（每项含 name / default / description）。**由系统自动注入**，你无需传"
+                    },
+                    "steps": {
+                        "type": "array",
+                        "description": "参数化后的步骤骨架（可变值已写成 ${name}）。**由系统自动注入**，你无需传"
                     },
                     "host_session_id": {
                         "type": "string",
@@ -238,9 +288,9 @@ fn use_plan_agent_registrations(plan_id: String) {
             },
             1, // depth
             2, // max_depth
-            // 定稿回调直接落库（读 state 的 parameterized_task，不经协调器转抄）并推进 saved。
+            // 定稿回调直接落库（读 state 的 task_definition / inputs / steps，不经协调器转抄）并推进 saved。
             create_save_callback(plan_id.clone(), plans_flexible_service.clone()),
-            // parameterized_task 由系统注入（见 save/mod.rs 的 INJECT_MAPPING）。
+            // 三件套由系统注入（见 save/mod.rs 的 INJECT_MAPPING）。
             vec![create_save_inject(
                 plan_id.clone(),
                 plans_flexible_service.clone(),
@@ -251,6 +301,7 @@ fn use_plan_agent_registrations(plan_id: String) {
     use_drop(move || {
         for name in [
             "flexible_step1",
+            "flexible_plan",
             "flexible_step2",
             "flexible_save",
             "flexible_state",

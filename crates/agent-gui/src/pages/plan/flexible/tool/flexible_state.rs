@@ -99,10 +99,11 @@ pub fn flexible_state_tool() -> Tool {
              返回：{ loaded, current_step, products }；该会话尚无记录时 loaded=false、current_step=none、products={}。\n\
              \n\
              products 的 key（均为 string，存原始文本/JSON）：task_definition（step1 定稿的\n\
-             需求基线）、parameterized_task（step2 定稿的参数提取结果，含 template 与 parameters）。\n\
+             需求基线）、steps（计划步定稿的粗粒度步骤骨架）、inputs + steps（step2 定稿：参数表 + 占位后的步骤骨架）。\n\
              \n\
-             current_step 档位（顺序 none→task_defined→parameterized→saved）：\n\
-             - task_defined  = step1 已澄清（可执行 step2 参数提取）\n\
+             current_step 档位（顺序 none→task_defined→planned→parameterized→saved）：\n\
+             - task_defined  = step1 已澄清（可执行计划步）\n\
+             - planned       = 计划步已定稿（可执行 step2 参数化）\n\
              - parameterized = step2 已定稿（可执行 flexible_save 落库）\n\
              - saved         = flexible_save 已落库".into(),
         input_schema: json!({

@@ -27,28 +27,25 @@ text = """
 
 ---
 
-请严格按照以下JSON格式返回粗粒度计划：
+请严格按照以下 JSON 结构返回粗粒度计划（顶层只有 steps，每步只有四个字段）：
 {{ example }}
 
+字段说明：
+- steps[]：粗粒度步骤列表，按执行顺序排列，至少 1 步。
+  - result_reference：结果引用标识，严格使用 #E + 数字（#E1、#E2…），计划内唯一。
+  - intent：从需求描述与执行步骤归纳出的子目标，原样保留实体（URL、关键词、文件名、人名、地名、参数值等），暂不泛化；该步骤需要的前置条件、数据来源也写在 intent 里。若需求定义中出现参数占位符，在 intent 中原样保留，不要替换为具体值。
+  - expected_output：可验证产出，写清“满足什么条件算完成”。
+  - dependencies：依赖的前序 result_reference，只能引用本计划中已出现的 #E 编号；无依赖写 []。
+- 不要输出 id、order、title、description、复杂度、风险等级、数据需求、工具分类、input_schema、execution_guide 等字段，这些由系统补全，或在需求定义中保留。
+
 要求：
-1. 从需求描述和执行步骤中识别关键步骤，总结其意图（intent）和预期输出（expected_output）
-2. 每个步骤必须为原子动作，只包含一个操作
-3. 推断步骤间的依赖关系，填充 dependencies（用 #E1、#E2 等格式引用）
-4. 为每个步骤分配唯一的 result_reference（#E1, #E2...）
-5. 评估整体复杂度（simple / medium / complex）和风险等级（low / medium / high / critical）
-6. 步骤中的实体值（URL、关键词、文件名、人名、地名等）原样保留，暂不泛化
-7. data_requirements 可从执行步骤和工具路径的上下文推断，推荐工具分类可留空
-8. **execution_guide**：从「执行步骤」「工具路径」浓缩提炼的操作指引（自然语言，3-8 句话），供后续计划执行时参考、防止跑偏；如无执行步骤/工具路径，填空字符串 ""
-
-原子动作判断标准：
-- 如果步骤描述中包含"提取...并排序"、"解析...并处理"等，说明包含多个操作，必须拆分
-- 如果步骤可以用一个工具完成，就是原子动作
-- 如果步骤需要先用一个工具获取数据，再用另一个工具处理，就不是原子动作
-
-输入参数（input_schema）约束：
-- **仅当完整需求包含「输入参数」节时输出 `input_schema`**，优先从该节提取参数名与示例值（已固化参数以 `{% raw %}{{param_name}}{% endraw %}` 占位符表示）。
-- 无「输入参数」节表示输入固定、无需参数化：省略 input_schema 字段，不要凭任务意图推断。
-- 无外部输入参数的计划可省略该字段；input_schema 描述"计划需要什么参数"，不是步骤结果。
+1. 从「需求描述」和「执行步骤」中识别关键步骤，总结其 intent 与 expected_output。
+2. 机械操作合并：取前 N 条、排序、字段重命名、简单格式整理，合并到上游步骤的 expected_output。
+3. 语义处理可独立成步：总结、翻译、分类、重写、抽取非结构化内容、语义分析。
+4. 每个步骤只表达一个可验收子目标，禁止用“并”“和”“然后”把多个独立目标塞进同一步。
+5. 不要拆成工具级微步骤：不要写“调用某工具”“执行某 SQL”“发送某请求”，除非需求中原样给出。
+6. 推断步骤间依赖，填充 dependencies（用 #E1、#E2 等格式引用）。
+7. 信息不足时不要编造：写进 intent，或增加一个“确认/澄清”步骤。
 """
 
 [variables]
@@ -61,156 +58,55 @@ constraints = "「输出格式」段落之后的其余内容必须为有效JSON�
 
 [output_schema.json_schema]
 type = "object"
-required = ["id", "title", "description", "steps", "complexity", "risk_level"]
-
-[output_schema.json_schema.properties.id]
-type = "string"
-description = "计划唯一标识"
-
-[output_schema.json_schema.properties.title]
-type = "string"
-description = "计划标题"
-
-[output_schema.json_schema.properties.description]
-type = "string"
-description = "计划描述"
+required = ["steps"]
 
 [output_schema.json_schema.properties.steps]
 type = "array"
-description = "粗粒度步骤列表"
+description = "粗粒度步骤列表（至少 1 步，按执行顺序）"
 
 [output_schema.json_schema.properties.steps.items]
 type = "object"
-required = ["id", "order", "intent", "expected_output", "result_reference", "dependencies", "data_requirements", "recommended_tool_categories"]
-
-[output_schema.json_schema.properties.steps.items.properties.id]
-type = "string"
-description = "步骤ID"
-
-[output_schema.json_schema.properties.steps.items.properties.order]
-type = "integer"
-description = "步骤顺序"
-
-[output_schema.json_schema.properties.steps.items.properties.intent]
-type = "string"
-description = "意图描述，如：获取搜索结果"
-
-[output_schema.json_schema.properties.steps.items.properties.expected_output]
-type = "string"
-description = "预期输出描述"
+required = ["result_reference", "intent", "expected_output", "dependencies"]
 
 [output_schema.json_schema.properties.steps.items.properties.result_reference]
 type = "string"
 description = "结果引用标识，格式：#E1"
 pattern = "^#E\\d+$"
 
+[output_schema.json_schema.properties.steps.items.properties.intent]
+type = "string"
+description = "子目标描述（含该步骤需要的前置条件），原样保留实体"
+
+[output_schema.json_schema.properties.steps.items.properties.expected_output]
+type = "string"
+description = "可验证产出（含验收条件）"
+
 [output_schema.json_schema.properties.steps.items.properties.dependencies]
 type = "array"
 items = { type = "string", pattern = "^#E\\d+$" }
-description = "依赖的步骤结果引用列表（#E1 格式）"
-
-[output_schema.json_schema.properties.steps.items.properties.data_requirements]
-type = "array"
-description = "数据需求列表"
-
-[output_schema.json_schema.properties.steps.items.properties.data_requirements.items]
-type = "object"
-required = ["name", "description", "required", "source_hint"]
-
-[output_schema.json_schema.properties.steps.items.properties.data_requirements.items.properties.name]
-type = "string"
-description = "需求名称"
-
-[output_schema.json_schema.properties.steps.items.properties.data_requirements.items.properties.description]
-type = "string"
-description = "需求描述"
-
-[output_schema.json_schema.properties.steps.items.properties.data_requirements.items.properties.required]
-type = "boolean"
-description = "是否必需"
-
-[output_schema.json_schema.properties.steps.items.properties.data_requirements.items.properties.source_hint]
-type = "string"
-description = "来源提示"
-
-[output_schema.json_schema.properties.steps.items.properties.recommended_tool_categories]
-type = "array"
-items = { type = "string", enum = ["Browser", "File", "Text", "Data", "System", "Device", "Dev", "Utility"] }
-description = "推荐的工具分类（可选，可为空数组）"
-
-[output_schema.json_schema.properties.complexity]
-type = "string"
-enum = ["simple", "medium", "complex"]
-description = "计划复杂度"
-
-[output_schema.json_schema.properties.risk_level]
-type = "string"
-enum = ["low", "medium", "high", "critical"]
-description = "风险等级"
-
-[output_schema.json_schema.properties.input_schema]
-type = "object"
-description = "输入参数定义（可选）：键为参数名（snake_case），值为 {type, description, example} 参数定义对象"
-
-[output_schema.json_schema.properties.execution_guide]
-type = "string"
-description = "执行指导：从执行步骤和工具路径中浓缩的操作指引，供计划执行时参考"
+description = "依赖的前序步骤结果引用列表（#E1 格式），无依赖为 []"
 
 [output_schema.example]
 text = """
 {
-  "id": "plan-flex-001",
-  "title": "执行任务",
-  "description": "根据完整需求提炼的计划",
-  "steps": [ 
+  "steps": [
     {
-      "id": "step-1",
-      "order": 1,
-      "intent": "获取输入数据",
-      "expected_output": "获取所需数据",
       "result_reference": "#E1",
-      "dependencies": [],
-      "data_requirements": [
-        {
-          "name": "input",
-          "description": "输入数据",
-          "required": true,
-          "source_hint": "从用户输入中提取"
-        }
-      ],
-      "recommended_tool_categories": ["File"]
+      "intent": "从需求定义的实参中读取待处理数据源",
+      "expected_output": "得到待处理数据源的完整内容",
+      "dependencies": []
     },
     {
-      "id": "step-2",
-      "order": 2,
-      "intent": "处理数据",
-      "expected_output": "处理后的数据",
       "result_reference": "#E2",
-      "dependencies": ["#E1"],
-      "data_requirements": [
-        {
-          "name": "data",
-          "description": "待处理数据",
-          "required": true,
-          "source_hint": "从 #E1 中获取"
-        }
-      ],
-      "recommended_tool_categories": ["Text"]
-    }
-  ],
-  "complexity": "medium",
-  "risk_level": "low",
-  "execution_guide": "首先使用浏览器工具导航到目标页面并搜索关键词，提取前N条结果；然后用文件工具将结果写入本地文件。注意等待页面加载完成后再提取数据。",
-  "input_schema": {
-    "keyword": {
-      "type": "string",
-      "description": "搜索关键词",
-      "example": "安仁乡"
+      "intent": "对 #E1 的内容做需求中描述的语义处理",
+      "expected_output": "处理后的结构化结果",
+      "dependencies": ["#E1"]
     },
-    "limit": {
-      "type": "integer",
-      "description": "返回结果条数",
-      "example": 3
+    {
+      "result_reference": "#E3",
+      "intent": "按需求定义的输出格式组织 #E2 的结果",
+      "expected_output": "符合需求「输出格式」节定义的交付物",
+      "dependencies": ["#E2"]
     }
-  }
+  ]
 }"""

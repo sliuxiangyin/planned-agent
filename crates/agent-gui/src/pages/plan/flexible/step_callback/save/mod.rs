@@ -28,9 +28,13 @@ pub fn create_save_callback(
 
 /// 启动前注入映射：`(state 产物字段名, 注入到子 agent 参数的字段名)`。
 ///
-/// - `parameterized_task` ← `flexible_state.products.parameterized_task`（step2 定稿产物）。
+/// - `task_definition` ← `flexible_state.products.task_definition`（step1 定稿产物）。
+/// - `inputs` ← `flexible_state.products.inputs`（参数化步定稿产物）。
+/// - `steps` ← `flexible_state.products.steps`（参数化后的步骤骨架，含 `${name}` 占位）。
 pub(super) const INJECT_MAPPING: &[(&str, &str)] = &[
-    ("parameterized_task", "parameterized_task"),
+    ("task_definition", "task_definition"),
+    ("inputs", "inputs"),
+    ("steps", "steps"),
 ];
 
 /// 创建 `flexible_save` 的启动前注入回调（映射留在本 step）。
@@ -52,6 +56,13 @@ mod tests {
     /// 映射就是本 step 的入参契约：写错会静默传错数据，故锁住取值。
     #[test]
     fn inject_mapping_matches_save_input_contract() {
-        assert_eq!(INJECT_MAPPING, &[("parameterized_task", "parameterized_task")]);
+        assert_eq!(
+            INJECT_MAPPING,
+            &[
+                ("task_definition", "task_definition"),
+                ("inputs", "inputs"),
+                ("steps", "steps"),
+            ]
+        );
     }
 }

@@ -60,10 +60,11 @@ pub(crate) async fn new_chat_service(
         prompt.manager.clone(),
         ChatConfig {
             system_prompt: Some(SystemPrompt::Rendered(coordinator_system_prompt)),
-            // 协调器仅做状态机调度，不执行业务：工具层只暴露 3 个 step 子 agent +
+            // 协调器仅做状态机调度，不执行业务：工具层只暴露 4 个 step 子 agent +
             // flexible_state（只读）+ request_user_action，杜绝误调业务 / 其它子 agent 工具。
             allowed_tools: Some(vec![
                 "flexible_step1".to_string(),
+                "flexible_plan".to_string(),
                 "flexible_step2".to_string(),
                 "flexible_save".to_string(),
                 "flexible_state".to_string(),
