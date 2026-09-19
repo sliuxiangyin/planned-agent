@@ -2,7 +2,7 @@
 //!
 //! 单一事实源：当前活跃 session id。所有需要感知「当前会话」变化的地方，
 //! 都从这里读 / 订阅，而**不认识彼此**：
-//! - 异步旁路（step5 落库、flexible_state 定位）：经 tokio watch `receiver().borrow()`
+//! - 异步旁路（flexible_save 落库、flexible_state 定位）：经 tokio watch `receiver().borrow()`
 //!   读当前值 —— 天然跟随切换，无需事件。
 //! - UI 侧（drawer 高亮、ChatService 宿主将来触发重建）：经 dioxus `current()`
 //!   响应式读当前 id —— watch 不会驱动重渲染，故这里补一个 dioxus 信号作为桥。
@@ -31,7 +31,7 @@ pub type SessionPersistHook = Arc<dyn Fn(Option<String>) + Send + Sync>;
 /// 通过 dioxus context 在 plan 页面注入单一实例，controller / drawer / 其它
 /// 消费方 `use_context` 取同一个。
 pub struct SessionManager {
-    /// tokio watch 发送端：异步旁路（step5/state）的当前值来源。
+    /// tokio watch 发送端：异步旁路（flexible_save/state）的当前值来源。
     slot: watch::Sender<Option<String>>,
     /// 常驻接收端：保证 send 永不因无订阅者被丢弃；同时用作同步读取句柄。
     #[allow(dead_code)] // 现阶段仅作保活用途；将来 drawer 列表渲染等经 borrow() 同步读当前值
@@ -88,7 +88,7 @@ impl SessionManager {
 
     /// 为单个消费方派生 tokio watch receiver（自带当前值快照）。
     ///
-    /// 供异步旁路（step5 落库、flexible_state 定位）`borrow()` 读当前值使用。
+    /// 供异步旁路（flexible_save 落库、flexible_state 定位）`borrow()` 读当前值使用。
     pub fn receiver(&self) -> watch::Receiver<Option<String>> {
         self.slot.subscribe()
     }

@@ -11,8 +11,8 @@
 //! - `status` 表达定稿态：`active`（进行中/未定稿）→ `produced`（已定稿可回看/可执行）/
 //!   `abandoned`（被弃）。
 //! - `is_default` 标记该会话是否为 plan 的默认会话。
-//! - 定稿产物四件套（input_schema / output / steps / execution_plan）为**可空列**，
-//!   仅在 `status → produced` 定稿时写入；未定稿会话这几列为 NULL。
+//! - 定稿产物 `parameterized_task`（参数提取结果，整段 JSON）为**可空列**，
+//!   仅在 `status → produced` 定稿时写入；未定稿会话该列为 NULL。
 //! - `title` 为该版本会话标题。
 //!
 //! 该表为 plans_flexible_sessions 会话体系的新归属，替代旧 sessions / plans_flexible 两表。
@@ -68,12 +68,9 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .default(false),
                     )
-                    // 定稿产物四件套（可空，produced 时写入）
-                    .col(ColumnDef::new(PlansFlexibleSessions::InputSchema).string().null())
-                    .col(ColumnDef::new(PlansFlexibleSessions::Output).string().null())
-                    .col(ColumnDef::new(PlansFlexibleSessions::Steps).string().null())
+                    // 定稿产物：参数提取结果（parameterized_task 整段 JSON，可空，produced 时写入）
                     .col(
-                        ColumnDef::new(PlansFlexibleSessions::ExecutionPlan)
+                        ColumnDef::new(PlansFlexibleSessions::ParameterizedTask)
                             .string()
                             .null(),
                     )
@@ -95,10 +92,7 @@ impl MigrationTrait for Migration {
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_plans_flexible_sessions_plan_id")
-                            .from(
-                                PlansFlexibleSessions::Table,
-                                PlansFlexibleSessions::PlanId,
-                            )
+                            .from(PlansFlexibleSessions::Table, PlansFlexibleSessions::PlanId)
                             .to(Plans::Table, Plans::Id)
                             .on_delete(ForeignKeyAction::Cascade),
                     )
@@ -157,10 +151,7 @@ enum PlansFlexibleSessions {
     Version,
     Status,
     IsDefault,
-    InputSchema,
-    Output,
-    Steps,
-    ExecutionPlan,
+    ParameterizedTask,
     CreatedAt,
     UpdatedAt,
     ClosedAt,

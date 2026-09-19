@@ -3,19 +3,15 @@
 //! - `flexible_state`：读写当前会话的「流程中间状态」（当前阶段 + 各步骤产物）。
 //!   - `action=load`：读取 `current_step` 与 `products`，供协调器在「用户指定步骤」时盘点
 //!     目标步骤的前置产物是否齐备（齐备→直达；缺失→引导）。
-//!   - `action=save`：在某一流程阶段「定稿」（如 step1 确认、step2 success、step3/4 用户
-//!     确认）后登记该阶段产物，并把 `current_step` 推进到对应档位。
-//! - `flexible_save_template`：登记某会话产出的模板快照（由父 agent 在 step5 产出后显式调用）。
+//!   - `action=save`：在某一流程阶段「定稿」后登记该阶段产物，并把 `current_step` 推进到对应档位。
 //!
 //! `session_id` 不再从会话 watch 槽动态读取（多会话并行时会串写），改由协调器从 system
 //! prompt 中照抄、作为工具参数传入；executor 从 `arguments.session_id` 读取。`plan_id` 仍由
 //! executor 构造时注入（per-plan，天然正确），不依赖协调器传入。
 
 mod flexible_state;
-mod flexible_save_template;
 
 pub(crate) use flexible_state::{flexible_state_tool, FlexibleStateExecutor};
-pub(crate) use flexible_save_template::{flexible_save_template, FlexibleSaveTemplateExecutor};
 
 use anyhow::Result;
 use serde_json::{json, Value};

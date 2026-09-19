@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use dioxus::prelude::*;
-use planned_agent::chat::{ChatConfig, SubAgentResultChain, SystemPrompt};
+use planned_agent::chat::{ChatConfig, SystemPrompt};
 use planned_agent_core::prompt::PromptManager;
 use planned_agent_core::tool_registry::ToolCategory;
 
@@ -26,12 +26,10 @@ use crate::services::plans_flexible_service::PlansFlexibleService;
 
 use super::session_host::FlexibleSessionHost;
 use super::step_callback::{
-    create_step1_callback, create_step2_callback, create_step3_callback, create_step4_callback,
-    create_step5_callback, StateInjectCallback, HOST_SESSION_ID_FIELD,
+    create_save_callback, create_save_inject, create_step1_callback, create_step1_inject,
+    create_step2_callback, create_step2_inject, HOST_SESSION_ID_FIELD,
 };
-use super::tool::{
-    flexible_state_tool, flexible_save_template, FlexibleStateExecutor, FlexibleSaveTemplateExecutor,
-};
+use super::tool::{flexible_state_tool, FlexibleStateExecutor};
 
 #[derive(Props, Clone, PartialEq)]
 pub struct FlexiblePageProps {
@@ -113,7 +111,7 @@ fn use_plan_agent_registrations(plan_id: String) {
     let registry = tools_ctx.registry.clone();
 
     use_hook(move || {
-        // flexible_step5 落库回调 + flexible_state 工具（storage 由启动门保证就绪，始终存在）
+        // flexible_save 落库回调 + flexible_state 工具（storage 由启动门保证就绪，始终存在）
         let plans_flexible_service = Arc::new(PlansFlexibleService::new(
             storage_ctx.plans_flexible_sessions_repo(),
             storage_ctx.flexible_state_repo(),
@@ -128,116 +126,13 @@ fn use_plan_agent_registrations(plan_id: String) {
                 Arc::new(executor),
             );
         }
-        // flexible_save_template：step5 产出后由协调器显式调用，登记模板快照（session_id 经参数传入）。
-        {
-            let executor =
-                FlexibleSaveTemplateExecutor::new(plan_id.clone(), plans_flexible_service.clone());
-            tools_ctx.register_custom_tool(
-                flexible_save_template(),
-                vec![ToolCategory::Utility],
-                Arc::new(executor),
-            );
-        }
 
-        // 测试用：子 agent 连续多次 request_user_action 交互的专用子 agent（可选注册，供 GUI 测试）。
-        // 由引导模板 chat/sub_agent_rua_driver.toml 驱动的协调器去调用它。
-        register_sub_agent(
-            &ai_ctx,
-            &tools_ctx,
-            &prompt_ctx,
-            "flexible_step_rua_demo",
-            "request_user_action 子 agent 交互测试：被调用后在子 agent 内连续向用户发起多次 request_user_action（用于在 GUI 验证子 agent 内交互卡的渲染/回传/取消/回显）。",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "user_message": {
-                        "type": "string",
-                        "description": "来自协调器的测试指令（一般无需传业务内容）"
-                    }
-                },
-                "required": []
-            }),
-            ChatConfig {
-                system_prompt: Some(SystemPrompt::Template("chat/sub_agent_rua_demo".into())),
-                allowed_tools: Some(vec!["request_user_action".to_string()]),
-                ..Default::default()
-            },
-            1, // depth
-            2, // max_depth
-            SubAgentResultChain::default(), // 结果链：测试用子 agent 不需要
-            vec![], // before 回调链：测试用子 agent 不需要注入
-        );
-        // 测试用：子 agent max_tool_rounds 触顶复现。
-        register_sub_agent(
-            &ai_ctx,
-            &tools_ctx,
-            &prompt_ctx,
-            "flexible_step_max_rounds_demo",
-            "子 agent max_tool_rounds 触顶复现测试：被调用后在子 agent 内持续调用 builtin_read_documentation 直到轮次上限触顶（用于在 GUI 验证子 agent 触顶时「是否继续」卡的挂起/恢复/回显）。",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "user_message": {
-                        "type": "string",
-                        "description": "来自协调器的测试指令（一般无需传业务内容）"
-                    }
-                },
-                "required": []
-            }),
-            ChatConfig {
-                system_prompt: Some(SystemPrompt::Template(
-                    "chat/sub_agent_max_rounds_demo".into(),
-                )),
-                allowed_tools: Some(vec!["builtin_read_documentation".to_string()]),
-                max_tool_rounds: 2,
-                ..Default::default()
-            },
-            1, // depth
-            2, // max_depth
-            SubAgentResultChain::default(), // 结果链：测试用子 agent 不需要
-            vec![], // before 回调链：测试用子 agent 不需要注入
-        );
-        // 测试用：子 agent 轮次探针（专门核验「触顶继续」是否延续同一会话）。
-        // 与 max_rounds_demo 的区别：本子 agent 每轮会先输出可读的
-        // `[ROUND-PROBE] 本会话累计第 N 轮` —— 点「继续」后编号**接着涨**=同一会话（上下文保留），
-        // **从 1 重来**=被新建了子 agent（上下文丢失）。`max_tool_rounds` 故意设为 1，
-        // 让每点一次「继续」恰好推进一轮、探针编号每次 +1，便于在 GUI 上逐轮观察。
-        // 由引导模板 chat/sub_agent_rounds_probe_driver.toml 驱动的协调器去调用它。
-        register_sub_agent(
-            &ai_ctx,
-            &tools_ctx,
-            &prompt_ctx,
-            "flexible_step_rounds_probe",
-            "子 agent 轮次探针测试：被调用后每轮先输出 `[ROUND-PROBE] 本会话累计第 N 轮` 再调用 builtin_read_documentation，直到轮次上限触顶（用于在 GUI 核验子 agent 触顶「继续」是在同一会话内延续、还是被新建会话）。",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "user_message": {
-                        "type": "string",
-                        "description": "来自协调器的测试指令（一般无需传业务内容）"
-                    }
-                },
-                "required": []
-            }),
-            ChatConfig {
-                system_prompt: Some(SystemPrompt::Template(
-                    "chat/sub_agent_rounds_probe".into(),
-                )),
-                allowed_tools: Some(vec!["builtin_read_documentation".to_string()]),
-                max_tool_rounds: 1,
-                ..Default::default()
-            },
-            1, // depth
-            2, // max_depth
-            SubAgentResultChain::default(), // 结果链：测试用子 agent 不需要
-            vec![], // before 回调链：测试用子 agent 不需要注入
-        );
         register_sub_agent(
             &ai_ctx,
             &tools_ctx,
             &prompt_ctx,
             "flexible_step1",
-            "需求澄清子 Agent：将用户自然语言需求澄清为可执行的任务定义。接收用户消息和历史对话摘要，根据预设规则进行需求分析和参数提取。",
+            "需求澄清子 Agent：将用户自然语言需求澄清为可执行的任务定义（只澄清需求本身，不分析输入参数或输出形式）。",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -251,11 +146,7 @@ fn use_plan_agent_registrations(plan_id: String) {
                     },
                     "previous_task_definition": {
                         "type": "object",
-                        "description": "可选：上一轮已得到的任务基线（task_definition 对象）。优先取 flexible_state 中已定稿的 task_definition，其次取最近一次 flexible_step1 返回的 task_definition；首次澄清时不传"
-                    },
-                    "previous_output_format": {
-                        "type": "string",
-                        "description": "可选：上一轮已得到的输出格式，与 previous_task_definition 配套；首次澄清时不传"
+                        "description": "任务基线（task_definition 对象，含 task）。**由系统自动注入**（取自本会话 flexible_state 的已定稿产物，是基线的唯一来源），你无需传；首次澄清时系统不注入，你也不必补"
                     },
                     "host_session_id": {
                         "type": "string",
@@ -274,37 +165,37 @@ fn use_plan_agent_registrations(plan_id: String) {
             1, // depth
             2, // max_depth
             create_step1_callback(plan_id.clone(), plans_flexible_service.clone()),
-            vec![],
+            // 任务基线由系统从 flexible_state 注入（映射见 step1/mod.rs 的 INJECT_MAPPING），
+            // 不再依赖协调器转抄。
+            vec![create_step1_inject(
+                plan_id.clone(),
+                plans_flexible_service.clone(),
+            )],
         );
         register_sub_agent(
             &ai_ctx,
             &tools_ctx,
             &prompt_ctx,
             "flexible_step2",
-            "灵活模式任务执行 Agent：根据需求澄清结果执行工具调用。",
+            "参数提取子 Agent：从需求澄清结果中识别可变参数，产出可复用的参数化任务（parameterized_task：占位符模板 + 参数表）。",
             serde_json::json!({
                 "type": "object",
                 "properties": {
                     "task_definition": {
                         "type": "object",
-                        "description": "来自 flexible_step1 返回 JSON 的 task_definition 对象（含 task 任务描述与 params 参数）"
-                    },
-                    "runtime_context": {
-                        "type": "string",
-                        "description": "可选，来自上一轮执行的 compressed_context；首次执行时为空"
+                        "description": "任务定义对象（含 task 任务描述）。**由系统自动注入**（取自本会话 flexible_state 的已定稿产物），你无需传"
                     },
                     "host_session_id": {
                         "type": "string",
                         "description": "本会话 ID，原样照抄 system prompt「会话上下文」中给出的值，不得改写"
                     }
                 },
-                "required": ["task_definition", "host_session_id"]
+                "required": ["host_session_id"]
             }),
             ChatConfig {
                 system_prompt: Some(SystemPrompt::Template("flexible/flexible_step2".into())),
-                // step2 是纯业务执行：用 "all" 剔除 Utility/SubAgent（含 flexible_state、兄弟 step 子 agent），
-                // 只暴露业务工具，避免执行 agent 误碰协调层工具。
-                allowed_tools: Some(vec!["all".to_string()]),
+                // 参数提取是纯文本分析，不调用任何工具（不执行、不交互）。
+                allowed_tools: Some(vec![]),
                 // host_session_id 是宿主注入的控制字段（供回调定位会话），不进子 agent 的 task 文本。
                 hidden_args: vec![HOST_SESSION_ID_FIELD.to_string()],
                 ..Default::default()
@@ -312,139 +203,48 @@ fn use_plan_agent_registrations(plan_id: String) {
             1, // depth
             2, // max_depth
             create_step2_callback(plan_id.clone(), plans_flexible_service.clone()),
-            vec![],
-        );
-        register_sub_agent(
-            &ai_ctx,
-            &tools_ctx,
-            &prompt_ctx,
-            "flexible_step3",
-            "灵活模式字段选择 Agent：从 step2 执行结果中提取可用字段，通过交互让用户选择最终输出的字段。",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "execution_trace_summary": {
-                        "type": "string",
-                        "description": "来自 flexible_step2 的执行轨迹摘要（compressed_context），包含工具调用记录和输出数据"
-                    },
-                    "output_format": {
-                        "type": "string",
-                        "description": "来自 flexible_step1 的输出格式，已由用户确认（如 CSV、JSON、Markdown、文本等）"
-                    },
-                    "host_session_id": {
-                        "type": "string",
-                        "description": "本会话 ID，原样照抄 system prompt「会话上下文」中给出的值，不得改写"
-                    }
-                },
-                "required": ["execution_trace_summary", "output_format", "host_session_id"]
-            }),
-            ChatConfig {
-                system_prompt: Some(SystemPrompt::Template("flexible/flexible_step3".into())),
-                allowed_tools: Some(vec!["request_user_action".to_string()]),
-                // host_session_id 是宿主注入的控制字段（供回调定位会话），不进子 agent 的 task 文本。
-                hidden_args: vec![HOST_SESSION_ID_FIELD.to_string()],
-                ..Default::default()
-            },
-            1, // depth
-            2, // max_depth
-            create_step3_callback(plan_id.clone(), plans_flexible_service.clone()),
-            // 轨迹摘要从 flexible_state 直取注入，取代「协调器 LLM 转抄」：
-            // 合并语义下注入方赢，故协调器即使仍传该字段也污染不了。
-            vec![Arc::new(StateInjectCallback::new(
+            // 任务定义由系统注入（见 step2/mod.rs 的 INJECT_MAPPING）。
+            vec![create_step2_inject(
                 plan_id.clone(),
                 plans_flexible_service.clone(),
-                vec![("compressed_context", "execution_trace_summary")],
-            ))],
+            )],
         );
         register_sub_agent(
             &ai_ctx,
             &tools_ctx,
             &prompt_ctx,
-            "flexible_step4",
-            "灵活模式参数确认 Agent：分析 step2 执行轨迹中的具体参数值，识别可参数化候选，与用户确认后生成最终的模板输入定义。",
+            "flexible_save",
+            "保存子 Agent：校验参数提取结果（parameterized_task），确认后落库为可复用模板。",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "execution_trace": {
-                        "type": "array",
-                        "description": "来自 flexible_step2 会话历史导出的真实工具调用轨迹（每条含 id / name / arguments / output / outcome），包含每次工具调用的输入参数"
-                    },
-                    "output_format": {
-                        "type": "string",
-                        "description": "来自 flexible_step1 的输出格式，已由用户确认（如 CSV、JSON、Markdown、文本等）"
-                    },
-                    "field_selection_result": {
+                    "parameterized_task": {
                         "type": "object",
-                        "description": "来自 flexible_step3 返回 JSON 的 field_selection_result 对象（含 output_format / available_fields / selected_fields）"
+                        "description": "step2 定稿的参数提取结果（含 template 与 parameters）。**由系统自动注入**，你无需传"
                     },
                     "host_session_id": {
                         "type": "string",
                         "description": "本会话 ID，原样照抄 system prompt「会话上下文」中给出的值，不得改写"
                     }
                 },
-                "required": ["execution_trace", "output_format", "field_selection_result", "host_session_id"]
+                "required": ["host_session_id"]
             }),
             ChatConfig {
-                system_prompt: Some(SystemPrompt::Template("flexible/flexible_step4".into())),
-                allowed_tools: Some(vec!["request_user_action".to_string()]),
+                system_prompt: Some(SystemPrompt::Template("flexible/flexible_save".into())),
+                allowed_tools: Some(vec![]),
                 // host_session_id 是宿主注入的控制字段（供回调定位会话），不进子 agent 的 task 文本。
                 hidden_args: vec![HOST_SESSION_ID_FIELD.to_string()],
                 ..Default::default()
             },
             1, // depth
             2, // max_depth
-            create_step4_callback(plan_id.clone(), plans_flexible_service.clone()),
-            // 执行轨迹从 flexible_state 直取注入，取代「协调器 LLM 转抄」。
-            vec![Arc::new(StateInjectCallback::new(
+            // 定稿回调直接落库（读 state 的 parameterized_task，不经协调器转抄）并推进 saved。
+            create_save_callback(plan_id.clone(), plans_flexible_service.clone()),
+            // parameterized_task 由系统注入（见 save/mod.rs 的 INJECT_MAPPING）。
+            vec![create_save_inject(
                 plan_id.clone(),
                 plans_flexible_service.clone(),
-                vec![("execution_trace", "execution_trace")],
-            ))],
-        );
-        register_sub_agent(
-            &ai_ctx,
-            &tools_ctx,
-            &prompt_ctx,
-            "flexible_step5",
-            "灵活模式模板序列化 Agent：将需求澄清、执行轨迹、字段选择、参数化确认的结果编译为可复用的混合模板（steps 硬脚本 + execution_plan 智能说明书）。",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task_definition": {
-                        "type": "object",
-                        "description": "来自 flexible_step1 返回 JSON 的 task_definition 对象（含 task 任务描述与 params 参数）"
-                    },
-                    "execution_trace": {
-                        "type": "array",
-                        "description": "来自 flexible_step2 会话历史导出的真实工具调用轨迹（按声明顺序，每条含 id / name / arguments / output / outcome）"
-                    },
-                    "field_selection_result": {
-                        "type": "object",
-                        "description": "来自 flexible_step3 返回 JSON 的 field_selection_result 对象（含 output_format / available_fields / selected_fields）"
-                    },
-                    "parameter_confirmation_result": {
-                        "type": "object",
-                        "description": "来自 flexible_step4 返回 JSON 的 parameter_confirmation_result 对象（含 candidates / selected_params / template_input）"
-                    },
-                    "host_session_id": {
-                        "type": "string",
-                        "description": "本会话 ID，原样照抄 system prompt「会话上下文」中给出的值，不得改写"
-                    }
-                },
-                "required": ["task_definition", "execution_trace", "field_selection_result", "parameter_confirmation_result", "host_session_id"]
-            }),
-            ChatConfig {
-                system_prompt: Some(SystemPrompt::Template("flexible/flexible_step5".into())),
-                allowed_tools: Some(vec!["request_user_action".to_string()]),
-                // host_session_id 是宿主注入的控制字段（供回调定位会话），不进子 agent 的 task 文本。
-                hidden_args: vec![HOST_SESSION_ID_FIELD.to_string()],
-                ..Default::default()
-            },
-            1, // depth
-            2, // max_depth
-            // 回调只推进 current_step="templated"；模板落库仍由 flexible_save_template 工具负责。
-            create_step5_callback(plan_id.clone(), plans_flexible_service.clone()),
-            vec![],
+            )],
         );
     });
 
@@ -452,11 +252,8 @@ fn use_plan_agent_registrations(plan_id: String) {
         for name in [
             "flexible_step1",
             "flexible_step2",
-            "flexible_step3",
-            "flexible_step4",
-            "flexible_step5",
+            "flexible_save",
             "flexible_state",
-            "flexible_save_template",
         ] {
             let _ = registry.unregister_tool(name);
         }
@@ -482,4 +279,3 @@ fn use_plan_templates() -> Signal<Vec<String>, SyncStorage> {
     });
     templates
 }
-

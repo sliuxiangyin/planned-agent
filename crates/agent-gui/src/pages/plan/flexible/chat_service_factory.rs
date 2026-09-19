@@ -60,24 +60,14 @@ pub(crate) async fn new_chat_service(
         prompt.manager.clone(),
         ChatConfig {
             system_prompt: Some(SystemPrompt::Rendered(coordinator_system_prompt)),
-            // 协调器仅做状态机调度，不执行业务：工具层只暴露 5 个 step 子 agent +
-            // flexible_state（只读）+ flexible_save_template + request_user_action，
-            // 杜绝误调业务 / 其它子 agent 工具。
+            // 协调器仅做状态机调度，不执行业务：工具层只暴露 3 个 step 子 agent +
+            // flexible_state（只读）+ request_user_action，杜绝误调业务 / 其它子 agent 工具。
             allowed_tools: Some(vec![
                 "flexible_step1".to_string(),
                 "flexible_step2".to_string(),
-                "flexible_step3".to_string(),
-                "flexible_step4".to_string(),
-                "flexible_step5".to_string(),
+                "flexible_save".to_string(),
                 "flexible_state".to_string(),
-                "flexible_save_template".to_string(),
                 "request_user_action".to_string(),
-                // 测试用（默认关闭）：供 chat/*_driver.toml 驱动的协调器调用，
-                // 复现「子 agent 内 request_user_action」/「子 agent 轮次触顶」场景。
-                // "builtin_read_documentation".to_string(),
-                // "flexible_step_rua_demo".to_string(),
-                // "flexible_step_max_rounds_demo".to_string(),
-                "flexible_step_rounds_probe".to_string(),
             ]),
             max_tool_rounds: 10,
             ..Default::default()

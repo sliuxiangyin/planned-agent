@@ -4,8 +4,8 @@
 //! 语义见 `docs/chat-flexible-回调会话归属设计.md`）。
 //!
 //! 定稿判定（与 `flexible_step1.toml` 的输出契约一致）：
-//! - `{"status":"task_defined", ...}` → 登记 `task_defined`（写入 `task_definition` + `output_format`），
-//!   并清除 step2~step4 的全部下游产物。
+//! - `{"status":"task_defined", ...}` → 登记 `task_defined`（写入 `task_definition`），
+//!   并清除下游的 `parameterized_task`。
 //! - 其它（`status:"ignored"` / `"cancelled"` / 非 JSON）→ **不登记**（由前置分析拦下，本回调不执行）。
 //!
 //! 语义注记：本回调登记的是「子 agent 已把需求澄清成一份任务定义」这个**定稿动作**，
@@ -33,19 +33,9 @@ pub(super) const OK_STATUS: &str = "task_defined";
 /// 定稿后推进到的 `current_step` 档位。
 const NEXT_STEP: &str = "task_defined";
 /// 定稿时要登记的产物 key（值取输出 JSON 中的同名字段）。
-const PRODUCTS: &[&str] = &["task_definition", "output_format"];
-/// 定稿时要清除（置 `null`）的下游产物 —— 需求变了，后续各阶段的定稿一律作废。
-///
-/// 含 step5 的 `template_payload`（模板副本）：它也是**下游**产物，而
-/// `flexible_save_template` 正是从 state 读它落库 —— 不清就会把上一轮的旧模板
-/// 当成当前定稿落库。
-const CLEAR: &[&str] = &[
-    "execution_trace",
-    "compressed_context",
-    "field_selection_result",
-    "parameter_confirmation_result",
-    "template_payload",
-];
+const PRODUCTS: &[&str] = &["task_definition"];
+/// 定稿时要清除（置 `null`）的下游产物 —— 需求变了，参数提取结果一律作废。
+const CLEAR: &[&str] = &["parameterized_task"];
 
 /// `flexible_step1` 的定稿登记回调。
 pub(super) struct Step1Callback {
@@ -115,27 +105,16 @@ mod tests {
         let parsed = serde_json::json!({
             "status": "task_defined",
             "task_definition": { "task": "建目录" },
-            "output_format": "text",
         });
         let patch = build_patch(AGENT, &parsed, PRODUCTS, CLEAR);
         let mut keys: Vec<&str> = patch.keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(
-            keys,
-            [
-                "compressed_context",
-                "execution_trace",
-                "field_selection_result",
-                "output_format",
-                "parameter_confirmation_result",
-                "task_definition",
-                "template_payload",
-            ]
-        );
+        assert_eq!(keys, ["parameterized_task", "task_definition"]);
         assert_eq!(
             patch["task_definition"],
             serde_json::json!({ "task": "建目录" })
         );
+        assert!(patch["parameterized_task"].is_null());
         assert_eq!(NEXT_STEP, "task_defined");
         assert_eq!(OK_STATUS, "task_defined");
     }

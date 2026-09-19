@@ -30,7 +30,7 @@ impl PlansFlexibleSessionsRepo {
     /// 开一个新会话（= 新版本）。
     ///
     /// 生成新的 UUID id 与当前时间戳；`status` 默认 active，`is_default` 默认 false，
-    /// 定稿产物四件套留空。`version` 自动分配：取该 plan 现有最大版本号 patch +1，
+    /// 定稿产物三件套留空。`version` 自动分配：取该 plan 现有最大版本号 patch +1，
     /// 首个会话为 `v1.0.0`（保证 plan 内单调递增、唯一）。
     pub async fn create(
         &self,
@@ -47,10 +47,7 @@ impl PlansFlexibleSessionsRepo {
             version: Set(version),
             status: Set(status::ACTIVE.to_string()),
             is_default: Set(false),
-            input_schema: Set(None),
-            output: Set(None),
-            steps: Set(None),
-            execution_plan: Set(None),
+            parameterized_task: Set(None),
             created_at: Set(now.clone()),
             updated_at: Set(now),
             closed_at: Set(None),
@@ -105,17 +102,14 @@ impl PlansFlexibleSessionsRepo {
         Ok(res)
     }
 
-    /// 定稿：把 step5 产出的模板四件套写入指定会话行，置 `status=produced`，
+    /// 定稿：把参数提取结果（parameterized_task 整段 JSON）写入指定会话行，置 `status=produced`，
     /// 刷新 `updated_at` 并写 `closed_at`，返回更新后的 Model。
     ///
     /// 目标行由 `id`（= 会话/版本 id）定位；同一会话反复产出即覆盖同一行。
     pub async fn produce(
         &self,
         id: &str,
-        input_schema: &str,
-        output: &str,
-        steps: &str,
-        execution_plan: &str,
+        parameterized_task: &str,
     ) -> StorageResult<plans_flexible_sessions::Model> {
         let now = Utc::now().to_rfc3339();
         let mut am: plans_flexible_sessions::ActiveModel =
@@ -126,10 +120,7 @@ impl PlansFlexibleSessionsRepo {
                     StorageError::NotFound(format!("plans_flexible_sessions '{id}' not found"))
                 })?
                 .into();
-        am.input_schema = Set(Some(input_schema.to_string()));
-        am.output = Set(Some(output.to_string()));
-        am.steps = Set(Some(steps.to_string()));
-        am.execution_plan = Set(Some(execution_plan.to_string()));
+        am.parameterized_task = Set(Some(parameterized_task.to_string()));
         am.status = Set(status::PRODUCED.to_string());
         am.updated_at = Set(now.clone());
         am.closed_at = Set(Some(now));
@@ -143,10 +134,7 @@ impl PlansFlexibleSessionsRepo {
             .filter(plans_flexible_sessions::Column::PlanId.eq(plan_id))
             .all(&self.db)
             .await?;
-        let latest = rows
-            .iter()
-            .map(|m| parse_version(&m.version))
-            .max();
+        let latest = rows.iter().map(|m| parse_version(&m.version)).max();
         Ok(match latest {
             Some((major, minor, patch)) => format!("v{major}.{minor}.{}", patch + 1),
             None => "v1.0.0".to_string(),

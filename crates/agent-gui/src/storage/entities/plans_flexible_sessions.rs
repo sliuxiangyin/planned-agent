@@ -1,5 +1,5 @@
 //! plans_flexible_sessions 表 entity — 「会话即版本」合并表。
-//! 一个会话即一个版本；定稿产物四件套仅在定稿（produced）时写入，未定稿为 NULL。
+//! 一个会话即一个版本；定稿产物仅在定稿（produced）时写入，未定稿为 NULL。
 
 use sea_orm::entity::prelude::*;
 
@@ -22,14 +22,8 @@ pub struct Model {
     /// 是否为默认计划
     #[sea_orm(default_value = false)]
     pub is_default: bool,
-    /// 输入参数定义 JSON（定稿产物，可空）
-    pub input_schema: Option<String>,
-    /// 输出定义 JSON（定稿产物，可空）
-    pub output: Option<String>,
-    /// 硬编码执行脚本 JSON 数组（定稿产物，可空）
-    pub steps: Option<String>,
-    /// 动态修复说明书 JSON 数组（定稿产物，可空）
-    pub execution_plan: Option<String>,
+    /// 参数提取结果（parameterized_task）整段 JSON（定稿产物，可空）
+    pub parameterized_task: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub closed_at: Option<String>,

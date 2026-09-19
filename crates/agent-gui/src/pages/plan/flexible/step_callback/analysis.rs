@@ -9,7 +9,7 @@
 //!
 //! 谁在用：
 //! - [`super::prelude`]：前置分析在这里解析 + 规范化，并**定稿对外文本**；
-//! - 各 step 的定稿登记回调（`super::step1` ~ `super::step5`）：直接读分析产物里的 `parsed`
+//! - 各 step 的定稿登记回调（`super::step1` / `super::step2` / `super::save`）：直接读分析产物里的 `parsed`
 //!   （见 [`StepAnalysis`]），不必再解析一次。
 
 use planned_agent::chat::{ResultDecision, SubAgentCall};
@@ -17,9 +17,8 @@ use serde_json::Value;
 
 /// 输出格式不合契约时发给子 agent 的纠正消息（触发其重新生成）。
 ///
-/// **必须显式禁止重新执行工具**：重试会在同一会话里再跑一轮，而轨迹是从会话历史导出的
-/// （见 [`super::step2`]）—— 模型若把工具重跑一遍，`execution_trace` 里就会出现
-/// 重复调用，模板会据此生成重复步骤。格式问题只该重写输出，不该重做动作。
+/// **必须显式禁止重新执行工具**：重试会在同一会话里再跑一轮，产生额外副作用与重复动作；
+/// 而格式问题只该重写输出，不该重做动作。
 pub(crate) const RETRY_PROMPT: &str = "你的上一条输出不是合法 JSON。请只重新输出那个 JSON 对象，不要重新执行任何工具、不要新增或删除工具调用：不要用 markdown 代码块包裹（不要 ```），不要任何说明文字，也不要前后空行；字段与取值保持与上一次输出一致。";
 
 /// 前置分析产物（`SubAgentCall.analysis`）的字段契约。

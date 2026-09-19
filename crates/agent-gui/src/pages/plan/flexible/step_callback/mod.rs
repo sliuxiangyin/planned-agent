@@ -11,12 +11,11 @@
 //! ├── before_inject.rs    通用：StateInjectCallback
 //! └── stepN/              各 step 自己的东西（N = 1..5）
 //!     ├── mod.rs                 组装点：只写 create_stepN_callback
-//!     ├── stepN_callback.rs      定稿登记回调 + 本 step 的常量 + 单测
-//!     └── …                      该 step 专属文件（step2 另有 step2_execution_trace_callback.rs、tool_trace.rs）
+//!     └── stepN_callback.rs      定稿登记回调 + 本 step 的常量 + 单测
 //! ```
 //!
 //! 命名：文件 = 其中主要类型的 snake_case（`StepNCallback` → `stepN_callback.rs`）；
-//! 只装函数的文件按职责命名（`commit.rs` / `tool_trace.rs`）。
+//! 只装函数的文件按职责命名（`commit.rs`）。
 //!
 //! 判断新代码放哪：**只有某个 step 用**就放进 `stepN/`；**多个 step 共用**才提到本层。
 //!
@@ -24,8 +23,7 @@
 //!
 //! ```text
 //! FlexibleStepPrelude（前置分析：解析 + 守门 + 定稿对外文本，所有 step 默认共用）
-//!   → 各 step 自己的定稿登记回调（写产物 / 推进 step；step1/3/4/5 到这一层为止）
-//!   → 可选的额外回调（step2 的轨迹提取，排在定稿登记**之前**：轨迹失败要 Abort 且状态未推进）
+//!   → 各 step 自己的定稿登记回调（写产物 / 推进 step）
 //! ```
 //!
 //! **「保存状态」不共用实现**：每个 `stepN/stepN_callback.rs` 自己写 `on_result` 全流程（取分析结论、
@@ -49,11 +47,13 @@
 //! 4. **决策只看 `call.is_last`**：非末位 `Next(call.text())`、末位 `Accept` → [`commit::hand_off`]
 //! 5. **解析 / 定稿判定 / 会话定位一律用 prelude 的结论**（[`analysis::StepAnalysis`]），不重复实现。
 //!
-//! 各 step 的 `stepN/mod.rs` 只剩「挂哪几环」（[`step1`]~[`step5`]），回调与常量在
+//! 各 step 的 `stepN/mod.rs` 只剩「挂哪几环」（[`step1`]、[`step2`]、[`save`]），回调与常量在
 //! `stepN/stepN_callback.rs`。
 //!
 //! 启动前注入见 [`before_inject`]：把 state 里已定稿的产物直接塞给子 agent，
-//! 取代「协调器 LLM 转抄」。
+//! 取代「协调器 LLM 转抄」。**每个 step 注入哪些字段写在该 step 自己的
+//! `INJECT_MAPPING` 常量里**（`stepN/mod.rs`，各配单测锁取值）；本层只提供通用的
+//! 注入机制与 `create_stepN_inject` 工厂，不持有任何 step 的字段清单。
 //!
 //! 设计背景见 `docs/chat-flexible-回调会话归属设计.md`。
 
@@ -64,18 +64,13 @@ pub(crate) mod commit;
 pub(crate) mod prelude;
 
 // ── 各 step（一个 step 一个目录）──
+pub(crate) mod save;
 pub(crate) mod step1;
 pub(crate) mod step2;
-pub(crate) mod step3;
-pub(crate) mod step4;
-pub(crate) mod step5;
 
-pub(crate) use before_inject::StateInjectCallback;
-pub(crate) use step1::create_step1_callback;
-pub(crate) use step2::create_step2_callback;
-pub(crate) use step3::create_step3_callback;
-pub(crate) use step4::create_step4_callback;
-pub(crate) use step5::create_step5_callback;
+pub(crate) use save::{create_save_callback, create_save_inject};
+pub(crate) use step1::{create_step1_callback, create_step1_inject};
+pub(crate) use step2::{create_step2_callback, create_step2_inject};
 
 /// 子 agent 调用参数中承载「宿主会话 id」的字段名。
 ///
@@ -92,4 +87,42 @@ pub(crate) fn read_host_session_id(args: &serde_json::Value) -> Option<String> {
     args.get(HOST_SESSION_ID_FIELD)
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use planned_agent_core::prompt::PromptManager;
+    use planned_agent_prompt_manager::{FilePromptManager, PromptManagerConfig};
+
+    /// 5 份 step prompt + 协调器 system prompt 必须能被**运行期的加载器**解析出来。
+    ///
+    /// 这些文件只在运行期加载：字符串转义写错不会让编译失败，只会在用户点进流程时才炸
+    /// （历史坑：TOML 的 `"""` 里 `\` 是转义符，示例里写 Windows 路径 `C:\data\in.txt`
+    /// 会让整个文件解析失败）。这里走的是与 `PromptContext::init` 同一条加载路径，
+    /// 把这类错误提前到 `cargo test`。
+    #[tokio::test]
+    async fn flexible_prompts_load_through_file_manager() {
+        let prompt_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("prompts/flexible");
+        assert!(prompt_dir.is_dir(), "prompts/flexible 应存在");
+
+        let manager = FilePromptManager::new(PromptManagerConfig {
+            prompt_dir,
+            ..Default::default()
+        })
+        .expect("prompt 加载器应能构造");
+
+        manager
+            .initialize()
+            .await
+            .expect("flexible 下的 prompt 应全部可解析（这是运行期才暴露的错误）");
+
+        let loaded = manager.list_prompts().await.expect("应能列出已加载 prompt");
+        assert!(
+            loaded.len() >= 4,
+            "flexible 目录应至少加载 4 份 prompt（step1 / step2 / save + 协调器 system），实际 {}",
+            loaded.len()
+        );
+    }
 }
