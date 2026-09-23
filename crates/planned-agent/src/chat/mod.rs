@@ -47,7 +47,7 @@ mod state;
 pub mod storage;
 pub mod trace;
 mod sub_agent;
-mod tools;
+pub(crate) mod tools;
 
 #[cfg(test)]
 mod tests;

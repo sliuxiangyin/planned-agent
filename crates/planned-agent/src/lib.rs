@@ -9,6 +9,9 @@
 
 pub mod planner;
 
+// ─── flexible 模块：灵活计划执行器（模板 + 参数 → 逐步执行 → 报告）───
+pub mod flexible;
+
 // ─── v2-chat 模块（内部维�?history + 后台 loop）───────────────
 pub mod chat;
 pub use chat::{

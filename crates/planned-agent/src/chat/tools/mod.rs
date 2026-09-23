@@ -49,7 +49,7 @@ pub(super) fn build_tool_definitions<
 /// - 精确工具名（如 `"flexible_state"`）：加载该工具（仅当确实存在且 enabled）。
 ///
 /// 未知分类名或不存在工具会被静默忽略。
-fn select_tools_by_tokens(
+pub(crate) fn select_tools_by_tokens(
     enabled: Vec<(Tool, Vec<ToolCategory>)>,
     tokens: &[String],
 ) -> Vec<Tool> {
