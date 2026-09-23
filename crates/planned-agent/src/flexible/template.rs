@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// 灵活计划模板（落库形态）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlexiblePlanTemplate {
     /// 任务描述（step1 定稿产物）
     pub task: String,
@@ -20,7 +20,7 @@ pub struct FlexiblePlanTemplate {
 }
 
 /// 一个参数的定义（对应 `inputs[]` 的一项）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlanInput {
     /// 参数名（`${name}` 中的 `name`）
     pub name: String,
@@ -33,7 +33,7 @@ pub struct PlanInput {
 }
 
 /// 一个步骤（对应 `steps[]` 的一项）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlanStep {
     /// 结果引用标识，如 `#E1`（计划内唯一）
     pub result_reference: String,

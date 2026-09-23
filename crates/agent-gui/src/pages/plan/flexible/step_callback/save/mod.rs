@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use planned_agent::chat::{SubAgentBeforeCallback, SubAgentResultChain};
 
+use crate::pages::plan::shared::session::TemplateNotifier;
 use crate::services::plans_flexible_service::PlansFlexibleService;
 
 use super::before_inject::StateInjectCallback;
@@ -17,12 +18,13 @@ use save_callback::{SaveCallback, AGENT, OK_STATUS};
 
 /// 创建 `flexible_save` 结果链（方便传给 `register_sub_agent`）。
 ///
-/// 链上两环：**前置分析**（解析 + 守门 + 定稿对外文本）+ 定稿登记回调（落库 + 推进 saved）。
+/// 链上两环：**前置分析**（解析 + 守门 + 定稿对外文本）+ 定稿登记回调（落库 + 通知 + 推进 saved）。
 pub fn create_save_callback(
     plan_id: String,
     service: Arc<PlansFlexibleService>,
+    notifier: TemplateNotifier,
 ) -> SubAgentResultChain {
-    SubAgentResultChain::new(vec![Arc::new(SaveCallback::new(plan_id, service))])
+    SubAgentResultChain::new(vec![Arc::new(SaveCallback::new(plan_id, service, notifier))])
         .with_prelude(Arc::new(FlexibleStepPrelude::new(AGENT, OK_STATUS)))
 }
 

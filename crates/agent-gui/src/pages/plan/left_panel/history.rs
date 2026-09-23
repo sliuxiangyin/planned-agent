@@ -1,12 +1,14 @@
-//! HISTORY Bento 块：历史版本列表。
+//! HISTORY Bento 块：历史执行记录。
 //!
-//! 展示历次执行版本（v4 当前 / v3 完成 / v2 取消 / v1 失败）。
-//! 当前为静态 mock，后续接入 `plans_flexible` 表历史快照。
+//! 执行历史落库见 `docs/planned-agent/flexible-executor.md` 阶段 6；
+//! 在此之前恒为空态（模板未就绪时显示其原因，其余显示「暂无执行记录」）。
 
 use dioxus::prelude::*;
 
 #[component]
-pub fn HistoryView() -> Element {
+pub fn HistoryView(hint: Option<String>) -> Element {
+    let text = hint.unwrap_or_else(|| "暂无执行记录".to_string());
+
     rsx! {
         div { class: "plan-bento-block",
             div { class: "plan-bento-block__header",
@@ -32,48 +34,7 @@ pub fn HistoryView() -> Element {
                 }
             }
             div { class: "plan-bento-block__body",
-                div { class: "plan-history__list",
-                    // v4 — 当前
-                    div {
-                        class: "plan-history__item plan-history__item--current",
-                        span { class: "plan-history__version", "v4" }
-                        span { class: "plan-history__time", "08-06 10:30" }
-                        span { class: "plan-history__separator", "·" }
-                        span { class: "plan-history__status plan-history__status--ok", "✓ 完成" }
-                        span { class: "plan-history__separator", "·" }
-                        span { class: "plan-history__meta", "4/4 · 12.3s · 7 tk" }
-                    }
-                    // v3
-                    div {
-                        class: "plan-history__item",
-                        span { class: "plan-history__version", "v3" }
-                        span { class: "plan-history__time", "08-05 14:20" }
-                        span { class: "plan-history__separator", "·" }
-                        span { class: "plan-history__status plan-history__status--ok", "✓ 完成" }
-                        span { class: "plan-history__separator", "·" }
-                        span { class: "plan-history__meta", "3/4 · 8.7s · 5 tk" }
-                    }
-                    // v2
-                    div {
-                        class: "plan-history__item plan-history__item--failed",
-                        span { class: "plan-history__version", "v2" }
-                        span { class: "plan-history__time", "08-05 09:00" }
-                        span { class: "plan-history__separator", "·" }
-                        span { class: "plan-history__status plan-history__status--fail", "✗ 取消" }
-                        span { class: "plan-history__separator", "·" }
-                        span { class: "plan-history__meta", "1/4 · — · 2 tk" }
-                    }
-                    // v1
-                    div {
-                        class: "plan-history__item plan-history__item--failed",
-                        span { class: "plan-history__version", "v1" }
-                        span { class: "plan-history__time", "08-04 18:30" }
-                        span { class: "plan-history__separator", "·" }
-                        span { class: "plan-history__status plan-history__status--fail", "✗ 失败" }
-                        span { class: "plan-history__separator", "·" }
-                        span { class: "plan-history__meta", "0/4 · — · 1 tk" }
-                    }
-                }
+                div { class: "plan-bento-empty", "{text}" }
             }
         }
     }

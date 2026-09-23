@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use planned_agent::chat::{ResultDecision, SubAgentCall, SubAgentResultCallback};
 use serde_json::{json, Map, Value};
 
+use crate::pages::plan::shared::session::TemplateNotifier;
 use crate::services::plans_flexible_service::PlansFlexibleService;
 
 use super::super::analysis::require_analysis;
@@ -39,11 +40,21 @@ pub(super) struct SaveCallback {
     plan_id: String,
     /// 灵活计划聚合服务（写流程中间状态 + 落库）。
     service: Arc<PlansFlexibleService>,
+    /// 模板更新通知句柄：落库成功后通知左侧面板重读模板。
+    notifier: TemplateNotifier,
 }
 
 impl SaveCallback {
-    pub(super) fn new(plan_id: String, service: Arc<PlansFlexibleService>) -> Self {
-        Self { plan_id, service }
+    pub(super) fn new(
+        plan_id: String,
+        service: Arc<PlansFlexibleService>,
+        notifier: TemplateNotifier,
+    ) -> Self {
+        Self {
+            plan_id,
+            service,
+            notifier,
+        }
     }
 }
 
@@ -149,6 +160,10 @@ impl SubAgentResultCallback for SaveCallback {
         {
             return ResultDecision::Abort(format!("[{AGENT}] 落库失败: {e}"));
         }
+
+        // 定稿已落库 → 立即通知左侧面板重读模板。
+        // 放在 commit_state 之前：数据本身已变，即便后续推进档位失败，这次刷新也成立。
+        self.notifier.notify();
 
         // 推进 saved（无产物登记，空补丁）
         let patch: Map<String, Value> = Map::new();

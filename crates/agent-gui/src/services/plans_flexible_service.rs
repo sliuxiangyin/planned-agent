@@ -8,6 +8,8 @@
 
 use std::sync::Arc;
 
+use planned_agent::flexible::FlexiblePlanTemplate;
+
 use crate::storage::entities::plans_flexible_sessions::Model as PlansFlexibleSessionsModel;
 use crate::storage::error::StorageResult;
 use crate::storage::repository::{FlexibleStateRepo, PlansFlexibleSessionsRepo};
@@ -19,6 +21,19 @@ pub struct PlansFlexibleService {
     sessions_repo: Arc<PlansFlexibleSessionsRepo>,
     /// flexible_state 表（流程中间状态：当前阶段 + 各步骤产物）
     state_repo: Arc<FlexibleStateRepo>,
+}
+
+/// 某会话参数化模板的就绪状态。
+///
+/// 刻意区分「未定稿」与「有数据但坏了」：后者若静默归为未定稿，坏数据将无从察觉。
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlanTemplateState {
+    /// 该会话尚未定稿（未生成 / 落库列为空）
+    NotReady,
+    /// 已定稿且可解析
+    Ready(FlexiblePlanTemplate),
+    /// 有数据但反序列化失败（附原因，供 UI 提示与排查）
+    Invalid(String),
 }
 
 impl PlansFlexibleService {
@@ -47,6 +62,16 @@ impl PlansFlexibleService {
         self.sessions_repo
             .produce(session_id, parameterized_task)
             .await
+    }
+
+    /// 读某会话的参数化模板（读库 + 反序列化）。
+    ///
+    /// 纯查询、无副作用（不建行）。`session_id` 即会话行主键。
+    pub async fn load_template(&self, session_id: &str) -> StorageResult<PlanTemplateState> {
+        let Some(raw) = self.sessions_repo.find_parameterized_task(session_id).await? else {
+            return Ok(PlanTemplateState::NotReady);
+        };
+        Ok(template_state_from_raw(&raw))
     }
 
     // ────────────────────────── 流程中间状态（flexible_state）──────────────────────────
@@ -134,5 +159,47 @@ impl PlansFlexibleService {
         let products_str = serde_json::Value::Object(products).to_string();
         self.save_state(plan_id, session_id, &step, &products_str)
             .await
+    }
+}
+
+/// 把落库的模板 JSON 判成就绪状态。
+///
+/// 与 [`PlansFlexibleService::load_template`] 分开，是为了让「三态判定」这个核心区分点
+/// 可脱离数据库单测：坏 JSON 与「语义缺字段」都必须落到 `Invalid`，绝不静默当未定稿。
+fn template_state_from_raw(raw: &str) -> PlanTemplateState {
+    match FlexiblePlanTemplate::from_json(raw) {
+        Ok(template) => PlanTemplateState::Ready(template),
+        Err(e) => PlanTemplateState::Invalid(format!("{e:#}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ready_when_json_is_valid() {
+        match template_state_from_raw(r#"{"task":"t","inputs":[],"steps":[]}"#) {
+            PlanTemplateState::Ready(template) => assert_eq!(template.task, "t"),
+            other => panic!("应为 Ready，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_when_json_is_broken() {
+        match template_state_from_raw("{ not json") {
+            PlanTemplateState::Invalid(reason) => assert!(!reason.is_empty()),
+            other => panic!("应为 Invalid，实际 {other:?}"),
+        }
+    }
+
+    /// 语义缺字段（缺 `steps`）也算 `Invalid`。
+    /// 这正是「未定稿」与「坏数据」必须分开的意义：后者不能被当成前者而无声吞掉。
+    #[test]
+    fn invalid_when_shape_is_wrong() {
+        match template_state_from_raw(r#"{"task":"t"}"#) {
+            PlanTemplateState::Invalid(_) => {}
+            other => panic!("应为 Invalid，实际 {other:?}"),
+        }
     }
 }

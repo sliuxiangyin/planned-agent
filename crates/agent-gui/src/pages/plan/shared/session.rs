@@ -6,6 +6,9 @@
 //!   读当前值 —— 天然跟随切换，无需事件。
 //! - UI 侧（drawer 高亮、ChatService 宿主将来触发重建）：经 dioxus `current()`
 //!   响应式读当前 id —— watch 不会驱动重渲染，故这里补一个 dioxus 信号作为桥。
+//! - 异步侧**写**（flexible_save 定稿落库后通知左侧面板重读模板）：经
+//!   `template_notifier()` 取 `Signal<u64, SyncStorage>` 直接递增 —— `use_signal_sync`
+//!   产出的信号本身跨线程可写，故「通知」方向无需 watch 中继（watch 是给异步侧「读」用的）。
 //!
 //! 设计约束（与历史一致）：
 //! - 本模块**不认识** `ChatService` / `ChatServiceFactory` / 任何 flexible 类型；
@@ -38,6 +41,11 @@ pub struct SessionManager {
     value_rx: watch::Receiver<Option<String>>,
     /// dioxus 信号：UI 侧（drawer 高亮等）响应式读当前 id。
     current: Signal<Option<String>, SyncStorage>,
+    /// dioxus 信号：模板版本号。`flexible_save` 定稿落库后递增，UI 侧（左侧面板）
+    /// 订阅它以重读当前会话的模板。
+    ///
+    /// 用 `use_signal_sync`（`SyncStorage`）建，故异步侧可经 [`TemplateNotifier`] 直接写。
+    template_version: Signal<u64, SyncStorage>,
     /// 持久化钩子（后置注入、可替换）：仅在「当前会话」**真正变化**时被调用。
     persist: Mutex<Option<SessionPersistHook>>,
 }
@@ -80,6 +88,24 @@ impl SessionManager {
         self.set(Some(session_id));
     }
 
+    /// 注入「当前会话」的初值：进入 plan 时由页面层从 `plans.current_session_id` 灌入。
+    ///
+    /// 与 [`Self::set`] 的区别，两点都要紧：
+    /// - **不触发持久化钩子** —— 该值本就来自 `plans.current_session_id`，写回是无谓写；
+    /// - **不覆盖已有值** —— 页面内的用户操作（会话抽屉点选）优先于 DB 初值。
+    ///
+    /// 为何需要它：`current` 初值为 `None`，而写入入口只有用户在会话抽屉里的点选。
+    /// 缺这一步，首次进入时所有读 `current()` 的消费方（左侧面板、抽屉高亮）
+    /// 都拿不到「当前会话」，要等用户手动点一次才对。
+    pub fn seed(&self, session_id: Option<String>) {
+        if self.slot.borrow().is_some() {
+            return;
+        }
+        let mut current = self.current;
+        current.set(session_id.clone());
+        let _ = self.slot.send(session_id);
+    }
+
     /// 清空当前会话（watch 与信号均为 `None`）。
     #[allow(dead_code)] // 待会话抽屉提供「退出当前会话」等动作时使用
     pub fn clear(&self) {
@@ -104,6 +130,41 @@ impl SessionManager {
     pub fn current(&self) -> Signal<Option<String>, SyncStorage> {
         self.current
     }
+
+    /// 取 dioxus 响应式句柄（UI 侧读模板版本；变化即重读当前会话模板）。
+    pub fn template_version(&self) -> Signal<u64, SyncStorage> {
+        self.template_version
+    }
+
+    /// 取跨线程的「模板已更新」通知句柄（供异步侧定稿回调使用）。
+    ///
+    /// 只带一个可跨线程写的信号，**不引入** storage / flexible 类型，守住本模块
+    /// 「不认识上层类型」的约束。
+    pub fn template_notifier(&self) -> TemplateNotifier {
+        TemplateNotifier {
+            version: self.template_version,
+        }
+    }
+}
+
+/// 跨线程的「模板已更新」通知句柄。
+///
+/// 由 [`SessionManager::template_notifier`] 派生，交给异步侧（`flexible_save` 定稿回调）
+/// 在落库成功后调用，递增 `SessionManager` 的模板版本信号，驱动 UI 侧重读模板。
+///
+/// 之所以不需要 tokio watch 中继：`use_signal_sync` 产出的 `Signal<_, SyncStorage>`
+/// 本身即 `Send + Sync`，异步侧可直接写（同 `main.rs` 异步 boot 写 `phase` 的用法）。
+#[derive(Clone, Copy)]
+pub struct TemplateNotifier {
+    version: Signal<u64, SyncStorage>,
+}
+
+impl TemplateNotifier {
+    /// 递增版本号，通知 UI 侧重读模板。可重复调用（只增不减）。
+    pub fn notify(&self) {
+        let mut version = self.version;
+        version.with_mut(|v| *v += 1);
+    }
 }
 
 /// 创建 SessionManager（watch 部分持久化于 dioxus hook，跨 render 保持同一实例）。
@@ -114,6 +175,8 @@ impl SessionManager {
 pub fn use_session_manager() -> Arc<SessionManager> {
     // dioxus 信号：UI 桥（hook 保证跨 render 稳定同一 handle）
     let current = use_signal_sync(|| None::<String>);
+    // dioxus 信号：模板版本（异步侧可经 TemplateNotifier 直接递增）
+    let template_version = use_signal_sync(|| 0u64);
     // watch 通道 + 实例：持久化，仅首次构造
     use_hook(move || {
         let (slot, value_rx) = watch::channel(None::<String>);
@@ -121,6 +184,7 @@ pub fn use_session_manager() -> Arc<SessionManager> {
             slot,
             value_rx,
             current,
+            template_version,
             persist: Mutex::new(None),
         })
     })

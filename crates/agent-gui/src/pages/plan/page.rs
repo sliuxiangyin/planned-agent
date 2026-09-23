@@ -14,6 +14,7 @@ use crate::components::resizable_panel::ResizablePanel;
 use dioxus::prelude::*;
 
 use crate::context::StorageContext;
+use crate::services::plans_flexible_service::PlansFlexibleService;
 use crate::storage::entities::plan;
 
 use super::flexible::FlexiblePage;
@@ -33,6 +34,17 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
 
     // ── 会话状态管理中心：plan 级共享单例，注入到 context，供 flexible / 会话抽屉等订阅当前会话切换 ──
     let session_mgr = use_provide_session_manager();
+
+    // ── 灵活计划聚合服务：plan 级单例，注入 context 供左侧面板（读参数化模板）与
+    //    FlexiblePage（定稿回调 / 状态工具）共用，避免各自 new 出多个实例 ──
+    let service_storage = storage.clone();
+    let plans_flexible_service = use_hook(move || {
+        Arc::new(PlansFlexibleService::new(
+            service_storage.plans_flexible_sessions_repo(),
+            service_storage.flexible_state_repo(),
+        ))
+    });
+    use_context_provider(|| plans_flexible_service.clone());
 
     // ── 当前会话持久化：切换会话即写回 `plans.current_session_id`（下次进入的默认定位）──
     // 钩子在**渲染期**重新注册（覆盖式、幂等）：闭包恒捕获最新 `plan_id`，即使同一组件
@@ -66,11 +78,22 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
     let plan_resource = use_resource(move || {
         let pid = pid.clone();
         let plan_repo = plan_repo_for_load.clone();
+        let session_mgr = session_mgr.clone();
         async move {
             // 进入 plan 先确保存在当前会话（不存在则新建默认「未命名会话」并写回 current_session_id），
             // 这样随后取到的 plan 数据即带有 current_session_id，供后续会话/版本逻辑使用。
             plan_repo.init_session(&pid).await?;
-            plan_repo.find_by_id(&pid).await
+            plan_repo
+                .find_by_id(&pid)
+                .await
+                // 把 DB 里的 current_session_id 灌进会话中心作为初值 —— 否则 `SessionManager.current()`
+                // 会一直是 None（写入入口只有会话抽屉的点选），左侧面板等消费方首次进入读不到会话。
+                // 只在此处（非 dioxus 任务）写信号：`use_signal_sync` 的 SyncStorage 跨线程可写。
+                .inspect(|model| {
+                    if let Some(m) = model {
+                        session_mgr.seed(m.current_session_id.clone());
+                    }
+                })
         }
     });
 

@@ -18,9 +18,7 @@ use planned_agent::chat::{ChatConfig, SystemPrompt};
 use planned_agent_core::prompt::PromptManager;
 use planned_agent_core::tool_registry::ToolCategory;
 
-use crate::context::{
-    register_sub_agent, require_resource, AiContext, PromptContext, StorageContext, ToolsContext,
-};
+use crate::context::{register_sub_agent, require_resource, AiContext, PromptContext, ToolsContext};
 use crate::pages::plan::shared::session::SessionManager;
 use crate::services::plans_flexible_service::PlansFlexibleService;
 
@@ -105,18 +103,15 @@ pub fn FlexiblePage(props: FlexiblePageProps) -> Element {
 /// 原在 `use_flexible_controller`（每 host 各跑一次）——多会话下会重复注册、
 /// 且任一 host 卸载会注销全局工具；上移到壳后与「plan 生命周期」对齐。
 fn use_plan_agent_registrations(plan_id: String) {
-    let storage_ctx = require_resource::<StorageContext>();
     let ai_ctx = require_resource::<AiContext>();
     let tools_ctx = require_resource::<ToolsContext>();
     let prompt_ctx = require_resource::<PromptContext>();
     let registry = tools_ctx.registry.clone();
+    // 聚合服务与当前会话均由 PlanPage 注入 context（均为单例），左侧面板读模板共用同一实例。
+    let plans_flexible_service = use_context::<Arc<PlansFlexibleService>>();
+    let session_mgr = use_context::<Arc<SessionManager>>();
 
     use_hook(move || {
-        // flexible_save 落库回调 + flexible_state 工具（storage 由启动门保证就绪，始终存在）
-        let plans_flexible_service = Arc::new(PlansFlexibleService::new(
-            storage_ctx.plans_flexible_sessions_repo(),
-            storage_ctx.flexible_state_repo(),
-        ));
         // flexible_state：协调器读写「流程中间状态」的旁路工具（session_id 由协调器经参数传入）。
         {
             let executor =
@@ -288,8 +283,13 @@ fn use_plan_agent_registrations(plan_id: String) {
             },
             1, // depth
             2, // max_depth
-            // 定稿回调直接落库（读 state 的 task_definition / inputs / steps，不经协调器转抄）并推进 saved。
-            create_save_callback(plan_id.clone(), plans_flexible_service.clone()),
+            // 定稿回调直接落库（读 state 的 task_definition / inputs / steps，不经协调器转抄）并推进 saved，
+            // 同时通知左侧面板重读模板。
+            create_save_callback(
+                plan_id.clone(),
+                plans_flexible_service.clone(),
+                session_mgr.template_notifier(),
+            ),
             // 三件套由系统注入（见 save/mod.rs 的 INJECT_MAPPING）。
             vec![create_save_inject(
                 plan_id.clone(),

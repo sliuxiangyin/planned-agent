@@ -128,6 +128,19 @@ impl PlansFlexibleSessionsRepo {
         Ok(res)
     }
 
+    /// 读某会话已定稿的参数化模板 JSON（未定稿 / 列为空返回 None）。
+    ///
+    /// 纯查询、无副作用（不建行）——与 [`Self::produce`] 的写入语义区分开。
+    /// `parameterized_task` 为 NULL 或仅空白一律归一为 `None`，让调用方只需判一种「没有」。
+    pub async fn find_parameterized_task(&self, id: &str) -> StorageResult<Option<String>> {
+        let row = plans_flexible_sessions::Entity::find_by_id(id)
+            .one(&self.db)
+            .await?;
+        Ok(row
+            .and_then(|m| m.parameterized_task)
+            .filter(|s| !s.trim().is_empty()))
+    }
+
     /// 计算该 plan 的下一个版本号：现有最大版本 patch +1；无会话时返回 `v1.0.0`。
     async fn next_version(&self, plan_id: &str) -> StorageResult<String> {
         let rows = plans_flexible_sessions::Entity::find()
