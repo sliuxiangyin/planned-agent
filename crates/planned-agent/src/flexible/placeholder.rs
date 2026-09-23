@@ -118,6 +118,43 @@ pub fn render(template: &str, values: &BTreeMap<String, String>) -> Result<Strin
     Ok(rendered)
 }
 
+/// 宽容替换：缺失/为空的参数**保留 `${name}` 原样**，并回报缺失的占位符名。
+///
+/// 与 [`render`] 的分工：
+/// - [`render`] 严格 —— 缺值即 `Err`，执行路径用它（缺参数就该失败，不能带病执行）；
+/// - 本函数宽容 —— 供 UI「边填参数边预览」，允许半成品状态。
+///
+/// 空字符串视同缺失：用户清空输入框的意图是「还没填好」，保留占位符比替换成空更能说明问题。
+/// `${` 未闭合时按原文保留（严格版在此处报错）。
+pub fn render_lenient(template: &str, values: &BTreeMap<String, String>) -> (String, Vec<String>) {
+    let mut missing: Vec<String> = Vec::new();
+    let mut rendered = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("${") {
+        rendered.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            // 未闭合：按原文保留余下部分
+            rendered.push_str(&rest[start..]);
+            return (rendered, missing);
+        };
+        let name = &after[..end];
+        match values.get(name) {
+            Some(value) if !value.trim().is_empty() => rendered.push_str(value),
+            _ => {
+                // 缺值或空白：整段保留占位符原样，并记名（去重保序）
+                rendered.push_str(&rest[start..start + 2 + end + 1]);
+                if !missing.iter().any(|seen| seen.as_str() == name) {
+                    missing.push(name.to_string());
+                }
+            }
+        }
+        rest = &after[end + 1..];
+    }
+    rendered.push_str(rest);
+    (rendered, missing)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,5 +232,31 @@ mod tests {
         let err = render("读取 ${other}", &values).unwrap_err();
         assert!(err.contains("${other}"), "{err}");
         assert!(render("读取 ${未闭合", &values).is_err());
+    }
+
+    #[test]
+    fn lenient_keeps_unfilled_placeholders_and_reports_them() {
+        let values = BTreeMap::from([
+            ("filled".to_string(), "V".to_string()),
+            ("blank".to_string(), "   ".to_string()),
+        ]);
+        let (text, missing) = render_lenient("A ${filled} B ${blank} C ${absent}", &values);
+        // 已填的替换；空白与缺失的连占位符一起保留
+        assert_eq!(text, "A V B ${blank} C ${absent}");
+        assert_eq!(missing, vec!["blank".to_string(), "absent".to_string()]);
+    }
+
+    /// 同一占位符出现两次且未填时只报一次名。
+    #[test]
+    fn lenient_reports_each_missing_name_once() {
+        let (_, missing) = render_lenient("${x} 与 ${x}", &BTreeMap::new());
+        assert_eq!(missing, vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn lenient_keeps_unclosed_placeholder_verbatim() {
+        let (text, missing) = render_lenient("读取 ${未闭合", &BTreeMap::new());
+        assert_eq!(text, "读取 ${未闭合");
+        assert!(missing.is_empty());
     }
 }

@@ -37,6 +37,6 @@ mod testing;
 pub use event::{ChannelSink, NullSink, PlanRunEvent, PlanRunSink};
 pub use executor::{ExecutorConfig, FlexibleExecutor};
 pub use params::{render_step_intent, PlanRunParams};
-pub use placeholder::{collect_from_steps, collect_placeholders, render, validate};
+pub use placeholder::{collect_from_steps, collect_placeholders, render, render_lenient, validate};
 pub use report::{CallUsage, PlanRunReport, StepRunRecord, StepStatus};
 pub use template::{FlexiblePlanTemplate, PlanInput, PlanStep};

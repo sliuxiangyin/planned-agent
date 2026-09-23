@@ -1,14 +1,17 @@
 //! PIPELINE Bento 块：执行时间线。
 //!
-//! 按当前会话的参数化模板渲染步骤骨架（`intent` / `expected_output` /
-//! `result_reference`）。三态与 THINK 终端由执行器的 `PlanRunEvent` 驱动，
-//! 属于执行接线；在此之前所有步骤渲染为 pending。
+//! 展示的是**已按当前参数值展开**的步骤文本（展开在 `PlanLeftPanel::render_steps`），
+//! 所以 PARAMS 里一改参数，这里立刻跟着变。未填的参数保留 `${name}` 原样并给出提示。
+//!
+//! 三态与 THINK 终端由执行器的 `PlanRunEvent` 驱动，属于执行接线；
+//! 在此之前所有步骤渲染为 pending。
 
 use dioxus::prelude::*;
-use planned_agent::flexible::PlanStep;
+
+use super::left_panel::{missing_label, RenderedStep};
 
 #[component]
-pub fn PipelineView(steps: Vec<PlanStep>, hint: Option<String>) -> Element {
+pub fn PipelineView(steps: Vec<RenderedStep>, hint: Option<String>) -> Element {
     let total = steps.len();
     let empty_hint = hint.or_else(|| steps.is_empty().then(|| "该模板未定义步骤".to_string()));
 
@@ -94,9 +97,14 @@ pub fn PipelineView(steps: Vec<PlanStep>, hint: Option<String>) -> Element {
                                     div { class: "plan-pipeline__step-header",
                                         span { class: "plan-pipeline__step-index", "S{index + 1}" }
                                         span { class: "plan-pipeline__step-title", "{step.intent}" }
-                                        span { class: "plan-pipeline__step-meta", "{step.result_reference}" }
+                                        span { class: "plan-pipeline__step-meta", "{step.reference}" }
                                     }
                                     div { class: "plan-pipeline__step-detail", "预期输出: {step.expected_output}" }
+                                    if !step.missing.is_empty() {
+                                        div { class: "plan-pipeline__step-detail",
+                                            "⚠ 未填参数: {missing_label(&step.missing)}"
+                                        }
+                                    }
                                 }
                             }
                         }

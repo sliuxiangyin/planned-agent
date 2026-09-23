@@ -47,6 +47,14 @@ impl PlanRunParams {
         self.values.get(name)
     }
 
+    /// 展开任意文本里的 `${name}`（用本表值的文本形式）。
+    ///
+    /// 严格版：缺值或占位符未定义都返回 `Err`。UI 边填边预览请用
+    /// [`crate::flexible::render_lenient`]（容错、保留未填占位符）。
+    pub fn render(&self, template: &str) -> Result<String> {
+        placeholder::render(template, &self.as_text_map()).map_err(anyhow::Error::msg)
+    }
+
     /// 转成 `${name}` 替换用的文本表：字符串取原文，其余取 JSON 字面量。
     fn as_text_map(&self) -> BTreeMap<String, String> {
         self.values
@@ -63,7 +71,7 @@ impl PlanRunParams {
 ///
 /// 两种失败都带步骤的 `result_reference`，便于定位是哪个步骤、哪个占位符。
 pub fn render_step_intent(step: &PlanStep, params: &PlanRunParams) -> Result<String> {
-    placeholder::render(&step.intent, &params.as_text_map()).map_err(|reason| {
+    params.render(&step.intent).map_err(|reason| {
         anyhow::anyhow!("展开步骤 {} 的 intent 失败：{reason}", step.result_reference)
     })
 }
