@@ -1,6 +1,6 @@
 //! `${name}` 占位符的收集、校验与运行时替换。
 //!
-//! 契约（与 `prompts/flexible/flexible_step2.toml` 一致）：
+//! 契约（与 `prompts/flexible/flexible_parameterize.toml` 一致）：
 //! - 占位符语法固定为 `${name}`，`name` 必须与 `inputs[].name` 完全一致；
 //! - 占位只出现在 `steps[].intent` / `steps[].expected_output` 里；
 //! - **不得自创占位符**：`steps` 里出现而 `inputs` 未定义的 `${name}` 属于契约违背 ——

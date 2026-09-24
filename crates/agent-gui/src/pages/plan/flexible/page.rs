@@ -25,8 +25,8 @@ use crate::services::plans_flexible_service::PlansFlexibleService;
 use super::session_host::FlexibleSessionHost;
 use super::step_callback::{
     create_plan_callback, create_plan_inject, create_save_callback, create_save_inject,
-    create_step1_callback, create_step1_inject,
-    create_step2_callback, create_step2_inject, HOST_SESSION_ID_FIELD,
+    create_clarify_callback, create_clarify_inject,
+    create_parameterize_callback, create_parameterize_inject, HOST_SESSION_ID_FIELD,
 };
 use super::tool::{flexible_state_tool, FlexibleStateExecutor};
 
@@ -127,7 +127,7 @@ fn use_plan_agent_registrations(plan_id: String) {
             &ai_ctx,
             &tools_ctx,
             &prompt_ctx,
-            "flexible_step1",
+            "flexible_clarify",
             "需求澄清子 Agent：将用户自然语言需求澄清为可执行的任务定义（只澄清需求本身，不分析输入参数或输出形式）。",
             serde_json::json!({
                 "type": "object",
@@ -152,7 +152,7 @@ fn use_plan_agent_registrations(plan_id: String) {
                 "required": ["user_message", "host_session_id"]
             }),
             ChatConfig {
-                system_prompt: Some(SystemPrompt::Template("flexible/flexible_step1".into())),
+                system_prompt: Some(SystemPrompt::Template("flexible/flexible_clarify".into())),
                 allowed_tools: Some(vec!["request_user_action".to_string()]),
                 // host_session_id 是宿主注入的控制字段（供回调定位会话），不进子 agent 的 task 文本。
                 hidden_args: vec![HOST_SESSION_ID_FIELD.to_string()],
@@ -160,10 +160,10 @@ fn use_plan_agent_registrations(plan_id: String) {
             },
             1, // depth
             2, // max_depth
-            create_step1_callback(plan_id.clone(), plans_flexible_service.clone()),
-            // 任务基线由系统从 flexible_state 注入（映射见 step1/mod.rs 的 INJECT_MAPPING），
+            create_clarify_callback(plan_id.clone(), plans_flexible_service.clone()),
+            // 任务基线由系统从 flexible_state 注入（映射见 clarify/mod.rs 的 INJECT_MAPPING），
             // 不再依赖协调器转抄。
-            vec![create_step1_inject(
+            vec![create_clarify_inject(
                 plan_id.clone(),
                 plans_flexible_service.clone(),
             )],
@@ -209,7 +209,7 @@ fn use_plan_agent_registrations(plan_id: String) {
             &ai_ctx,
             &tools_ctx,
             &prompt_ctx,
-            "flexible_step2",
+            "flexible_parameterize",
             "参数化子 Agent：从步骤骨架中识别可变值，就地替换为 ${name} 占位符并给出参数表（inputs + 占位后的 steps）。",
             serde_json::json!({
                 "type": "object",
@@ -230,7 +230,7 @@ fn use_plan_agent_registrations(plan_id: String) {
                 "required": ["host_session_id"]
             }),
             ChatConfig {
-                system_prompt: Some(SystemPrompt::Template("flexible/flexible_step2".into())),
+                system_prompt: Some(SystemPrompt::Template("flexible/flexible_parameterize".into())),
                 // 参数化是纯文本分析，不调用任何工具（不执行、不交互）。
                 allowed_tools: Some(vec![]),
                 // host_session_id 是宿主注入的控制字段（供回调定位会话），不进子 agent 的 task 文本。
@@ -239,9 +239,9 @@ fn use_plan_agent_registrations(plan_id: String) {
             },
             1, // depth
             2, // max_depth
-            create_step2_callback(plan_id.clone(), plans_flexible_service.clone()),
-            // 任务定义与步骤骨架由系统注入（见 step2/mod.rs 的 INJECT_MAPPING）。
-            vec![create_step2_inject(
+            create_parameterize_callback(plan_id.clone(), plans_flexible_service.clone()),
+            // 任务定义与步骤骨架由系统注入（见 parameterize/mod.rs 的 INJECT_MAPPING）。
+            vec![create_parameterize_inject(
                 plan_id.clone(),
                 plans_flexible_service.clone(),
             )],
@@ -300,9 +300,9 @@ fn use_plan_agent_registrations(plan_id: String) {
 
     use_drop(move || {
         for name in [
-            "flexible_step1",
+            "flexible_clarify",
             "flexible_plan",
-            "flexible_step2",
+            "flexible_parameterize",
             "flexible_save",
             "flexible_state",
         ] {

@@ -613,7 +613,7 @@ mod tests {
             &mut view,
             &ServiceChatEvent::Chat(ChatEvent::ToolCallStart {
                 id: "sub_1".to_string(),
-                name: "flexible_step1".to_string(),
+                name: "flexible_clarify".to_string(),
                 source: Some(ToolSource::SubAgent {
                     agent_id: "sub_1".to_string(),
                 }),
@@ -641,7 +641,7 @@ mod tests {
             &mut view,
             &ServiceChatEvent::Chat(ChatEvent::ToolExecuted {
                 id: "sub_1".to_string(),
-                name: "flexible_step1".to_string(),
+                name: "flexible_clarify".to_string(),
                 is_error: false,
                 content: json!({ "result": "done" }),
             }),
@@ -883,7 +883,7 @@ mod tests {
                         id: "sub_1".to_string(),
                         r#type: ToolType::Function,
                         function: FunctionCall {
-                            name: "flexible_step1".to_string(),
+                            name: "flexible_clarify".to_string(),
                             arguments: "{}".to_string(),
                         },
                     }]),
@@ -906,7 +906,7 @@ mod tests {
         let view = view_from_history(&history);
         assert!(view.agent_views.contains_key("sub_1"));
         let av = &view.agent_views["sub_1"];
-        assert_eq!(av.name, "flexible_step1");
+        assert_eq!(av.name, "flexible_clarify");
         assert_eq!(av.phase, ToolCallPhase::Completed);
         assert_eq!(av.events, vec![AgentEvent::TextDelta("子结果".to_string())]);
     }

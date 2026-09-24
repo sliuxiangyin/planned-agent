@@ -146,7 +146,7 @@ pub(crate) fn use_flexible_controller(
     // ── option 栏状态 ──
     let thinking = use_signal_sync(|| true);
     let temperature = use_signal_sync(|| "0.7".to_string());
-    let template = use_signal_sync(|| Some("flexible/flexible_step1".to_string()));
+    let template = use_signal_sync(|| Some("flexible/flexible_clarify".to_string()));
 
     // ── 会话启动状态机（boot.rs 风格）：Loading → Ready / Failed ──
     let boot = use_signal_sync(|| FlexBoot::Loading(Vec::new()));

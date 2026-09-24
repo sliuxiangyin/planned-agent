@@ -40,7 +40,7 @@ use serde_json::Value;
 /// 挂起-恢复会话（`session_id` / `run_id`）是不同概念，不要混用。
 #[derive(Debug, Clone)]
 pub struct SubAgentCallContext {
-    /// 子 agent 工具名（如 `"flexible_step2"`）。
+    /// 子 agent 工具名（如 `"flexible_parameterize"`）。
     pub agent_name: String,
     /// 本次调用的 tool_call_id（等于 `run_id` / invocation id）。
     pub tool_call_id: String,

@@ -9,15 +9,15 @@
 //! ├── commit.rs           通用：零策略纯工具（build_patch / commit_state / hand_off）
 //! ├── prelude.rs          通用：FlexibleStepPrelude（默认前置分析 + 守门）
 //! ├── before_inject.rs    通用：StateInjectCallback
-//! └── stepN/              各 step 自己的东西（N = 1..5）
-//!     ├── mod.rs                 组装点：只写 create_stepN_callback
-//!     └── stepN_callback.rs      定稿登记回调 + 本 step 的常量 + 单测
+//! └── <step>/             各 step 自己的东西（clarify / plan / parameterize / save）
+//!     ├── mod.rs                 组装点：只写 create_<step>_callback
+//!     └── <step>_callback.rs     定稿登记回调 + 本 step 的常量 + 单测
 //! ```
 //!
-//! 命名：文件 = 其中主要类型的 snake_case（`StepNCallback` → `stepN_callback.rs`）；
+//! 命名：文件 = 其中主要类型的 snake_case（`ClarifyCallback` → `clarify_callback.rs`）；
 //! 只装函数的文件按职责命名（`commit.rs`）。
 //!
-//! 判断新代码放哪：**只有某个 step 用**就放进 `stepN/`；**多个 step 共用**才提到本层。
+//! 判断新代码放哪：**只有某个 step 用**就放进 `<step>/`；**多个 step 共用**才提到本层。
 //!
 //! # 结果链
 //!
@@ -26,12 +26,12 @@
 //!   → 各 step 自己的定稿登记回调（写产物 / 推进 step）
 //! ```
 //!
-//! **「保存状态」不共用实现**：每个 `stepN/stepN_callback.rs` 自己写 `on_result` 全流程（取分析结论、
+//! **「保存状态」不共用实现**：每个 `<step>/<step>_callback.rs` 自己写 `on_result` 全流程（取分析结论、
 //! 组产物补丁、`merge_state`、错误处理、决策）。五个 step 的产物 / 清理 / 推进规则只会越来越
 //! 不一样，共享一份实现只会被特例字段撑变形；冗余换来的是各 step 能自由演化。
 //! 本层只保留两种「跨 step 的约定」，它们不是保存状态、而是接口与把关：
 //! - [`prelude`]：把前置分析做进框架槽位（`planned_agent::chat::SubAgentChainPrelude`），
-//!   各 step 的 `create_stepN_callback` 统一带上 —— «默认，不必手挂»的原因见该模块说明；
+//!   各 step 的 `create_<step>_callback` 统一带上 —— «默认，不必手挂»的原因见该模块说明；
 //! - [`analysis`]：解析 / 规范化纯函数 + `StepAnalysis`（prelude 产出、各回调消费的契约）。
 //!
 //! 抽出去的只有**零策略纯工具**（[`commit`]、[`analysis::require_analysis`]）：同样的入参必然
@@ -47,13 +47,13 @@
 //! 4. **决策只看 `call.is_last`**：非末位 `Next(call.text())`、末位 `Accept` → [`commit::hand_off`]
 //! 5. **解析 / 定稿判定 / 会话定位一律用 prelude 的结论**（[`analysis::StepAnalysis`]），不重复实现。
 //!
-//! 各 step 的 `stepN/mod.rs` 只剩「挂哪几环」（[`step1`]、[`step2`]、[`save`]），回调与常量在
-//! `stepN/stepN_callback.rs`。
+//! 各 step 的 `<step>/mod.rs` 只剩「挂哪几环」（[`clarify`]、[`plan`]、[`parameterize`]、[`save`]），回调与常量在
+//! `<step>/<step>_callback.rs`。
 //!
 //! 启动前注入见 [`before_inject`]：把 state 里已定稿的产物直接塞给子 agent，
 //! 取代「协调器 LLM 转抄」。**每个 step 注入哪些字段写在该 step 自己的
-//! `INJECT_MAPPING` 常量里**（`stepN/mod.rs`，各配单测锁取值）；本层只提供通用的
-//! 注入机制与 `create_stepN_inject` 工厂，不持有任何 step 的字段清单。
+//! `INJECT_MAPPING` 常量里**（`<step>/mod.rs`，各配单测锁取值）；本层只提供通用的
+//! 注入机制与 `create_<step>_inject` 工厂，不持有任何 step 的字段清单。
 //!
 //! 设计背景见 `docs/chat-flexible-回调会话归属设计.md`。
 
@@ -64,15 +64,15 @@ pub(crate) mod commit;
 pub(crate) mod prelude;
 
 // ── 各 step（一个 step 一个目录）──
+pub(crate) mod clarify;
 pub(crate) mod plan;
+pub(crate) mod parameterize;
 pub(crate) mod save;
-pub(crate) mod step1;
-pub(crate) mod step2;
 
+pub(crate) use clarify::{create_clarify_callback, create_clarify_inject};
+pub(crate) use parameterize::{create_parameterize_callback, create_parameterize_inject};
 pub(crate) use plan::{create_plan_callback, create_plan_inject};
 pub(crate) use save::{create_save_callback, create_save_inject};
-pub(crate) use step1::{create_step1_callback, create_step1_inject};
-pub(crate) use step2::{create_step2_callback, create_step2_inject};
 
 /// 子 agent 调用参数中承载「宿主会话 id」的字段名。
 ///
@@ -98,7 +98,7 @@ mod tests {
     use planned_agent_core::prompt::PromptManager;
     use planned_agent_prompt_manager::{FilePromptManager, PromptManagerConfig};
 
-    /// 4 份 step prompt + 协调器 system prompt 必须能被**运行期的加载器**解析出来。
+    /// 4 份 step prompt（clarify / plan / parameterize / save）+ 协调器 system prompt 必须能被**运行期的加载器**解析出来。
     ///
     /// 这些文件只在运行期加载：字符串转义写错不会让编译失败，只会在用户点进流程时才炸
     /// （历史坑：TOML 的 `"""` 里 `\` 是转义符，示例里写 Windows 路径 `C:\data\in.txt`
@@ -123,7 +123,7 @@ mod tests {
         let loaded = manager.list_prompts().await.expect("应能列出已加载 prompt");
         assert!(
             loaded.len() >= 5,
-            "flexible 目录应至少加载 5 份 prompt（step1 / plan / step2 / save + 协调器 system），实际 {}",
+            "flexible 目录应至少加载 5 份 prompt（clarify / plan / parameterize / save + 协调器 system），实际 {}",
             loaded.len()
         );
     }

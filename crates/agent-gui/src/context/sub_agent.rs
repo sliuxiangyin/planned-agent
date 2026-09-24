@@ -19,7 +19,7 @@ use super::{AiContext, PromptContext, ToolsContext};
 /// 封装了 Tool 构造、SubAgentRunner 构造、ToolRegistry 注册三个步骤。
 ///
 /// # 参数
-/// - `tool_name` — 工具名（如 `"flexible_step1"`）
+/// - `tool_name` — 工具名（如 `"flexible_clarify"`）
 /// - `description` — 工具描述
 /// - `input_schema` — JSON Schema
 /// - `config` — 子 agent 的 `ChatConfig`（含 `system_prompt` 等）

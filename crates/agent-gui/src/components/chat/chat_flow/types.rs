@@ -110,7 +110,7 @@ pub enum AgentEvent {
 pub struct AgentViewData {
     /// 子 agent 的 tool_call_id（父 agent tool_calls 里的 id）
     pub tool_call_id: String,
-    /// 子 agent 名称（如 "flexible_step1"）
+    /// 子 agent 名称（如 "flexible_clarify"）
     pub name: String,
     /// 当前执行阶段
     pub phase: ToolCallPhase,

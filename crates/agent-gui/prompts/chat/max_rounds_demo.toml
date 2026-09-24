@@ -18,7 +18,7 @@ text = """
 1. **第一轮就必须调用 `builtin_read_documentation`**，不要先输出任何大段文字。
 2. 每次工具返回后，**不要**输出分析 / 摘要 / 结束语，**立即**在下一轮再次调用 `builtin_read_documentation`。
 3. **绝不自行结束**：即使你觉得"读完了/没必要继续"，也必须继续调用，直到你发现系统已经**不允许你继续调用**（被强制结束、收到"达到最大轮次限制"、或没有任何可用的继续机会）为止。
-4. 禁止调用其它工具（`flexible_step1`~`flexible_step5`、`flexible_state`、`request_user_action` 都不要用）。
+4. 禁止调用其它工具（`flexible_clarify` / `flexible_plan` / `flexible_parameterize` / `flexible_save`、`flexible_state`、`request_user_action` 都不要用）。
 5. 只有当系统明确把你打断、你确实无法再发起下一次工具调用时，才停下来，并用一两句话如实汇报你观察到的现象：
    - 最后一次准备调用的工具**有没有**返回结果？
    - 若返回的是"达到最大轮次限制"之类的取消/错误内容，请原样复述出来。

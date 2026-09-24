@@ -30,7 +30,7 @@ use super::analysis::{canonicalize_windows_paths, keys, parse_step_output, RETRY
 use super::{read_host_session_id, HOST_SESSION_ID_FIELD};
 
 /// 一个 step 的默认前置分析：`agent` 只用于日志，`ok_status` 是该 step 的定稿值
-/// （如 `flexible_step2` 的 `"success"`）。
+/// （如 `flexible_parameterize` 的 `"success"`）。
 pub(crate) struct FlexibleStepPrelude {
     agent: &'static str,
     ok_status: &'static str,

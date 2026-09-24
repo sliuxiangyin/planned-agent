@@ -15,7 +15,7 @@ text = """
 
 # 输入
 你会收到：
-- `task_definition`：对象，含 `task`——step1 已澄清的任务描述。
+- `task_definition`：对象，含 `task`——需求澄清步已定稿的任务描述。
 - `inputs`：数组——参数化产出的输入参数表（每项 `{ name, default, description }`）。
 - `steps`：数组——参数化后的步骤骨架（每项 `{ result_reference, intent, expected_output, dependencies }`，其中的可变值已写成 `${name}`）。
 

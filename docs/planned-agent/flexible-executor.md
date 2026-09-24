@@ -10,7 +10,7 @@
 
 把**已落库的灵活计划模板**跑起来。
 
-灵活模式的生成链路（`flexible_step1` → `flexible_plan` → `flexible_step2` → `flexible_save`）已经完备，产物是一个 `{ task, inputs, steps }` 的 JSON，存在 `plans_flexible_sessions.parameterized_task` 列里。**但从没有人执行过它**——本组件补上这一段。
+灵活模式的生成链路（`flexible_clarify` → `flexible_plan` → `flexible_parameterize` → `flexible_save`）已经完备，产物是一个 `{ task, inputs, steps }` 的 JSON，存在 `plans_flexible_sessions.parameterized_task` 列里。**但从没有人执行过它**——本组件补上这一段。
 
 一句话：**输入「模板 + 参数值」，输出「每步的执行结果 + 耗时 / token / 工具次数」，执行过程通过事件流实时播报。**
 

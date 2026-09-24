@@ -47,16 +47,16 @@ pub struct ChatConfig {
     /// - `None`：**全部**工具可用（含 `Utility`、`SubAgent` 等协调/专属类工具，不过滤）。
     /// - `Some(tokens)`：仅按下列 token 命中的工具暴露（各 token 取**并集**）：
     ///   - `"all"`：加载**除 `Utility` 与 `SubAgent` 两类外**的全部工具。
-    ///     适合"纯业务执行"型 agent（如 step2 / thorough），避免背上数据库查找、专属工具、
+    ///     适合"纯业务执行"型 agent（如参数化步 / thorough），避免背上数据库查找、专属工具、
     ///     以及各类子 agent 工具。
     ///   - 分类名：如 `"Utility"` / `"SubAgent"` / `"Browser"` / `"Data"` 等，加载该分类下全部工具。
-    ///   - 精确工具名：如 `"flexible_state"` / `"flexible_step1"`，加载该工具（跨分类放行）。
+    ///   - 精确工具名：如 `"flexible_state"` / `"flexible_clarify"`，加载该工具（跨分类放行）。
     ///
     /// 示例：
-    /// - 协调器只做调度，要 5 个 step 子 agent + `flexible_state` + 用户交互、不要业务工具：
-    ///   `Some(["flexible_step1","flexible_step2","flexible_step3","flexible_step4",
-    ///         "flexible_step5","flexible_state","request_user_action"])`
-    /// - step2 要全部业务工具但不要 Utility/SubAgent：
+    /// - 协调器只做调度，要 4 个 step 子 agent（需求澄清 / 计划 / 参数化 / 保存）+ `flexible_state` + 用户交互、不要业务工具：
+    ///   `Some(["flexible_clarify","flexible_plan","flexible_parameterize","flexible_save",
+    ///         "flexible_state","request_user_action"])`
+    /// - 参数化步要全部业务工具但不要 Utility/SubAgent：
     ///   `Some(["all"])`
     /// - 全量基础上再补回整个 Utility 与 SubAgent 类（≈ 等价 `None`，但显式）：
     ///   `Some(["all","Utility","SubAgent"])`

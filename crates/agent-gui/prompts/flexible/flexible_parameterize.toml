@@ -17,7 +17,7 @@ text = """
 
 # 输入
 你会收到：
-- `task_definition`：对象，含 `task`——step1 已澄清的原始任务描述（自然语言、含真实值）。
+- `task_definition`：对象，含 `task`——需求澄清步已定稿的原始任务描述（自然语言、含真实值）。
 - `steps`：数组——计划子 Agent 定稿的步骤骨架（每项含 `result_reference` / `intent` / `expected_output` / `dependencies`）。
 
 ---
