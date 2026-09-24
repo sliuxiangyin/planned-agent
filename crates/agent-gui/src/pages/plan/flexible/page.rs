@@ -26,7 +26,8 @@ use super::session_host::FlexibleSessionHost;
 use super::step_callback::{
     create_plan_callback, create_plan_inject, create_save_callback, create_save_inject,
     create_clarify_callback, create_clarify_inject,
-    create_parameterize_callback, create_parameterize_inject, HOST_SESSION_ID_FIELD,
+    create_output_callback, create_output_inject, create_parameterize_callback,
+    create_parameterize_inject, HOST_SESSION_ID_FIELD,
 };
 use super::tool::{flexible_state_tool, FlexibleStateExecutor};
 
@@ -250,6 +251,51 @@ fn use_plan_agent_registrations(plan_id: String) {
             &ai_ctx,
             &tools_ctx,
             &prompt_ctx,
+            "flexible_output",
+            "输出定义子 Agent：与用户确认本次任务执行完要交出什么结果，定稿输出契约（output_schema，可为空）。",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_definition": {
+                        "type": "object",
+                        "description": "任务定义对象（含 task 任务描述）。**由系统自动注入**（取自本会话 flexible_state 的已定稿产物），你无需传"
+                    },
+                    "steps": {
+                        "type": "array",
+                        "description": "参数化后的步骤骨架（每项含 result_reference / intent / expected_output / dependencies）。**由系统自动注入**，你无需传"
+                    },
+                    "inputs": {
+                        "type": "array",
+                        "description": "参数化产出的参数表（每项含 name / default / description）。**由系统自动注入**，你无需传"
+                    },
+                    "host_session_id": {
+                        "type": "string",
+                        "description": "本会话 ID，原样照抄 system prompt「会话上下文」中给出的值，不得改写"
+                    }
+                },
+                "required": ["host_session_id"]
+            }),
+            ChatConfig {
+                system_prompt: Some(SystemPrompt::Template("flexible/flexible_output".into())),
+                // 输出定义要问用户「要什么结果」（UI action），故放行 request_user_action。
+                allowed_tools: Some(vec!["request_user_action".to_string()]),
+                // host_session_id 是宿主注入的控制字段（供回调定位会话），不进子 agent 的 task 文本。
+                hidden_args: vec![HOST_SESSION_ID_FIELD.to_string()],
+                ..Default::default()
+            },
+            1, // depth
+            2, // max_depth
+            create_output_callback(plan_id.clone(), plans_flexible_service.clone()),
+            // 任务定义与参数化产物由系统注入（见 output/mod.rs 的 INJECT_MAPPING）。
+            vec![create_output_inject(
+                plan_id.clone(),
+                plans_flexible_service.clone(),
+            )],
+        );
+        register_sub_agent(
+            &ai_ctx,
+            &tools_ctx,
+            &prompt_ctx,
             "flexible_save",
             "保存子 Agent：校验任务/参数/步骤三件套（task / inputs / steps），确认后落库为可复用模板。",
             serde_json::json!({
@@ -303,6 +349,7 @@ fn use_plan_agent_registrations(plan_id: String) {
             "flexible_clarify",
             "flexible_plan",
             "flexible_parameterize",
+            "flexible_output",
             "flexible_save",
             "flexible_state",
         ] {

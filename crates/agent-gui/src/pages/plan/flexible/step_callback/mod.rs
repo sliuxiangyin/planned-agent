@@ -9,7 +9,7 @@
 //! ├── commit.rs           通用：零策略纯工具（build_patch / commit_state / hand_off）
 //! ├── prelude.rs          通用：FlexibleStepPrelude（默认前置分析 + 守门）
 //! ├── before_inject.rs    通用：StateInjectCallback
-//! └── <step>/             各 step 自己的东西（clarify / plan / parameterize / save）
+//! └── <step>/             各 step 自己的东西（clarify / plan / parameterize / output / save）
 //!     ├── mod.rs                 组装点：只写 create_<step>_callback
 //!     └── <step>_callback.rs     定稿登记回调 + 本 step 的常量 + 单测
 //! ```
@@ -47,7 +47,7 @@
 //! 4. **决策只看 `call.is_last`**：非末位 `Next(call.text())`、末位 `Accept` → [`commit::hand_off`]
 //! 5. **解析 / 定稿判定 / 会话定位一律用 prelude 的结论**（[`analysis::StepAnalysis`]），不重复实现。
 //!
-//! 各 step 的 `<step>/mod.rs` 只剩「挂哪几环」（[`clarify`]、[`plan`]、[`parameterize`]、[`save`]），回调与常量在
+//! 各 step 的 `<step>/mod.rs` 只剩「挂哪几环」（[`clarify`]、[`plan`]、[`parameterize`]、[`output`]、[`save`]），回调与常量在
 //! `<step>/<step>_callback.rs`。
 //!
 //! 启动前注入见 [`before_inject`]：把 state 里已定稿的产物直接塞给子 agent，
@@ -65,11 +65,13 @@ pub(crate) mod prelude;
 
 // ── 各 step（一个 step 一个目录）──
 pub(crate) mod clarify;
-pub(crate) mod plan;
+pub(crate) mod output;
 pub(crate) mod parameterize;
+pub(crate) mod plan;
 pub(crate) mod save;
 
 pub(crate) use clarify::{create_clarify_callback, create_clarify_inject};
+pub(crate) use output::{create_output_callback, create_output_inject};
 pub(crate) use parameterize::{create_parameterize_callback, create_parameterize_inject};
 pub(crate) use plan::{create_plan_callback, create_plan_inject};
 pub(crate) use save::{create_save_callback, create_save_inject};
@@ -98,7 +100,7 @@ mod tests {
     use planned_agent_core::prompt::PromptManager;
     use planned_agent_prompt_manager::{FilePromptManager, PromptManagerConfig};
 
-    /// 4 份 step prompt（clarify / plan / parameterize / save）+ 协调器 system prompt 必须能被**运行期的加载器**解析出来。
+    /// 5 份 step prompt（clarify / plan / parameterize / output / save）+ 协调器 system prompt 必须能被**运行期的加载器**解析出来。
     ///
     /// 这些文件只在运行期加载：字符串转义写错不会让编译失败，只会在用户点进流程时才炸
     /// （历史坑：TOML 的 `"""` 里 `\` 是转义符，示例里写 Windows 路径 `C:\data\in.txt`
@@ -123,7 +125,7 @@ mod tests {
         let loaded = manager.list_prompts().await.expect("应能列出已加载 prompt");
         assert!(
             loaded.len() >= 5,
-            "flexible 目录应至少加载 5 份 prompt（clarify / plan / parameterize / save + 协调器 system），实际 {}",
+            "flexible 目录应至少加载 6 份 prompt（clarify / plan / parameterize / output / save + 协调器 system），实际 {}",
             loaded.len()
         );
     }

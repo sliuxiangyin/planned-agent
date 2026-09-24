@@ -98,14 +98,16 @@ pub fn flexible_state_tool() -> Tool {
              \n\
              返回：{ loaded, current_step, products }；该会话尚无记录时 loaded=false、current_step=none、products={}。\n\
              \n\
-             products 的 key（均为 string，存原始文本/JSON）：task_definition（step1 定稿的\n\
-             需求基线）、steps（计划步定稿的粗粒度步骤骨架）、inputs + steps（step2 定稿：参数表 + 占位后的步骤骨架）。\n\
+             products 的 key（均为 string，存原始文本/JSON）：task_definition（需求澄清定稿的\n\
+             需求基线）、steps（计划步定稿的粗粒度步骤骨架）、inputs + steps（参数化定稿：参数表 + 占位后的步骤骨架）、\n\
+             output_schema（输出定义定稿的输出契约；用户选「定不了」或跳过该步时不存在）。\n\
              \n\
-             current_step 档位（顺序 none→task_defined→planned→parameterized→saved）：\n\
-             - task_defined  = step1 已澄清（可执行计划步）\n\
-             - planned       = 计划步已定稿（可执行 step2 参数化）\n\
-             - parameterized = step2 已定稿（可执行 flexible_save 落库）\n\
-             - saved         = flexible_save 已落库".into(),
+             current_step 档位（顺序 none→task_defined→planned→parameterized→output_defined→saved）：\n\
+             - task_defined    = 需求澄清已定稿（可执行计划步）\n\
+             - planned         = 计划步已定稿（可执行参数化步）\n\
+             - parameterized   = 参数化已定稿（可执行输出定义步；也可跳过输出定义直接落库）\n\
+             - output_defined  = 输出定义已定稿（可执行 flexible_save 落库）\n\
+             - saved           = flexible_save 已落库".into(),
         input_schema: json!({
             "type": "object",
             "properties": {

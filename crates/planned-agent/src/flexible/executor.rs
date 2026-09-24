@@ -316,6 +316,7 @@ mod tests {
     /// 两步模板：第二步依赖第一步的 `#E1`，且 `intent` 含 `${path}` 占位符。
     fn two_step_template() -> FlexiblePlanTemplate {
         FlexiblePlanTemplate {
+            output_schema: None,
             task: "维护文件".to_string(),
             inputs: vec![PlanInput {
                 name: "path".to_string(),

@@ -2,8 +2,8 @@
 //!
 //! 按 plan+session 记录一次灵活流程推进到的当前阶段（`current_step`）与各步骤产物
 //! （`products`）。用于协调器判定「用户指定步骤」时前置产物是否齐备：
-//! - `current_step`：`none`→`task_defined`→`planned`→`parameterized`→`saved`，与协调器状态机阶段一一对应；
-//! - `products`：JSON 对象，键为 `task_definition / steps / inputs`（`steps` 由参数化步覆盖为带 ${name} 占位的版本）。
+//! - `current_step`：`none`→`task_defined`→`planned`→`parameterized`→`output_defined`→`saved`，与协调器状态机阶段一一对应；
+//! - `products`：JSON 对象，键为 `task_definition / steps / inputs / output_schema`（`steps` 由参数化步覆盖为带 ${name} 占位的版本；`output_schema` 由输出定义步登记，用户选「定不了」或跳过该步时不存在）。
 //!
 //! 与 `plans_flexible_sessions`（定稿快照）语义分离：本表存过程进度与中间产物，
 //! 后者存最终定稿三件套（`parameterized_task` 列内为 task + inputs + steps 打包 JSON）。
@@ -20,7 +20,7 @@ pub struct Model {
     pub plan_id: String,
     /// 归属会话 id（FK → sessions.id）；状态必然归属某会话，非空
     pub session_id: String,
-    /// 流程推进到的当前阶段（none/task_defined/planned/parameterized/saved）
+    /// 流程推进到的当前阶段（none/task_defined/planned/parameterized/output_defined/saved）
     #[sea_orm(default_value = "none")]
     pub current_step: String,
     /// 各步骤中间产物 JSON 对象

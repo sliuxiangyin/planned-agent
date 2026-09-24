@@ -31,9 +31,9 @@ const NEXT_STEP: &str = "planned";
 const PRODUCTS: &[&str] = &["steps"];
 /// 定稿时要清除（置 `null`）的下游产物。
 ///
-/// 参数化步产出的 `inputs` 依赖本步的 `steps`：重跑本步即作废 —— 必须清除。
-/// `steps` 本身由本步覆盖写入，不在清除之列。
-const CLEAR: &[&str] = &["inputs"];
+/// 参数化步产出的 `inputs` 与输出定义步产出的 `output_schema` 都依赖本步的 `steps`：
+/// 重跑本步即作废 —— 必须清除。`steps` 本身由本步覆盖写入，不在清除之列。
+const CLEAR: &[&str] = &["inputs", "output_schema"];
 
 /// `flexible_plan` 的定稿登记回调。
 pub(super) struct PlanCallback {
@@ -96,7 +96,7 @@ impl SubAgentResultCallback for PlanCallback {
 mod tests {
     use super::*;
 
-    /// 本 step 独有的回归价值：**常量取值正确**（登记 steps、清除下游 inputs）。
+    /// 本 step 独有的回归价值：**常量取值正确**（登记 steps、清除下游 inputs 与输出契约）。
     /// 公共行为见 `super::super::commit` 的测试，不在此重复。
     #[test]
     fn commits_steps_and_clears_downstream_inputs() {
@@ -114,8 +114,9 @@ mod tests {
         let patch = build_patch(AGENT, &parsed, PRODUCTS, CLEAR);
         let mut keys: Vec<&str> = patch.keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["inputs", "steps"]);
+        assert_eq!(keys, ["inputs", "output_schema", "steps"]);
         assert!(patch["inputs"].is_null(), "下游 inputs 应被清除");
+        assert!(patch["output_schema"].is_null(), "下游输出契约应被清除");
         assert_eq!(patch["steps"][0]["result_reference"], "#E1");
         assert_eq!(NEXT_STEP, "planned");
         assert_eq!(OK_STATUS, "planned");

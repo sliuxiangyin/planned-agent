@@ -17,6 +17,15 @@ pub struct FlexiblePlanTemplate {
     pub inputs: Vec<PlanInput>,
     /// 步骤骨架（可变值已写成 `${name}`）
     pub steps: Vec<PlanStep>,
+    /// 输出契约（`flexible_output` 定稿产物）。
+    ///
+    /// `None` 有二义（都表示「没有结果契约」，消费方同等对待）：
+    /// - 模板没走过输出定义步（用户跳过）；
+    /// - 走过但用户选了「现在还定不了」。
+    ///
+    /// **必须带 `#[serde(default)]`**：早于输出步落库的模板 JSON 没有这个字段。
+    #[serde(default)]
+    pub output_schema: Option<Value>,
 }
 
 /// 一个参数的定义（对应 `inputs[]` 的一项）。
@@ -137,5 +146,52 @@ mod tests {
         assert!(FlexiblePlanTemplate::from_json("not json").is_err());
         // 缺必填 steps
         assert!(FlexiblePlanTemplate::from_json(r#"{"task":"t"}"#).is_err());
+    }
+
+    /// 输出契约字段：缺失 → `None`（旧落库数据）、显式 `null` → `None`（「跳过」与「定不了」同义）、
+    /// 有值时原样保留并能序列化往返。
+    #[test]
+    fn output_schema_is_optional_and_round_trips() {
+        // 旧模板（落库 JSON 里根本没有这个字段）必须仍能解析
+        let legacy = FlexiblePlanTemplate::from_json(SAMPLE).expect("旧模板应能解析");
+        assert!(
+            legacy.output_schema.is_none(),
+            "旧落库数据缺该字段 → None，不得报错"
+        );
+
+        // 显式 null（用户选「现在还定不了」，或不走输出步）
+        let nulled = FlexiblePlanTemplate::from_json(
+            r##"{
+              "task": "t",
+              "steps": [{ "result_reference": "#E1", "intent": "i", "expected_output": "o" }],
+              "output_schema": null
+            }"##,
+        )
+        .expect("null 应能解析");
+        assert!(nulled.output_schema.is_none());
+
+        // 有值：原样保留 + 往返
+        let tpl = FlexiblePlanTemplate::from_json(
+            r##"{
+              "task": "t",
+              "steps": [{ "result_reference": "#E1", "intent": "i", "expected_output": "o" }],
+              "output_schema": {
+                "kind": "csv",
+                "description": "商品清单",
+                "detail": "UTF-8，首行表头",
+                "required": ["title"],
+                "wanted": ["stock"]
+              }
+            }"##,
+        )
+        .expect("应能解析");
+        let schema = tpl.output_schema.as_ref().expect("应有 output_schema");
+        assert_eq!(schema["kind"], "csv");
+        assert_eq!(schema["required"][0], "title");
+        assert_eq!(schema["wanted"][0], "stock");
+
+        let re_encoded = serde_json::to_string(&tpl).expect("应能序列化");
+        let back = FlexiblePlanTemplate::from_json(&re_encoded).expect("往返后应能解析");
+        assert_eq!(back, tpl);
     }
 }

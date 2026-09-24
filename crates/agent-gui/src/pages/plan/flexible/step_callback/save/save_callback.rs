@@ -58,11 +58,13 @@ impl SaveCallback {
     }
 }
 
-/// 从 `flexible_state.products`（JSON 文本）组装落库 payload：`{ task, inputs, steps }`。
+/// 从 `flexible_state.products`（JSON 文本）组装落库 payload：`{ task, inputs, steps, output_schema }`。
 ///
-/// - `task` ← `task_definition.task`（step1 定稿产物）
+/// - `task` ← `task_definition.task`（需求澄清定稿产物）
 /// - `inputs` ← `inputs`（参数化产出的参数表；缺失视为空表）
 /// - `steps` ← `steps`（参数化后的步骤骨架，可变值已写成 `${name}`）
+/// - `output_schema` ← `output_schema`（输出定义定稿的输出契约）。**缺失或 `null` 一律落 `null`** ——
+///   用户跳过输出定义、或选了「现在还定不了」，都是合法情况，不得报错；非 `null` 时必须是对象。
 ///
 /// 落库前校验 `steps` 里的 `${name}` 都能在 `inputs` 中找到同名定义：未定义即报错，
 /// 不静默留空 —— 否则「参数漏定义」会被伪装成「本来就没有参数」。
@@ -100,12 +102,25 @@ fn build_payload(products: &str) -> Result<String, String> {
         return Err("inputs 必须是数组".to_string());
     }
 
+    // 输出契约可选：跳过输出定义 / 用户选「定不了」都落 null（两者语义等同，见
+    // `docs/planned-agent/flexible-output-step.md` §5）。非 null 时必须是对象。
+    let output_schema = match obj.get("output_schema") {
+        Some(schema) if !schema.is_null() => {
+            if !schema.is_object() {
+                return Err("output_schema 必须是对象或 null".to_string());
+            }
+            schema.clone()
+        }
+        _ => Value::Null,
+    };
+
     placeholder::validate(steps, &inputs)?;
 
     Ok(json!({
         "task": task,
         "inputs": inputs,
         "steps": steps,
+        "output_schema": output_schema,
     })
     .to_string())
 }
@@ -192,7 +207,7 @@ impl SubAgentResultCallback for SaveCallback {
 mod tests {
     use super::*;
 
-    /// 本 step 独有的回归价值：从 products 组装三件套，且 `steps` 保持**带占位**的模板形态。
+    /// 本 step 独有的回归价值：从 products 组装四件套（含可选的输出契约），且 `steps` 保持**带占位**的模板形态。
     #[test]
     fn builds_payload_from_task_inputs_and_steps() {
         let products = serde_json::json!({
@@ -208,6 +223,13 @@ mod tests {
                     "dependencies": [],
                 }
             ],
+            "output_schema": {
+                "kind": "csv",
+                "description": "追加后的文件清单",
+                "detail": null,
+                "required": ["path"],
+                "wanted": [],
+            },
         })
         .to_string();
 
@@ -217,7 +239,35 @@ mod tests {
         assert_eq!(v["inputs"][0]["name"], "filepath");
         // 落库的是「模板」：占位符不被展开
         assert_eq!(v["steps"][0]["intent"], "在 ${filepath} 追加一行");
+        assert_eq!(v["output_schema"]["kind"], "csv");
+        assert_eq!(v["output_schema"]["required"][0], "path");
         assert!(v.get("parameterized_task").is_none());
+    }
+
+    /// 输出契约缺失 / 为 `null` 都合法（用户跳过输出定义或选「定不了」），一律落 `null`；
+    /// 非对象则报错（不让垃圾进库）。
+    #[test]
+    fn output_schema_defaults_to_null_and_rejects_non_object() {
+        let base = |extra: &str| {
+            format!(
+                r##"{{"task_definition":{{"task":"建目录"}},
+                     "steps":[{{"result_reference":"#E1","intent":"i","expected_output":"o"}}]{extra}}}"##
+            )
+        };
+
+        // 缺失
+        let payload = build_payload(&base("")).unwrap();
+        let v: Value = serde_json::from_str(&payload).unwrap();
+        assert!(v["output_schema"].is_null(), "缺失 → null");
+
+        // 显式 null
+        let payload = build_payload(&base(r#","output_schema":null"#)).unwrap();
+        let v: Value = serde_json::from_str(&payload).unwrap();
+        assert!(v["output_schema"].is_null(), "显式 null → null");
+
+        // 非对象
+        let err = build_payload(&base(r#","output_schema":"csv""#)).unwrap_err();
+        assert!(err.contains("output_schema"), "应点名字段: {err}");
     }
 
     #[test]
@@ -290,5 +340,6 @@ mod tests {
         let v: Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(v["inputs"], serde_json::json!([]));
         assert_eq!(v["steps"][0]["intent"], "在 /tmp/demo 建目录");
+        assert!(v["output_schema"].is_null(), "无输出定义 → null");
     }
 }

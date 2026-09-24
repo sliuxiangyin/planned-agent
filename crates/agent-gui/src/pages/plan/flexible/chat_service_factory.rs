@@ -66,6 +66,7 @@ pub(crate) async fn new_chat_service(
                 "flexible_clarify".to_string(),
                 "flexible_plan".to_string(),
                 "flexible_parameterize".to_string(),
+                "flexible_output".to_string(),
                 "flexible_save".to_string(),
                 "flexible_state".to_string(),
                 "request_user_action".to_string(),

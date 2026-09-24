@@ -108,6 +108,7 @@ mod tests {
     /// 两步模板（第二步依赖第一步）。
     fn template() -> FlexiblePlanTemplate {
         FlexiblePlanTemplate {
+            output_schema: None,
             task: "维护文件".to_string(),
             inputs: vec![],
             steps: vec![

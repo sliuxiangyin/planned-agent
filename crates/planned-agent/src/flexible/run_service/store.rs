@@ -188,6 +188,7 @@ mod tests {
 
     fn template() -> FlexiblePlanTemplate {
         FlexiblePlanTemplate {
+            output_schema: None,
             task: "t".to_string(),
             inputs: vec![],
             steps: vec![PlanStep {

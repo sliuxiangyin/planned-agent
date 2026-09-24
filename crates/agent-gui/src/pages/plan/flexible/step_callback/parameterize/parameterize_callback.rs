@@ -30,8 +30,8 @@ const NEXT_STEP: &str = "parameterized";
 /// - `inputs`：参数表（每项 `{name, default, description}`），供 `flexible_save` 校验与落库。
 /// - `steps`：参数化后的步骤骨架 —— 可变值已替换为 `${name}` 占位符，覆盖计划步产出的同名字段。
 const PRODUCTS: &[&str] = &["inputs", "steps"];
-/// 定稿时要清除（置 `null`）的下游产物 —— 本 step 之后无 flexible_state 下游产物。
-const CLEAR: &[&str] = &[];
+/// 定稿时要清除（置 `null`）的下游产物 —— 输出定义步产出的输出契约依赖本步的参数化结果。
+const CLEAR: &[&str] = &["output_schema"];
 
 /// `flexible_parameterize` 的定稿登记回调。
 pub(super) struct ParameterizeCallback {
@@ -95,7 +95,7 @@ impl SubAgentResultCallback for ParameterizeCallback {
 mod tests {
     use super::*;
 
-    /// 本 step 独有的回归价值：**常量取值正确**（登记 inputs + 占位后的 steps、无下游清除）。
+    /// 本 step 独有的回归价值：**常量取值正确**（登记 inputs + 占位后的 steps、清除下游输出契约）。
     /// 公共行为见 `super::super::commit` 的测试，不在此重复。
     #[test]
     fn commits_inputs_and_parameterized_steps() {
@@ -116,9 +116,13 @@ mod tests {
         let patch = build_patch(AGENT, &parsed, PRODUCTS, CLEAR);
         let mut keys: Vec<&str> = patch.keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["inputs", "steps"]);
+        assert_eq!(keys, ["inputs", "output_schema", "steps"]);
         assert_eq!(patch["inputs"][0]["name"], "filepath");
         assert_eq!(patch["steps"][0]["intent"], "在 ${filepath} 维护日志");
+        assert!(
+            patch["output_schema"].is_null(),
+            "参数变了，下游输出契约应作废"
+        );
         assert_eq!(NEXT_STEP, "parameterized");
         assert_eq!(OK_STATUS, "success");
     }
