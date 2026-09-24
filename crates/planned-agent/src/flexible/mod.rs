@@ -19,6 +19,7 @@
 //! ├── prompt.rs       内置提示词常量
 //! ├── step.rs         单步执行：工具循环 + 耗时 / token
 //! ├── executor.rs     总编排
+//! ├── run_service/    执行服务（宿主侧）：常驻循环 + 状态表 + 订阅
 //! └── testing.rs      测试桩（#[cfg(test)]）
 //! ```
 
@@ -30,6 +31,10 @@ mod prompt;
 mod report;
 mod step;
 mod template;
+
+// 执行服务自成一组类型（快照 / 命令 / 接缝 trait），故不做顶层 re-export，
+// 对外路径统一为 `flexible::run_service::X`。
+pub mod run_service;
 
 #[cfg(test)]
 mod testing;

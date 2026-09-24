@@ -469,15 +469,17 @@ loop {
 - [x] ✅ **4.2 `flexible/mod.rs` + `lib.rs`**：`pub mod flexible;` 与对外导出
   - 验收：crate 外可用 `use planned_agent::flexible::FlexibleExecutor;`
 
-### 阶段 5 — 宿主接线（`agent-gui`，本模块之外）
+### 阶段 5 — 宿主接线（`agent-gui`，本模块之外）✅
 
+> ✅ 已完成，但**形态已升级为「执行服务」**：宿主不再直接 `spawn(executor.run(...))`，
+> 而是通过 `flexible::run_service` 的常驻服务执行、并按会话订阅进度。
+> 设计的唯一出处：[`flexible-run-service.md`](./flexible-run-service.md)。
+>
 > 依赖方向不变：GUI → `flexible`，接线只发生在 GUI 侧；不要为了省事把 GUI 类型（`Signal` / `sea-orm`）带进 `flexible/`。
 
-- [ ] **5.1 迁移引用同步**：处理 `pages/plan/flexible/placeholder.rs`（删除或改为重导出），`save_callback.rs:92` 改引用新路径
-- [ ] **5.2 PARAMS 可编辑**：`left_panel/params.rs` 的 `readonly` input 改为可编辑，产出 `PlanRunParams`
-- [ ] **5.3 执行按钮**：`left_panel/pipeline.rs` 的执行按钮 → `spawn(executor.run(...))`
-- [ ] **5.4 事件 → 信号**：`PlanRunEvent` 映射驱动 `PipelineView`（含 THINK 终端）与 `StatsView`
-- [ ] **5.5 停止按钮**：接线 `cancel` 通道
+- [x] ✅ **5.1–5.5**：参数编辑、执行 / 停止按钮、事件 → UI（`PipelineView` / `StatsView`）
+  全部由 `crates/agent-gui/src/services/run_service.rs` 与 `pages/plan/left_panel/` 承接；
+  与执行器的交互收口在服务内核（`ServiceSink` 回送 `PlanRunEvent` → 快照 → 订阅推送）。
 
 ### 阶段 6 — 执行记录（延后，待表结构定案）
 

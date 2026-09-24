@@ -1,6 +1,6 @@
 //! STATS Bento 块：执行统计。
 //!
-//! 指标来自执行器返回的 `PlanRunReport`（由 `FlexibleRunManager` 的执行状态带上来）。
+//! 指标来自执行器返回的 `PlanRunReport`（由执行服务的快照带上来：`RunSnapshot::report`）。
 //! 没跑过（或模板未就绪）时，除 `Mode` 与步骤总数外一律显示占位符 `—`。
 //!
 //! 历史多次执行的对比属于执行记录落库（见 `docs/planned-agent/flexible-executor.md` 阶段 6）。

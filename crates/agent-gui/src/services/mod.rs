@@ -6,6 +6,6 @@
 //!
 //! 调用方（pages/）只使用服务实例，不必关心服务内部依赖哪些 context。
 
-pub mod flexible_run_manager;
 pub mod planner_service;
 pub mod plans_flexible_service;
+pub mod run_service;

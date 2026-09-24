@@ -4,16 +4,18 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use dioxus::prelude::*;
+use dioxus_primitives::toast::{use_toast, ToastOptions};
+use planned_agent::flexible::run_service::StepPhase;
 use planned_agent::flexible::{render_lenient, PlanInput, PlanRunParams, PlanStep};
 use serde_json::Value;
 
-use crate::context::require_resource;
 use crate::components::dropdown_menu::{
     DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 };
 use crate::components::page_header::PageHeader;
 use crate::pages::plan::shared::session::SessionManager;
-use crate::services::flexible_run_manager::{FlexibleRunManager, RunStatus, StepPhase};
+use crate::context::{require_resource, AiContext};
+use crate::services::run_service::{start_run_with_template, use_run_service, use_run_subscription};
 use crate::services::plans_flexible_service::{PlanTemplateState, PlansFlexibleService};
 use crate::storage::entities::plan;
 
@@ -215,53 +217,56 @@ pub fn PlanLeftPanel(
         render_steps(&steps, &values)
     };
 
-    // ── 执行状态（app 级管理器：任务不随本组件卸载而中断）──
-    // 读 signal 即订阅：后台任务写进度 → 这里重渲染。
-    let run_mgr = require_resource::<FlexibleRunManager>();
+    // ── 执行状态（app 级执行服务：任务不随本组件卸载而中断）──
+    // hook 内部「订阅 + 消费」并写入本地 Signal：读 signal 即订阅，服务写进度 → 这里重渲染。
+    let run_service = use_run_service();
     let session_id = current_session.read().clone();
-    let run_state = session_id
-        .as_ref()
-        .and_then(|sid| run_mgr.states().read().get(sid).cloned());
+    let run_snapshot = use_run_subscription(current_session).read().clone();
     // 叠加相位：执行过的步骤按真实状态上色，其余保持 Pending。
-    if let Some(state) = &run_state {
+    if let Some(snapshot) = &run_snapshot {
         for (offset, step) in rendered_steps.iter_mut().enumerate() {
-            if let Some(phase) = state.phases.get(offset) {
-                step.phase = *phase;
-            }
+            step.phase = snapshot.phase_of(offset);
         }
     }
 
-    let is_running = run_state
+    let is_running = run_snapshot
         .as_ref()
-        .is_some_and(|state| state.status == RunStatus::Running);
+        .is_some_and(|snapshot| snapshot.is_running());
     // 有参数没填就禁止执行：否则要到后台报「intent 展开失败」才发现，体验差。
     let has_missing_param = rendered_steps.iter().any(|step| !step.missing.is_empty());
     let can_run =
         ready_template.is_some() && session_id.is_some() && !has_missing_param && !is_running;
 
-    // 执行：把当前编辑态转成运行参数交给管理器（后台跑，与本组件存亡无关）。
+    // 执行：把当前编辑态（模板 + 参数）交给服务（后台跑，与本组件存亡无关）。
+    // 同步调用即可（模板与参数都在手上，不需要读库、不需要 async）：启动失败（没配 AI）
+    // 在本层解析并用 toast 呈现 —— 内核只收可执行的请求，不再把「没启动起来」写进快照（§12）。
     let on_run = {
-        let run_mgr = run_mgr.clone();
+        let run_service = run_service.clone();
+        let ai = require_resource::<AiContext>();
         let ready_template = ready_template.clone();
         let inputs = inputs.clone();
         let session_id = session_id.clone();
+        let toast = use_toast();
         EventHandler::new(move |_: MouseEvent| {
             let (Some(template), Some(session_id)) = (ready_template.clone(), session_id.clone())
             else {
                 return;
             };
             let params = build_run_params(&inputs, &param_values.read());
-            // 启动失败（如没配 AI）已由管理器写进状态，界面从同一处读并展示
-            let _ = run_mgr.start(&session_id, template, params);
+            if let Err(reason) =
+                start_run_with_template(run_service.clone(), ai.clone(), session_id, template, params)
+            {
+                toast.error("执行未开始".to_string(), ToastOptions::new().description(reason));
+            }
         })
     };
     // 停止：唯一的中断途径。
     let on_stop = {
-        let run_mgr = run_mgr.clone();
+        let run_service = run_service.clone();
         let session_id = session_id.clone();
         EventHandler::new(move |_: MouseEvent| {
             if let Some(session_id) = session_id.as_deref() {
-                run_mgr.stop(session_id);
+                let _ = run_service.stop(session_id);
             }
         })
     };
@@ -366,7 +371,7 @@ pub fn PlanLeftPanel(
                         plan_mode_label: plan_mode_label,
                         total_steps: total_steps,
                         hint: hint.clone(),
-                        report: run_state.as_ref().and_then(|state| state.report.clone()),
+                        report: run_snapshot.as_ref().and_then(|snapshot| snapshot.report.clone()),
                     }
                 }
                 // ① PIPELINE — 执行时间线（步骤骨架来自当前会话模板）
@@ -375,7 +380,7 @@ pub fn PlanLeftPanel(
                     hint: hint.clone(),
                     is_running: is_running,
                     can_run: can_run,
-                    error: run_state.as_ref().and_then(|state| state.error.clone()),
+                    error: run_snapshot.as_ref().and_then(|snapshot| snapshot.error.clone()),
                     on_run: on_run,
                     on_stop: on_stop,
                 }

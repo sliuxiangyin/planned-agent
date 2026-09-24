@@ -3,12 +3,12 @@
 //! 步骤文本是**已按当前参数值展开**的（展开在 `PlanLeftPanel::render_steps`），
 //! 所以 PARAMS 一改参数，这里立刻跟着变；未填的参数保留 `${name}` 原样并给出提示。
 //!
-//! 每步的相位（待执行 / 执行中 / 成功 / 失败 / 跳过）由 `FlexibleRunManager`
-//! 的执行状态驱动 —— 执行是后台任务，本组件卸载并不影响它。
+//! 每步的相位（待执行 / 执行中 / 成功 / 失败 / 跳过）由执行服务的快照（`RunSnapshot::phase_of`）
+//! 驱动 —— 执行在常驻服务里跑，本组件卸载并不影响它。
 
 use dioxus::prelude::*;
 
-use crate::services::flexible_run_manager::StepPhase;
+use planned_agent::flexible::run_service::StepPhase;
 
 use super::left_panel::{missing_label, RenderedStep};
 

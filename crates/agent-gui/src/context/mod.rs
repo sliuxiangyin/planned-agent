@@ -33,12 +33,6 @@ pub use tools::ToolsContext;
 /// 因此在子组件中调用必然能取到。若仍取不到（层级/时机错误）则 panic，
 /// 帮助尽早暴露装配 bug。
 ///
-/// **例外（唯一一处）**：`FlexibleRunSignals` 由 `app()` 在 `ScopeId::ROOT` 注入。
-/// 原因是信号的 owner scope 必须「不高于」使用它的 scope——后台任务经 `spawn_forever`
-/// 投到 ROOT，若信号在 `ReadyShell` 创建，方向正好倒过来（ROOT 是它的父），会触发
-/// `__copy_value_hoisted`，且 `ReadyShell` 重建时信号会先于后台任务被 drop。
-/// 详见 `crate::services::flexible_run_manager::FlexibleRunSignals` 的文档。
-///
 /// 注意本函数取的是 `Arc<T>`，注入方也必须提供 `Arc<T>`（提供裸 `T` 会在运行时 panic）。
 pub fn require_resource<T: 'static>() -> Arc<T> {
     use_context::<Arc<T>>()

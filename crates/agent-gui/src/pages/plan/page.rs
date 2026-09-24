@@ -14,7 +14,6 @@ use crate::components::resizable_panel::ResizablePanel;
 use dioxus::prelude::*;
 
 use crate::context::StorageContext;
-use crate::services::plans_flexible_service::PlansFlexibleService;
 use crate::storage::entities::plan;
 
 use super::flexible::FlexiblePage;
@@ -35,16 +34,8 @@ pub fn PlanPage(plan_id: String, on_back: EventHandler<()>) -> Element {
     // ── 会话状态管理中心：plan 级共享单例，注入到 context，供 flexible / 会话抽屉等订阅当前会话切换 ──
     let session_mgr = use_provide_session_manager();
 
-    // ── 灵活计划聚合服务：plan 级单例，注入 context 供左侧面板（读参数化模板）与
-    //    FlexiblePage（定稿回调 / 状态工具）共用，避免各自 new 出多个实例 ──
-    let service_storage = storage.clone();
-    let plans_flexible_service = use_hook(move || {
-        Arc::new(PlansFlexibleService::new(
-            service_storage.plans_flexible_sessions_repo(),
-            service_storage.flexible_state_repo(),
-        ))
-    });
-    use_context_provider(|| plans_flexible_service.clone());
+    // ── 灵活计划聚合服务：由启动门（`ReadyShell`）注入，与执行服务共用同一实例 ──
+    // （原先在页面内 `new`，现提到启动层：执行服务在 app 级就需要它读模板。）
 
     // ── 当前会话持久化：切换会话即写回 `plans.current_session_id`（下次进入的默认定位）──
     // 钩子在**渲染期**重新注册（覆盖式、幂等）：闭包恒捕获最新 `plan_id`，即使同一组件
