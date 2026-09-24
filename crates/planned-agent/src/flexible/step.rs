@@ -74,6 +74,7 @@ pub(crate) async fn run_step(
 
     loop {
         if is_cancelled(cancel) {
+            tracing::info!(step = input.index, round = rounds, "收到取消信号，中止该步");
             error = Some("用户取消".to_string());
             break;
         }
@@ -92,6 +93,13 @@ pub(crate) async fn run_step(
         let response = match ai.chat_completion(request).await {
             Ok(response) => response,
             Err(err) => {
+                // 失败原因必须同时进日志：报告里的原因只有 UI 看得到，事后查问题只能靠日志。
+                tracing::error!(
+                    step = input.index,
+                    round = rounds,
+                    error = %err,
+                    "LLM 调用失败，该步失败"
+                );
                 error = Some(format!("LLM 调用失败：{err}"));
                 break;
             }
@@ -109,6 +117,11 @@ pub(crate) async fn run_step(
         });
 
         let Some(choice) = response.choices.into_iter().next() else {
+            tracing::error!(
+                step = input.index,
+                round = rounds,
+                "LLM 响应不含 choices，该步失败"
+            );
             error = Some("LLM 响应不含 choices".to_string());
             break;
         };
@@ -133,12 +146,25 @@ pub(crate) async fn run_step(
         if tool_calls.is_empty() {
             // 收敛：优先用回答正文，没有正文才退回思考内容
             let answer = if !content.is_empty() { content } else { reasoning };
+            tracing::info!(
+                step = input.index,
+                rounds,
+                output_chars = answer.chars().count(),
+                "步骤产出完成（无工具调用）"
+            );
             output = Some(answer);
             break;
         }
 
         // 已达轮数上限：不再执行工具，直接判失败（避免无界循环）
         if rounds >= cfg.max_rounds_per_step {
+            tracing::warn!(
+                step = input.index,
+                rounds,
+                max_rounds = cfg.max_rounds_per_step,
+                tool_calls = tool_call_count,
+                "已达每步轮数上限且末轮仍要求调用工具，该步失败"
+            );
             error = Some(format!(
                 "超过每步轮数上限 {}（末轮仍要求调用工具）",
                 cfg.max_rounds_per_step
@@ -150,24 +176,63 @@ pub(crate) async fn run_step(
         messages.push(message);
         for call in tool_calls {
             if is_cancelled(cancel) {
+                tracing::info!(step = input.index, round = rounds, "工具循环中收到取消信号");
                 error = Some("用户取消".to_string());
                 break;
             }
 
             let arguments = parse_arguments(&call.function.arguments);
-            let (tool_output, is_error) =
-                match registry.call_tool(&call.function.name, arguments).await {
-                    Ok(outcome) => (
-                        tool_content(&outcome.result.content),
-                        outcome.result.is_error,
-                    ),
-                    Err(err) => (format!("工具执行失败：{err}"), true),
-                };
+            let tool_name = call.function.name.clone();
+            // 入参是排查工具失败的**唯一现场证据**：错误信息只说「找不到指定的路径」/「program not
+            // found」，而「它到底传了哪条路径 / 传的命令长什么样」只在入参里。渲染一次，三处复用。
+            let args_desc = describe_arguments(&arguments);
+            tracing::debug!(
+                step = input.index,
+                round = rounds,
+                tool = %tool_name,
+                args = %args_desc,
+                "工具调用入参"
+            );
+            let (tool_output, is_error) = match registry.call_tool(&tool_name, arguments).await {
+                Ok(outcome) => {
+                    let content = tool_content(&outcome.result.content);
+                    if outcome.result.is_error {
+                        // 工具报错不一定让该步失败（结果会回灌给 LLM 继续决策），但必须留痕
+                        tracing::warn!(
+                            step = input.index,
+                            round = rounds,
+                            tool = %tool_name,
+                            args = %args_desc,
+                            output = %content,
+                            "工具返回了错误结果，已回灌给 LLM"
+                        );
+                    }
+                    (content, outcome.result.is_error)
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        step = input.index,
+                        round = rounds,
+                        tool = %tool_name,
+                        args = %args_desc,
+                        error = %err,
+                        "工具执行失败，错误信息已回灌给 LLM"
+                    );
+                    (format!("工具执行失败：{err}"), true)
+                }
+            };
 
             tool_call_count += 1;
+            tracing::debug!(
+                step = input.index,
+                round = rounds,
+                tool = %tool_name,
+                ok = !is_error,
+                "工具调用完成"
+            );
             sink.emit(PlanRunEvent::StepToolCall {
                 index: input.index,
-                tool: call.function.name.clone(),
+                tool: tool_name,
                 ok: !is_error,
             });
             messages.push(tool_message(&call.id, &tool_output));
@@ -256,6 +321,21 @@ fn parse_arguments(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
 }
 
+/// 把工具入参渲染成一行日志文本（超长截断）。
+///
+/// 上限故意给得比输出摘要宽：入参是排查失败的现场证据，截太狠会丢掉关键那一截；
+/// 但 `write_file` 之类的入参会带上整篇文件正文，完全不截断又会淹掉日志。
+fn describe_arguments(arguments: &Value) -> String {
+    const ARG_LOG_MAX_CHARS: usize = 800;
+    let rendered = arguments.to_string();
+    let total = rendered.chars().count();
+    if total <= ARG_LOG_MAX_CHARS {
+        return rendered;
+    }
+    let head: String = rendered.chars().take(ARG_LOG_MAX_CHARS).collect();
+    format!("{head}…（已截断，共 {total} 字符）")
+}
+
 /// 工具输出转文本：字符串取原文，其余取 JSON 字面量。
 fn tool_content(content: &Value) -> String {
     match content {
@@ -321,6 +401,101 @@ mod tests {
             tool.clone(),
         );
         (registry, tool)
+    }
+
+    /// 一段可断言的日志缓冲区（配合 `tracing` 的线程局部订阅者使用）。
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturedLog {
+        /// 在当前线程装上订阅者；返回的 guard 析构即卸载。
+        fn install(&self) -> tracing::subscriber::DefaultGuard {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(self.clone())
+                .with_max_level(tracing::Level::DEBUG)
+                .with_ansi(false)
+                .without_time()
+                .finish();
+            tracing::subscriber::set_default(subscriber)
+        }
+
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().expect("日志缓冲区锁被毒化")).to_string()
+        }
+    }
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("日志缓冲区锁被毒化")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+        type Writer = CapturedLog;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// 工具执行失败时，日志必须带上 **LLM 实际传的入参**。
+    ///
+    /// 这是失败现场唯一的证据：错误信息只会说「找不到指定的路径」/「program not found」，
+    /// 而「它到底传了哪条路径、哪条命令」只在入参里 —— 少了它就只能靠错误码反推。
+    #[tokio::test]
+    async fn failed_tool_call_logs_its_arguments() {
+        let captured = CapturedLog::default();
+        let _guard = captured.install();
+
+        // 故意调一个没注册的工具：`call_tool` 走 Err 分支（与 builtin_execute_command
+        // 在 Windows 上拿不到可执行文件时是同一条路径）。
+        let ai = FakeAiClient::new(vec![tool_response(
+            "call-1",
+            "builtin_execute_command",
+            json!({"command": "echo 1 >> text.txt", "args": []}),
+            10,
+            5,
+        )]);
+        let (registry, _tool) = registry_with("noop", json!("x"), false);
+        let step_def = step("#E1");
+        let sink = RecordingSink::default();
+
+        let result = run_step(
+            StepInput {
+                step: &step_def,
+                intent: "做事",
+                prior: &[],
+                tools: &[],
+                index: 1,
+            },
+            &(ai as Arc<dyn AiClient>),
+            &registry,
+            &cfg(MAX_ROUNDS),
+            &sink,
+            None,
+        )
+        .await;
+
+        assert!(result.record.tool_calls > 0, "应当发生过工具调用");
+        let log = captured.text();
+        // 精确到「失败那一行」：缓冲区里另有一条 debug 级「工具调用入参」，
+        // 若只断言整段日志含入参，就分不清失败行自己到底带没带。
+        let failed_line = log
+            .lines()
+            .find(|line| line.contains("工具执行失败"))
+            .unwrap_or_else(|| panic!("没有记下「工具执行失败」这一行：{log}"));
+        assert!(
+            failed_line.contains("echo 1 >> text.txt"),
+            "失败行必须带上 LLM 实际传的入参，否则无从分析：{failed_line}"
+        );
     }
 
     #[tokio::test]

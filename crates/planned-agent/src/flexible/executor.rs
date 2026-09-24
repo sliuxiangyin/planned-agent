@@ -75,6 +75,16 @@ impl FlexibleExecutor {
         sink.emit(PlanRunEvent::RunStarted {
             total_steps: template.steps.len(),
         });
+        // 执行链路原先一条日志都没有：失败原因只进事件/报告（只有 UI 看得到），
+        // 事后排查日志里只能看到「底层在干活」的痕迹。这里把关键节点补齐。
+        tracing::info!(
+            steps = template.steps.len(),
+            model = %self.ai.model_name(),
+            max_rounds_per_step = self.cfg.max_rounds_per_step,
+            allowed_tools = ?self.cfg.allowed_tools,
+            task = %template.task.chars().take(80).collect::<String>(),
+            "灵活计划开始执行"
+        );
 
         let tools = self.tool_definitions();
         let mut store: HashMap<String, String> = HashMap::new();
@@ -94,6 +104,7 @@ impl FlexibleExecutor {
                     "前序步骤失败"
                 };
                 records.push(placeholder_record(index, step, StepStatus::Skipped, Some(reason)));
+                tracing::info!(step = index, reason, "步骤跳过");
                 continue;
             }
 
@@ -101,6 +112,7 @@ impl FlexibleExecutor {
                 Ok(intent) => intent,
                 Err(err) => {
                     let message = err.to_string();
+                    tracing::warn!(step = index, error = %message, "步骤参数展开失败，该步失败");
                     sink.emit(PlanRunEvent::Failed {
                         index: Some(index),
                         error: message.clone(),
@@ -119,6 +131,12 @@ impl FlexibleExecutor {
                 index,
                 intent: intent.clone(),
             });
+            tracing::info!(
+                step = index,
+                total = template.steps.len(),
+                intent = %intent.chars().take(80).collect::<String>(),
+                "步骤开始"
+            );
 
             let prior = collect_prior(step, &store);
             let result = run_step(
@@ -140,11 +158,31 @@ impl FlexibleExecutor {
             if let Some(output) = &result.output {
                 store.insert(step.result_reference.clone(), output.clone());
             }
+            let record = result.record;
+            if record.status == StepStatus::Failed {
+                tracing::warn!(
+                    step = index,
+                    rounds = record.rounds,
+                    tool_calls = record.tool_calls,
+                    duration_ms = record.duration_ms,
+                    error = record.error.as_deref().unwrap_or("未记录原因"),
+                    "步骤失败"
+                );
+            } else {
+                tracing::info!(
+                    step = index,
+                    status = ?record.status,
+                    rounds = record.rounds,
+                    tool_calls = record.tool_calls,
+                    duration_ms = record.duration_ms,
+                    "步骤结束"
+                );
+            }
             sink.emit(PlanRunEvent::StepFinished {
                 index,
-                record: result.record.clone(),
+                record: record.clone(),
             });
-            records.push(result.record);
+            records.push(record);
         }
 
         // 只有每一步都 Done 才算成功（空模板不算成功）。
@@ -162,6 +200,37 @@ impl FlexibleExecutor {
             tool_calls: records.iter().map(|record| record.tool_calls).sum(),
             steps: records,
         };
+        if report.success {
+            tracing::info!(
+                steps = report.steps.len(),
+                duration_ms = report.total_duration_ms,
+                prompt_tokens = report.prompt_tokens,
+                completion_tokens = report.completion_tokens,
+                tool_calls = report.tool_calls,
+                "灵活计划执行成功"
+            );
+        } else {
+            let failed = report
+                .steps
+                .iter()
+                .filter(|record| record.status == StepStatus::Failed)
+                .count();
+            let skipped = report
+                .steps
+                .iter()
+                .filter(|record| record.status == StepStatus::Skipped)
+                .count();
+            tracing::warn!(
+                failed,
+                skipped,
+                steps = report.steps.len(),
+                duration_ms = report.total_duration_ms,
+                prompt_tokens = report.prompt_tokens,
+                completion_tokens = report.completion_tokens,
+                tool_calls = report.tool_calls,
+                "灵活计划执行结束：未全部成功"
+            );
+        }
         sink.emit(PlanRunEvent::RunFinished {
             report: report.clone(),
         });

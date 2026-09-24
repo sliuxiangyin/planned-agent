@@ -380,7 +380,32 @@ pub fn PlanLeftPanel(
                     hint: hint.clone(),
                     is_running: is_running,
                     can_run: can_run,
-                    error: run_snapshot.as_ref().and_then(|snapshot| snapshot.error.clone()),
+                    error: run_snapshot.as_ref().and_then(|snapshot| {
+                        // `snapshot.error` **只在「整次失败」时才有值**（如执行器异常退出）；
+                        // 单步失败的原因在 `steps[].error` 里 —— 只读前者会「显示失败但不说为什么」，
+                        // 这正是排查时最要命的一条。故这里回退到第一个失败步的原因。
+                        snapshot.error.clone().or_else(|| {
+                            let failed = snapshot
+                                .steps
+                                .iter()
+                                .filter(|step| step.phase == StepPhase::Failed)
+                                .collect::<Vec<_>>();
+                            let first = failed.first()?;
+                            let reason = first
+                                .error
+                                .clone()
+                                .unwrap_or_else(|| "未记录原因".to_string());
+                            Some(if failed.len() > 1 {
+                                format!(
+                                    "步骤 {} 失败（共 {} 步失败）：{reason}",
+                                    first.index + 1,
+                                    failed.len()
+                                )
+                            } else {
+                                format!("步骤 {} 失败：{reason}", first.index + 1)
+                            })
+                        })
+                    }),
                     on_run: on_run,
                     on_stop: on_stop,
                 }

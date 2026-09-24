@@ -59,10 +59,12 @@ pub fn start_run_with_template(
     template: FlexiblePlanTemplate,
     params: PlanRunParams,
 ) -> Result<(), String> {
-    let client = ai
-        .manager
-        .default()
-        .map_err(|error| format!("AI 客户端不可用：{error}"))?;
+    let client = ai.manager.default().map_err(|error| {
+        // 启动失败原先只弹 toast，日志里没有任何痕迹，事后无从追查 —— 这里补上。
+        let reason = format!("AI 客户端不可用：{error}");
+        tracing::warn!(session = %session_id, reason = %reason, "执行未启动");
+        reason
+    })?;
 
     service.start(RunRequest {
         session_id,

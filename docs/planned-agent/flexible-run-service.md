@@ -1,7 +1,7 @@
 # Flexible Run Service —— 灵活计划执行服务（宿主侧）
 
 > 状态：**已实现（v2 零端口）** —— 内核 `cargo test -p planned-agent --lib flexible::` →
-> **54 passed / 0 failed**；GUI `cargo test -p planned-agent-gui --bins` → **55 passed / 0 failed**；
+> **55 passed / 0 failed**；GUI `cargo test -p planned-agent-gui --bins` → **55 passed / 0 failed**；
 > `cargo check -p planned-agent-gui --all-targets` 通过。实现记录见 §11，v1 → v2 重构说明见 §12。
 > 上游契约：[`flexible-executor.md`](./flexible-executor.md)（执行器本体，已完成阶段 0–4）
 > 本文件取代：[`flexible-run-spawn-forever-ui-channel.md`](./flexible-run-spawn-forever-ui-channel.md)（旧宿主通道设计）与

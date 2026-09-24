@@ -19,6 +19,8 @@ use planned_agent_tool_manager::ToolRegistry;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
 
+use tracing::Instrument;
+
 use crate::flexible::event::{PlanRunEvent, PlanRunSink};
 use crate::flexible::executor::FlexibleExecutor;
 
@@ -132,6 +134,14 @@ impl RunLoop {
         self.store.update(&session_id, |_| {
             Some(RunSnapshot::started(session_id.clone(), run_id, &template))
         });
+        tracing::info!(
+            session = %session_id,
+            run_id,
+            steps = template.steps.len(),
+            provider = %client.provider_name(),
+            model = %client.model_name(),
+            "受理执行请求"
+        );
 
         let sink = ServiceSink {
             tx: self.tx.clone(),
@@ -141,7 +151,10 @@ impl RunLoop {
         let store = self.store.clone();
         let tx = self.tx.clone();
         let tools = self.tools.clone();
-        tasks.push(Box::pin(async move {
+        // 整个执行任务包在 span 里：executor / step 与它们内部调用的底层 crate（ai-openai、
+        // tool-manager）的日志都会带上这个前缀，多会话并发时能分清是谁的日志。
+        let span = tracing::info_span!("flexible_run", session = %session_id, run_id);
+        let run = async move {
             let executor = FlexibleExecutor::new(client, tools, config);
             // `catch_unwind`：执行任务与常驻循环在**同一个 future** 里被轮询，任务 panic 会
             // unwind 穿过 `core.run` 把整个服务带走 —— 那时所有会话都停了，而 `start` 依旧
@@ -179,7 +192,8 @@ impl RunLoop {
                     },
                 });
             }
-        }));
+        };
+        tasks.push(Box::pin(run.instrument(span)));
     }
 
     /// 处理执行事件：按 `run_id` 丢弃过期事件后并入快照；终态时收尾。
@@ -196,8 +210,9 @@ impl RunLoop {
             .update(session_id, move |current| {
                 let mut snapshot = current?; // 没有快照（已被删除）→ 丢弃
                 if snapshot.run_id != run_id {
-                    // 上一轮任务的迟到事件：原样写回。换来一条冗余推送（对订阅者无害），
-                    // 换得 `accepted` 能据 `run_id` 判断「本轮事件是否真被采纳」。
+                    // 上一轮任务的迟到事件：原样写回。不能返回 `None`（那等于删除该会话状态），
+                    // 所以会换来一条无变化的冗余推送 —— 借此也能让 `accepted` 据 `run_id`
+                    // 判断「本轮事件是否真被采纳」。
                     return Some(snapshot);
                 }
                 apply_event(&mut snapshot, event);
@@ -214,6 +229,15 @@ impl RunLoop {
         // 让它的「停止」按钮失效。
         if terminal && accepted {
             self.store.clear_cancel(session_id);
+            if let Some(snapshot) = self.store.snapshot(session_id) {
+                tracing::info!(
+                    session = %session_id,
+                    run_id,
+                    status = ?snapshot.status,
+                    error = snapshot.error.as_deref().unwrap_or("-"),
+                    "执行到达终态"
+                );
+            }
         }
     }
 
@@ -596,9 +620,27 @@ mod tests {
             },
         })
         .expect("发送陈旧终态事件");
-        // 短暂让出，等循环把那条陈旧事件处理完；30ms 也给后面的断言留足了余量
-        // （`SlowAi` 的每步延时是 120ms）。
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        // 再塞一条**本轮（run_id = 2）**的可观测事件：命令通道是 FIFO，它出现即说明前面那条
+        // 陈旧终态已被处理（比用 `sleep` 赌时序确定）。
+        tx.send(RunCommand::Event {
+            session_id: "s1".to_string(),
+            run_id: 2,
+            event: PlanRunEvent::StepThought {
+                index: 1,
+                round: 1,
+                text: "同步标记".to_string(),
+            },
+        })
+        .expect("发送同步标记事件");
+        loop {
+            let update = tokio::time::timeout(Duration::from_secs(5), updates.recv())
+                .await
+                .expect("超时")
+                .expect("关闭");
+            if update.snapshot.last_thought.as_deref() == Some("同步标记") {
+                break;
+            }
+        }
 
         let current = service.snapshot("s1").expect("应有快照");
         assert_eq!(current.run_id, 2);
