@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 use dioxus_primitives::toast::{use_toast, ToastOptions};
-use planned_agent::flexible::run_service::StepPhase;
+use planned_agent::flexible::run_service::{StepPhase, StepTrackLine};
 use planned_agent::flexible::{render_lenient, PlanInput, PlanRunParams, PlanStep};
 use serde_json::Value;
 
@@ -44,6 +44,8 @@ pub(crate) struct RenderedStep {
     pub missing: Vec<String>,
     /// 执行相位（未执行时一律 `Pending`）。
     pub phase: StepPhase,
+    /// 本步的执行轨迹（think box 数据）：思考行与工具动作行按发生顺序排列。
+    pub track: Vec<StepTrackLine>,
 }
 
 /// 按当前参数值展开模板步骤。
@@ -67,8 +69,9 @@ fn render_steps(steps: &[PlanStep], values: &BTreeMap<String, String>) -> Vec<Re
                 intent,
                 expected_output,
                 missing,
-                // 相位由容器在执行状态就绪后叠加（见 PlanLeftPanel）
+                // 相位与轨迹都由容器在执行状态就绪后叠加（见 PlanLeftPanel）
                 phase: StepPhase::Pending,
+                track: Vec::new(),
             }
         })
         .collect()
@@ -226,6 +229,10 @@ pub fn PlanLeftPanel(
     if let Some(snapshot) = &run_snapshot {
         for (offset, step) in rendered_steps.iter_mut().enumerate() {
             step.phase = snapshot.phase_of(offset);
+            // 轨迹只在执行期间由服务累积（快照里没有的步骤就是空轨迹）
+            if let Some(executed) = snapshot.steps.get(offset) {
+                step.track = executed.track.clone();
+            }
         }
     }
 

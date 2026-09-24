@@ -281,7 +281,7 @@ mod tests {
     use crate::flexible::template::{FlexiblePlanTemplate, PlanStep};
     use crate::flexible::testing::{text_response, FakeAiClient};
 
-    use super::super::types::{RunUpdate, SessionFilter, StepPhase, SubscriptionId};
+    use super::super::types::{RunUpdate, SessionFilter, StepPhase, StepTrackLine, SubscriptionId};
     use super::super::RunService;
 
     // ───────────────────────────── 测试桩 ─────────────────────────────
@@ -531,7 +531,7 @@ mod tests {
         let mut updates = subscribe(&store, "s1");
         service.start(request("s1", ai.clone()));
 
-        // 伪造一条「上一轮」的思考：若未被丢弃，last_thought 会被污染
+        // 伪造一条「上一轮」的思考：若未被丢弃，它会被并进该步的轨迹
         tx.send(RunCommand::Event {
             session_id: "s1".to_string(),
             run_id: 999,
@@ -545,10 +545,17 @@ mod tests {
 
         let snapshot = wait_until_finished(&mut updates).await;
         assert_eq!(snapshot.status, RunStatus::Succeeded);
-        assert_ne!(
-            snapshot.last_thought.as_deref(),
-            Some("陈旧事件"),
-            "旧 run_id 的事件不该被采纳"
+        let thoughts = snapshot.steps[0]
+            .track
+            .iter()
+            .filter_map(|line| match line {
+                StepTrackLine::Thought { text } => Some(text.as_str()),
+                StepTrackLine::Tool { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !thoughts.contains(&"陈旧事件"),
+            "旧 run_id 的事件不该被采纳：{thoughts:?}"
         );
     }
 
@@ -637,7 +644,12 @@ mod tests {
                 .await
                 .expect("超时")
                 .expect("关闭");
-            if update.snapshot.last_thought.as_deref() == Some("同步标记") {
+            let has_marker = update.snapshot.steps.iter().any(|step| {
+                step.track.iter().any(|line| {
+                    matches!(line, StepTrackLine::Thought { text } if text == "同步标记")
+                })
+            });
+            if has_marker {
                 break;
             }
         }

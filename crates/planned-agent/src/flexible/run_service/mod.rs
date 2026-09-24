@@ -33,7 +33,7 @@ pub use state::apply_event;
 pub use store::RunStore;
 pub use types::{
     RunCommand, RunRequest, RunSnapshot, RunStatus, RunUpdate, SessionFilter, SessionId, StepPhase,
-    StepSnapshot, SubscriptionId,
+    StepSnapshot, StepTrackLine, SubscriptionId,
 };
 
 use std::sync::Arc;

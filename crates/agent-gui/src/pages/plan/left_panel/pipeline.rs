@@ -8,7 +8,7 @@
 
 use dioxus::prelude::*;
 
-use planned_agent::flexible::run_service::StepPhase;
+use planned_agent::flexible::run_service::{StepPhase, StepTrackLine};
 
 use super::left_panel::{missing_label, RenderedStep};
 
@@ -126,6 +126,11 @@ pub fn PipelineView(
                                             "⚠ 未填参数: {missing_label(&step.missing)}"
                                         }
                                     }
+                                    // 执行轨迹：跑过的步骤留下「怎么走过来的」，正在跑的实时长；
+                                    // 未执行的步骤不占版面。
+                                    if !step.track.is_empty() || step.phase == StepPhase::Running {
+                                        ThinkBox { phase: step.phase, track: step.track.clone() }
+                                    }
                                 }
                             }
                         }
@@ -143,6 +148,42 @@ pub fn PipelineView(
                         span { class: "plan-pipeline__statusbar-item", "📝 " }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// 单步的思考与动作轨迹（think box）。
+///
+/// `$` 行 = 该步发起的一次工具调用（工具名 + 关键入参）；
+/// `>` 行 = 该轮 LLM 的思考文本。
+/// 轨迹由执行服务**累积**推送（`StepSnapshot::track`），故执行结束后仍能回看这一步的来路。
+#[component]
+fn ThinkBox(phase: StepPhase, track: Vec<StepTrackLine>) -> Element {
+    rsx! {
+        div { class: "plan-think-box",
+            if track.is_empty() {
+                // 只有「正在跑但还没产出第一行」会走到这里：未执行的步骤外层不渲染本块。
+                span { class: "plan-think-box__line plan-think-box__empty", "正在思考…" }
+            }
+            for (index, line) in track.iter().enumerate() {
+                match line {
+                    StepTrackLine::Tool { tool, args, .. } => rsx! {
+                        span { key: "{index}", class: "plan-think-box__line",
+                            span { class: "plan-think-box__prompt", "$ " }
+                            "{tool} {args}"
+                        }
+                    },
+                    StepTrackLine::Thought { text } => rsx! {
+                        span { key: "{index}", class: "plan-think-box__line",
+                            span { class: "plan-think-box__result", "> " }
+                            "{text}"
+                        }
+                    },
+                }
+            }
+            if phase == StepPhase::Running {
+                span { class: "plan-think-box__line plan-think-box__cursor" }
             }
         }
     }

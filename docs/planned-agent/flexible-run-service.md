@@ -113,12 +113,11 @@ pub struct RunSnapshot {
     pub status: RunStatus,
     pub total_steps: usize,
     pub current_step: Option<usize>,  // ← 「当前进度」
-    pub steps: Vec<StepSnapshot>,
+    pub steps: Vec<StepSnapshot>,     // 每步含 track：think box 的 $ / > 行轨迹
     pub started_at_ms: Option<u64>,
     pub finished_at_ms: Option<u64>,
     pub error: Option<String>,        // 整次失败的原因（单步失败的原因在 steps[].error）
     pub report: Option<PlanRunReport>,// 终态时带上（STATS 块直接用）
-    pub last_thought: Option<String>, // 最近一条 StepThought（THINK 终端）
 }
 
 impl RunSnapshot {
@@ -184,9 +183,9 @@ impl RunStore {
 |---|---|
 | `RunStarted { total_steps }` | `status=Running`、`started_at_ms`、`steps` 初始化 `total_steps` 个 `Pending` |
 | `StepStarted { index, intent }` | `current_step=Some(index)`；该步 `Running` + `intent` |
-| `StepThought { index, round, text }` | `last_thought = Some(text)`（不塞进每步大字段） |
-| `StepToolCall { index, tool, ok }` | 该步 `tool_calls += 1`（`ok=false` 不改相位，只在 UI 标红） |
-| `StepFinished { index, record }` | 该步 `phase ← record.status`、耗时/token/tool_calls/error |
+| `StepThought { index, round, text }` | 追加进该步 `track`（think box 的 `>` 行） |
+| `StepToolCall { index, tool, args, ok }` | 该步 `tool_calls += 1`；追加进 `track`（think box 的 `$` 行，`args` 是关键入参） |
+| `StepFinished { index, record }` | 该步 `phase ← record.status`、耗时/token/tool_calls/error（`track` 在整体覆盖前接回） |
 | `RunFinished { report }` | `status = if report.success { Succeeded } else { Failed }`、`finished_at_ms`、`report` |
 | `Failed { index: Some(i), error }` | 该步 `Failed` + `error` |
 | `Failed { index: None, error }` | 整次 `status=Failed` + `error`（执行器异常退出 / panic 时由服务兜底补发） |
@@ -316,10 +315,10 @@ pub fn use_run_subscription(
 
 | 层 | 用例 |
 |---|---|
-| `state.rs`（纯函数） | 事件序列 → 期望快照：正常两步、`StepFinished` 带 `record.status=Failed`、`RunFinished{success:false}`、`Failed{index:None}`、`StepThought` 覆盖 `last_thought` |
+| `state.rs`（纯函数） | 事件序列 → 期望快照：正常两步、`StepFinished` 带 `record.status=Failed`、`RunFinished{success:false}`、`Failed{index:None}`、`StepThought`/`StepToolCall` 按序追加进 `track`、`StepFinished` 与 `RunFinished` 覆盖后 `track` 仍在 |
 | `store.rs` | `subscribe` 即回放；`unsubscribe` 后不再收到；`SessionFilter::One` 不串台；订阅者 drop 后自动回收登记；`snapshot` 空表返回 `None` |
 | `core.rs`（集成，用 `flexible::testing::FakeAiClient` + `SlowAi`） | `Start(RunRequest)` 正常跑完 → `Succeeded` + `report.success` + 可同步查询；进度逐步推进（`current_step` 1→2）；`stop` → `Cancelled` + 后续步骤 `Skipped`；同会话重入被忽略（只跑一轮）；`run_id` 去重（手工塞旧 `Event` 不影响新快照）；单步失败 → 报告形状正确 |
-| 验收命令 | `cargo test -p planned-agent --lib flexible::`（**55 passed**）与 `cargo test -p planned-agent-gui --bins`（**55 passed**） |
+| 验收命令 | `cargo test -p planned-agent --lib flexible::`（**57 passed**）与 `cargo test -p planned-agent-gui --bins`（**55 passed**） |
 
 GUI 侧不含逻辑，只做接线，靠 `cargo check -p planned-agent-gui` + 手工验收（执行 / 停止 / 切页不中断 / 切会话各查各的）。
 

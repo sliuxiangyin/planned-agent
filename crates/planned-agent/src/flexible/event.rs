@@ -27,6 +27,11 @@ pub enum PlanRunEvent {
     StepToolCall {
         index: usize,
         tool: String,
+        /// 关键入参（**已渲染成一行**，供进度展示直接显示，如 `C:/Users/x/Downloads`）。
+        ///
+        /// 这里给渲染好的字符串而非原始 JSON：消费方（宿主 UI）不必再关心该挑哪几个字段，
+        /// 快照也能直接把它当作轨迹的一行存下来。
+        args: String,
         /// 工具是否执行成功（`!ToolResult.is_error`）。
         ok: bool,
     },

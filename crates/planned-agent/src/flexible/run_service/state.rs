@@ -7,7 +7,7 @@
 
 use crate::flexible::event::PlanRunEvent;
 
-use super::types::{now_ms, RunSnapshot, RunStatus, StepPhase, StepSnapshot};
+use super::types::{now_ms, RunSnapshot, RunStatus, StepPhase, StepSnapshot, StepTrackLine};
 
 /// 把一个执行事件并入快照。
 ///
@@ -24,15 +24,27 @@ pub fn apply_event(snapshot: &mut RunSnapshot, event: PlanRunEvent) {
             step.intent = intent;
             step.phase = StepPhase::Running;
         }
-        // 当前 LLM 非流式：一轮一块文本，只留最近一条即可满足展示。
-        PlanRunEvent::StepThought { text, .. } => {
-            snapshot.last_thought = Some(text);
+        // 当前 LLM 非流式：一轮一块文本，逐条累积进该步的轨迹（think box 要看到完整推理过程）。
+        PlanRunEvent::StepThought { index, text, .. } => {
+            snapshot
+                .step_or_insert(index)
+                .track
+                .push(StepTrackLine::Thought { text });
         }
-        PlanRunEvent::StepToolCall { index, .. } => {
-            snapshot.step_or_insert(index).tool_calls += 1;
+        PlanRunEvent::StepToolCall {
+            index, tool, args, ok, ..
+        } => {
+            let step = snapshot.step_or_insert(index);
+            step.tool_calls += 1;
+            step.track.push(StepTrackLine::Tool { tool, args, ok });
         }
         PlanRunEvent::StepFinished { index, record } => {
-            *snapshot.step_or_insert(index) = StepSnapshot::from_record(&record);
+            let step = snapshot.step_or_insert(index);
+            // 轨迹是逐条攒出来的，而 `from_record` 会**整体覆盖**这一步 ——
+            // 覆盖前先接住它，否则执行一结束 think box 就空了。
+            let track = std::mem::take(&mut step.track);
+            *step = StepSnapshot::from_record(&record);
+            step.track = track;
         }
         PlanRunEvent::RunFinished { report } => {
             snapshot.status = if report.success {
@@ -45,10 +57,21 @@ pub fn apply_event(snapshot: &mut RunSnapshot, event: PlanRunEvent) {
             // 报告没带步骤时保留现有步，别把已展示的进度清掉。
             if !report.steps.is_empty() {
                 snapshot.total_steps = report.steps.len();
+                // 同上：报告会整体重建步骤，先把已攒下的轨迹按 index 收好再重建。
+                let mut tracks = std::mem::take(&mut snapshot.steps)
+                    .into_iter()
+                    .map(|step| (step.index, step.track))
+                    .collect::<std::collections::HashMap<_, _>>();
                 snapshot.steps = report
                     .steps
                     .iter()
-                    .map(StepSnapshot::from_record)
+                    .map(|record| {
+                        let mut step = StepSnapshot::from_record(record);
+                        if let Some(track) = tracks.remove(&step.index) {
+                            step.track = track;
+                        }
+                        step
+                    })
                     .collect::<Vec<_>>();
             }
             snapshot.report = Some(report);
@@ -162,6 +185,7 @@ mod tests {
             PlanRunEvent::StepToolCall {
                 index: 1,
                 tool: "read_file".to_string(),
+                args: "C:/tmp/a.txt".to_string(),
                 ok: true,
             },
         );
@@ -175,7 +199,6 @@ mod tests {
                 text: "先读文件".to_string(),
             },
         );
-        assert_eq!(snapshot.last_thought.as_deref(), Some("先读文件"));
 
         apply_event(
             &mut snapshot,
@@ -188,11 +211,35 @@ mod tests {
         assert_eq!(snapshot.progressed(), 1);
         assert_eq!(snapshot.steps[0].tool_calls, 1, "记录里的计数应与累计一致");
         assert_eq!(snapshot.steps[0].duration_ms, 12);
+        // 轨迹按发生顺序累积，且必须**扛住 `from_record` 的整体覆盖** ——
+        // `StepFinished` 走的就是整体覆盖那条路，不接住它 think box 一执行完就空。
+        assert_eq!(
+            snapshot.steps[0].track,
+            vec![
+                StepTrackLine::Tool {
+                    tool: "read_file".to_string(),
+                    args: "C:/tmp/a.txt".to_string(),
+                    ok: true,
+                },
+                StepTrackLine::Thought {
+                    text: "先读文件".to_string(),
+                },
+            ],
+            "轨迹应累积，并在 StepFinished 覆盖后仍在"
+        );
     }
 
     #[test]
     fn run_finished_overwrites_steps_from_report() {
         let mut snapshot = snapshot();
+        apply_event(
+            &mut snapshot,
+            PlanRunEvent::StepThought {
+                index: 1,
+                round: 1,
+                text: "先读文件".to_string(),
+            },
+        );
         // 只发第一次完成：第二步跳过时执行器**不发** StepFinished
         apply_event(
             &mut snapshot,
@@ -226,6 +273,14 @@ mod tests {
         assert_eq!(snapshot.steps[1].error.as_deref(), Some("前序步骤失败"));
         assert!(snapshot.finished_at_ms.is_some());
         assert_eq!(snapshot.report.as_ref(), Some(&report));
+        // 报告重建步骤时轨迹要按 index 接回来，不能随重建一起丢
+        assert_eq!(
+            snapshot.steps[0].track,
+            vec![StepTrackLine::Thought {
+                text: "先读文件".to_string(),
+            }],
+            "RunFinished 重建步骤后轨迹不能丢"
+        );
     }
 
     #[test]

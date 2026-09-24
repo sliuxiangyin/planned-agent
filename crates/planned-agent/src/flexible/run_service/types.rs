@@ -106,6 +106,22 @@ impl StepPhase {
     }
 }
 
+/// 单步执行轨迹的一行 —— 即 think box 里的一行。
+///
+/// 轨迹是**按发生顺序追加**的：每轮 LLM 的思考、每次工具调用各占一行。
+#[derive(Debug, Clone, PartialEq)]
+pub enum StepTrackLine {
+    /// `>` 行：LLM 这一轮的思考文本。
+    Thought { text: String },
+    /// `$` 行：一次工具调用（`args` 已渲染成一行关键入参）。
+    Tool {
+        tool: String,
+        args: String,
+        /// 该次调用是否成功（UI 暂时不显示，留着以便将来区分失败调用）。
+        ok: bool,
+    },
+}
+
 /// 单个步骤的快照。
 #[derive(Debug, Clone, PartialEq)]
 pub struct StepSnapshot {
@@ -123,6 +139,9 @@ pub struct StepSnapshot {
     pub completion_tokens: u32,
     pub tool_calls: usize,
     pub error: Option<String>,
+    /// 本步的执行轨迹（think box 的数据）。**跨事件累积**；
+    /// 注意 `from_record` 不产出它，由 `state.rs` 在覆盖前接回。
+    pub track: Vec<StepTrackLine>,
 }
 
 impl StepSnapshot {
@@ -139,6 +158,7 @@ impl StepSnapshot {
             completion_tokens: 0,
             tool_calls: 0,
             error: None,
+            track: Vec::new(),
         }
     }
 
@@ -155,6 +175,8 @@ impl StepSnapshot {
             completion_tokens: record.completion_tokens,
             tool_calls: record.tool_calls,
             error: record.error.clone(),
+            // 轨迹不在执行记录里：由调用方按 index 接回（见 `state.rs`）。
+            track: Vec::new(),
         }
     }
 
@@ -171,6 +193,7 @@ impl StepSnapshot {
             completion_tokens: 0,
             tool_calls: 0,
             error: None,
+            track: Vec::new(),
         }
     }
 
@@ -190,8 +213,6 @@ pub struct RunSnapshot {
     /// 当前执行到的步骤序号；未开始为 `None`。
     pub current_step: Option<usize>,
     pub steps: Vec<StepSnapshot>,
-    /// 最近一条思考文本（THINK 展示用）。
-    pub last_thought: Option<String>,
     pub started_at_ms: u64,
     pub finished_at_ms: Option<u64>,
     /// 整次失败的原因（单步失败的原因在 `steps[].error`）。
@@ -220,7 +241,6 @@ impl RunSnapshot {
             total_steps: steps.len(),
             current_step: None,
             steps,
-            last_thought: None,
             started_at_ms: now_ms(),
             finished_at_ms: None,
             error: None,

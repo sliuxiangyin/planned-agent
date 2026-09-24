@@ -186,6 +186,8 @@ pub(crate) async fn run_step(
             // 入参是排查工具失败的**唯一现场证据**：错误信息只说「找不到指定的路径」/「program not
             // found」，而「它到底传了哪条路径 / 传的命令长什么样」只在入参里。渲染一次，三处复用。
             let args_desc = describe_arguments(&arguments);
+            // `$` 行只给「关键入参」：短、像命令行（与日志用的全量 JSON 分开）。
+            let args_line = describe_tool_args(&arguments);
             tracing::debug!(
                 step = input.index,
                 round = rounds,
@@ -233,6 +235,7 @@ pub(crate) async fn run_step(
             sink.emit(PlanRunEvent::StepToolCall {
                 index: input.index,
                 tool: tool_name,
+                args: args_line,
                 ok: !is_error,
             });
             messages.push(tool_message(&call.id, &tool_output));
@@ -334,6 +337,44 @@ fn describe_arguments(arguments: &Value) -> String {
     }
     let head: String = rendered.chars().take(ARG_LOG_MAX_CHARS).collect();
     format!("{head}…（已截断，共 {total} 字符）")
+}
+
+/// 把工具入参渲染成 `$` 行上的「关键参数」。
+///
+/// 与 [`describe_arguments`]（日志用、全量 JSON）不同，这里追求**像一条命令行**：
+/// `{"command":"ls","args":["C:/x"]}` → `ls C:/x`，`{"path":"C:/x"}` → `C:/x`。
+/// 太长会毁掉终端的可读性，故单行截断。
+fn describe_tool_args(arguments: &Value) -> String {
+    const ARGS_LINE_MAX_CHARS: usize = 120;
+
+    let rendered = match arguments {
+        Value::Object(map) => {
+            // ① 「程序 + 参数」是执行类入参的常见形态，直接拼成命令行。
+            if let Some(Value::String(command)) = map.get("command") {
+                let args = match map.get("args") {
+                    Some(Value::Array(items)) => {
+                        items.iter().map(tool_content).collect::<Vec<_>>().join(" ")
+                    }
+                    Some(other) => tool_content(other),
+                    None => String::new(),
+                };
+                format!("{command} {args}").trim_end().to_string()
+            } else if map.len() == 1 {
+                // ② 单字段（`{"path": ...}` / `{"query": ...}`）直接给值，读起来最像参数。
+                map.values().next().map(tool_content).unwrap_or_default()
+            } else {
+                // ③ 其余退回紧凑 JSON：字段名本身有信息量，不该丢。
+                arguments.to_string()
+            }
+        }
+        other => tool_content(other),
+    };
+
+    if rendered.chars().count() <= ARGS_LINE_MAX_CHARS {
+        return rendered;
+    }
+    let head: String = rendered.chars().take(ARGS_LINE_MAX_CHARS).collect();
+    format!("{head}…")
 }
 
 /// 工具输出转文本：字符串取原文，其余取 JSON 字面量。
@@ -572,12 +613,19 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].1, json!({"path": "a.txt"}));
 
-        // 事件流：StepToolCall(ok=true) 出现
+        // 事件流：StepToolCall(ok=true) 出现，且带着 `$` 行要显示的关键入参
         let events = sink.events();
         assert!(events.iter().any(|event| matches!(
             event,
             PlanRunEvent::StepToolCall { tool, ok: true, .. } if tool == "read"
         )));
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                PlanRunEvent::StepToolCall { args, .. } if args == "a.txt"
+            )),
+            "事件要带上渲染好的关键入参（单个 path 字段直接给值）：{events:?}"
+        );
     }
 
     #[tokio::test]
@@ -715,5 +763,33 @@ mod tests {
         assert_eq!(result.record.status, StepStatus::Failed);
         assert_eq!(result.record.rounds, 0);
         assert_eq!(result.record.call_usages.len(), 0);
+    }
+
+    /// `$` 行的渲染规则：要像一条命令行，且不能把终端撑爆。
+    #[test]
+    fn tool_args_render_like_a_command_line() {
+        // 「程序 + 参数」拼成命令行
+        assert_eq!(
+            describe_tool_args(&json!({"command": "ls", "args": ["C:/x"]})),
+            "ls C:/x"
+        );
+        // 单字段直接给值（不带 JSON 括号）—— `{"path": ...}` 是最常见的形态
+        assert_eq!(
+            describe_tool_args(&json!({"path": "C:/Users/x/a.txt"})),
+            "C:/Users/x/a.txt"
+        );
+        assert_eq!(describe_tool_args(&json!({"command": "dir"})), "dir");
+        // 字段多且不认识 → 退回紧凑 JSON（字段名本身有信息量，不该丢）
+        assert_eq!(
+            describe_tool_args(&json!({"a": 1, "b": 2})),
+            "{\"a\":1,\"b\":2}"
+        );
+        // 超长截断
+        let rendered = describe_tool_args(&json!({ "path": "x".repeat(400) }));
+        assert!(
+            rendered.chars().count() <= 121,
+            "超长入参应截断，实际 {} 字符",
+            rendered.chars().count()
+        );
     }
 }
