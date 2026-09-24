@@ -20,7 +20,7 @@ pub enum StepStatus {
 /// 一次 LLM 请求的 token 用量。
 ///
 /// 一个步骤可能发多次 LLM 请求（每轮工具循环一次），故单步持有 `Vec<CallUsage>`。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CallUsage {
     /// 该步内的轮次序号（从 1 开始）。
     pub round: usize,
@@ -29,7 +29,7 @@ pub struct CallUsage {
 }
 
 /// 单步执行记录。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StepRunRecord {
     /// 步骤序号（从 1 开始，与事件里的 `index` 一致）。
     pub index: usize,
@@ -67,7 +67,7 @@ impl StepRunRecord {
 }
 
 /// 一次完整执行的报告。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlanRunReport {
     /// 是否全部步骤成功。
     pub success: bool,

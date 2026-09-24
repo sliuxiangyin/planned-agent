@@ -4,14 +4,16 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use dioxus::prelude::*;
-use planned_agent::flexible::{render_lenient, PlanInput, PlanStep};
+use planned_agent::flexible::{render_lenient, PlanInput, PlanRunParams, PlanStep};
 use serde_json::Value;
 
+use crate::context::require_resource;
 use crate::components::dropdown_menu::{
     DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 };
 use crate::components::page_header::PageHeader;
 use crate::pages::plan::shared::session::SessionManager;
+use crate::services::flexible_run_manager::{FlexibleRunManager, RunStatus, StepPhase};
 use crate::services::plans_flexible_service::{PlanTemplateState, PlansFlexibleService};
 use crate::storage::entities::plan;
 
@@ -38,6 +40,8 @@ pub(crate) struct RenderedStep {
     pub expected_output: String,
     /// 本步骤里未填（或缺失）的参数名，供 UI 提示。
     pub missing: Vec<String>,
+    /// 执行相位（未执行时一律 `Pending`）。
+    pub phase: StepPhase,
 }
 
 /// 按当前参数值展开模板步骤。
@@ -61,6 +65,8 @@ fn render_steps(steps: &[PlanStep], values: &BTreeMap<String, String>) -> Vec<Re
                 intent,
                 expected_output,
                 missing,
+                // 相位由容器在执行状态就绪后叠加（见 PlanLeftPanel）
+                phase: StepPhase::Pending,
             }
         })
         .collect()
@@ -103,8 +109,25 @@ pub(crate) fn missing_label(names: &[String]) -> String {
         .join(" ")
 }
 
-// TODO(执行接线)：接执行按钮时，把 UI 的编辑值传给 `FlexibleExecutor`，
-// 并让严格版 `render` 与宽容版对空值取一致语义（否则会「UI 报未填、执行静默传空参」）。
+/// 把 UI 的编辑态转成运行参数。
+///
+/// **空白一律视为「未填」**（这是「参数注入」与「空值语义」的落地）：只塞非空值，于是
+/// - 没填且模板也无默认值 → 该步 `render` 因缺失失败，会明确报错；
+/// - 已填 → 用用户的值。
+///
+/// 由此「预览所见」（宽容版替换）与「执行所得」（严格版）在空值上取得一致。
+/// 注意严格版 `placeholder::render` **本身**仍把空串当合法值，一致性由调用方
+/// （即本函数）负责 —— 将来若有别的调用方拼 `PlanRunParams`，需自行遵循同一条约定。
+fn build_run_params(inputs: &[PlanInput], overrides: &BTreeMap<String, String>) -> PlanRunParams {
+    let mut params = PlanRunParams::new();
+    for (name, text) in effective_param_texts(inputs, overrides) {
+        if !text.trim().is_empty() {
+            params.set(name, Value::String(text));
+        }
+    }
+    params
+}
+
 #[component]
 pub fn PlanLeftPanel(
     plan_id: String,
@@ -142,20 +165,33 @@ pub fn PlanLeftPanel(
         "尚未生成参数化模板"
     };
     // resource 尚未就绪（None）也当「未就绪」提示，避免首帧先闪一下空态。
-    let (inputs, steps, hint) = match template_res.read().as_ref() {
-        Some(Ok(PlanTemplateState::Ready(template))) => {
-            (template.inputs.clone(), template.steps.clone(), None)
-        }
-        Some(Ok(PlanTemplateState::NotReady)) => {
-            (Vec::new(), Vec::new(), Some(not_ready_hint.to_string()))
-        }
+    // 除视图数据外还留一份完整模板：执行按钮要用它启动后台任务。
+    let (ready_template, inputs, steps, hint) = match template_res.read().as_ref() {
+        Some(Ok(PlanTemplateState::Ready(template))) => (
+            Some(template.clone()),
+            template.inputs.clone(),
+            template.steps.clone(),
+            None,
+        ),
+        Some(Ok(PlanTemplateState::NotReady)) => (
+            None,
+            Vec::new(),
+            Vec::new(),
+            Some(not_ready_hint.to_string()),
+        ),
         Some(Ok(PlanTemplateState::Invalid(reason))) => (
+            None,
             Vec::new(),
             Vec::new(),
             Some(format!("模板解析失败: {reason}")),
         ),
-        Some(Err(e)) => (Vec::new(), Vec::new(), Some(format!("读取模板失败: {e}"))),
-        None => (Vec::new(), Vec::new(), Some("加载中…".to_string())),
+        Some(Err(e)) => (
+            None,
+            Vec::new(),
+            Vec::new(),
+            Some(format!("读取模板失败: {e}")),
+        ),
+        None => (None, Vec::new(), Vec::new(), Some("加载中…".to_string())),
     };
     let total_steps = steps.len();
 
@@ -173,10 +209,61 @@ pub fn PlanLeftPanel(
     // 注意它与执行路径的严格版（`render_lenient` vs `render`）有一处**已知差异**：
     // 空字符串在宽容版里算「未填」，在严格版里却是被成功代入的空值 ——
     // 所以「预览 = 执行」目前只对非空值成立，接线执行按钮时需统一（见下方 TODO）。
-    let rendered_steps = {
+    let mut rendered_steps = {
         let overrides = param_values.read();
         let values = effective_param_texts(&inputs, &overrides);
         render_steps(&steps, &values)
+    };
+
+    // ── 执行状态（app 级管理器：任务不随本组件卸载而中断）──
+    // 读 signal 即订阅：后台任务写进度 → 这里重渲染。
+    let run_mgr = require_resource::<FlexibleRunManager>();
+    let session_id = current_session.read().clone();
+    let run_state = session_id
+        .as_ref()
+        .and_then(|sid| run_mgr.states().read().get(sid).cloned());
+    // 叠加相位：执行过的步骤按真实状态上色，其余保持 Pending。
+    if let Some(state) = &run_state {
+        for (offset, step) in rendered_steps.iter_mut().enumerate() {
+            if let Some(phase) = state.phases.get(offset) {
+                step.phase = *phase;
+            }
+        }
+    }
+
+    let is_running = run_state
+        .as_ref()
+        .is_some_and(|state| state.status == RunStatus::Running);
+    // 有参数没填就禁止执行：否则要到后台报「intent 展开失败」才发现，体验差。
+    let has_missing_param = rendered_steps.iter().any(|step| !step.missing.is_empty());
+    let can_run =
+        ready_template.is_some() && session_id.is_some() && !has_missing_param && !is_running;
+
+    // 执行：把当前编辑态转成运行参数交给管理器（后台跑，与本组件存亡无关）。
+    let on_run = {
+        let run_mgr = run_mgr.clone();
+        let ready_template = ready_template.clone();
+        let inputs = inputs.clone();
+        let session_id = session_id.clone();
+        EventHandler::new(move |_: MouseEvent| {
+            let (Some(template), Some(session_id)) = (ready_template.clone(), session_id.clone())
+            else {
+                return;
+            };
+            let params = build_run_params(&inputs, &param_values.read());
+            // 启动失败（如没配 AI）已由管理器写进状态，界面从同一处读并展示
+            let _ = run_mgr.start(&session_id, template, params);
+        })
+    };
+    // 停止：唯一的中断途径。
+    let on_stop = {
+        let run_mgr = run_mgr.clone();
+        let session_id = session_id.clone();
+        EventHandler::new(move |_: MouseEvent| {
+            if let Some(session_id) = session_id.as_deref() {
+                run_mgr.stop(session_id);
+            }
+        })
     };
 
     // ── 计划元数据派生（模式 / 状态 label 与 chip class） ──
@@ -279,10 +366,19 @@ pub fn PlanLeftPanel(
                         plan_mode_label: plan_mode_label,
                         total_steps: total_steps,
                         hint: hint.clone(),
+                        report: run_state.as_ref().and_then(|state| state.report.clone()),
                     }
                 }
                 // ① PIPELINE — 执行时间线（步骤骨架来自当前会话模板）
-                PipelineView { steps: rendered_steps.clone(), hint: hint.clone() }
+                PipelineView {
+                    steps: rendered_steps.clone(),
+                    hint: hint.clone(),
+                    is_running: is_running,
+                    can_run: can_run,
+                    error: run_state.as_ref().and_then(|state| state.error.clone()),
+                    on_run: on_run,
+                    on_stop: on_stop,
+                }
 
                 // ④ HISTORY — 历史执行记录
                 HistoryView { hint: hint.clone() }

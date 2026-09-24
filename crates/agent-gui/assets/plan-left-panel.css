@@ -113,6 +113,14 @@
     background: var(--primary-color-4);
     color: var(--secondary-color-1);
 }
+.plan-bento-header-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+.plan-bento-header-btn:disabled:hover {
+    background: transparent;
+    color: var(--secondary-color-4);
+}
 
 /* ── 瓷块内容区 ─────────────────────────────────────────────────────── */
 .plan-bento-block__body {
@@ -232,6 +240,12 @@
 .plan-pipeline__step--done .plan-pipeline__step-title {
     opacity: 0.7;
 }
+.plan-pipeline__step--failed .plan-pipeline__step-index {
+    color: var(--primary-error-color);
+}
+.plan-pipeline__step--skipped {
+    opacity: 0.5;
+}
 
 .plan-pipeline__step-meta {
     font-size: 0.68rem;
@@ -246,6 +260,16 @@
     color: var(--secondary-color-5);
     line-height: 1.4;
     margin-top: 2px;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* 执行错误（单步 intent 展开失败 / 整次失败） */
+.plan-pipeline__error {
+    margin-top: 6px;
+    font-size: 0.73rem;
+    color: var(--primary-error-color);
+    line-height: 1.4;
     white-space: pre-wrap;
     word-break: break-word;
 }

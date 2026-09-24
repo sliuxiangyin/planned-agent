@@ -1,18 +1,35 @@
 //! PIPELINE Bento 块：执行时间线。
 //!
-//! 展示的是**已按当前参数值展开**的步骤文本（展开在 `PlanLeftPanel::render_steps`），
-//! 所以 PARAMS 里一改参数，这里立刻跟着变。未填的参数保留 `${name}` 原样并给出提示。
+//! 步骤文本是**已按当前参数值展开**的（展开在 `PlanLeftPanel::render_steps`），
+//! 所以 PARAMS 一改参数，这里立刻跟着变；未填的参数保留 `${name}` 原样并给出提示。
 //!
-//! 三态与 THINK 终端由执行器的 `PlanRunEvent` 驱动，属于执行接线；
-//! 在此之前所有步骤渲染为 pending。
+//! 每步的相位（待执行 / 执行中 / 成功 / 失败 / 跳过）由 `FlexibleRunManager`
+//! 的执行状态驱动 —— 执行是后台任务，本组件卸载并不影响它。
 
 use dioxus::prelude::*;
+
+use crate::services::flexible_run_manager::StepPhase;
 
 use super::left_panel::{missing_label, RenderedStep};
 
 #[component]
-pub fn PipelineView(steps: Vec<RenderedStep>, hint: Option<String>) -> Element {
+pub fn PipelineView(
+    steps: Vec<RenderedStep>,
+    hint: Option<String>,
+    // 是否正在执行（决定停止按钮是否可用）
+    is_running: bool,
+    // 是否可执行：模板就绪 + 无未填参数 + 不在执行中
+    can_run: bool,
+    // 首个错误信息（单步 intent 展开失败或整次失败）
+    error: Option<String>,
+    on_run: EventHandler<MouseEvent>,
+    on_stop: EventHandler<MouseEvent>,
+) -> Element {
     let total = steps.len();
+    let progressed = steps
+        .iter()
+        .filter(|step| matches!(step.phase, StepPhase::Done | StepPhase::Failed))
+        .count();
     let empty_hint = hint.or_else(|| steps.is_empty().then(|| "该模板未定义步骤".to_string()));
 
     rsx! {
@@ -21,7 +38,7 @@ pub fn PipelineView(steps: Vec<RenderedStep>, hint: Option<String>) -> Element {
                 span { class: "plan-bento-block__header-emoji", "🎯" }
                 span { class: "plan-bento-block__header-label", "PIPELINE" }
                 span { class: "plan-bento-block__header-spacer" }
-                // 历史按钮
+                // 历史按钮（执行记录落库后启用，见阶段 6）
                 button {
                     class: "plan-bento-header-btn",
                     title: "历史版本",
@@ -39,10 +56,12 @@ pub fn PipelineView(steps: Vec<RenderedStep>, hint: Option<String>) -> Element {
                         polyline { points: "12 6 12 12 16 14" }
                     }
                 }
-                // 执行按钮
+                // 执行按钮：参数没填全 / 模板未就绪 / 已在执行 → 禁用
                 button {
                     class: "plan-bento-header-btn",
-                    title: "执行计划",
+                    title: if can_run { "执行计划" } else { "需模板就绪且参数填写完整" },
+                    disabled: !can_run,
+                    onclick: move |event| on_run.call(event),
                     svg {
                         xmlns: "http://www.w3.org/2000/svg",
                         width: "14",
@@ -52,10 +71,12 @@ pub fn PipelineView(steps: Vec<RenderedStep>, hint: Option<String>) -> Element {
                         path { d: "M 4 2.5 L 13 8 L 4 13.5 Z" }
                     }
                 }
-                // 停止按钮
+                // 停止按钮：唯一的中断途径
                 button {
                     class: "plan-bento-header-btn",
                     title: "停止执行",
+                    disabled: !is_running,
+                    onclick: move |event| on_stop.call(event),
                     svg {
                         xmlns: "http://www.w3.org/2000/svg",
                         width: "14",
@@ -75,12 +96,12 @@ pub fn PipelineView(steps: Vec<RenderedStep>, hint: Option<String>) -> Element {
                     div { class: "plan-pipeline__timeline",
                         for (index, step) in steps.iter().enumerate() {
                             div {
-                                class: "plan-pipeline__step plan-pipeline__step--pending",
+                                class: "plan-pipeline__step plan-pipeline__step--{step.phase.css_suffix()}",
                                 key: "{index}",
                                 div { class: "plan-pipeline__step-rail",
                                     div { class: "plan-pipeline__step-dot",
                                         svg {
-                                            class: "plan-pipeline-node--pending",
+                                            class: "plan-pipeline-node--{step.phase.node_suffix()}",
                                             xmlns: "http://www.w3.org/2000/svg",
                                             view_box: "0 0 16 16",
                                             width: "14",
@@ -91,7 +112,7 @@ pub fn PipelineView(steps: Vec<RenderedStep>, hint: Option<String>) -> Element {
                                             circle { cx: "8", cy: "8", r: "6" }
                                         }
                                     }
-                                    div { class: "plan-pipeline__step-line plan-pipeline__step-line--pending" }
+                                    div { class: "plan-pipeline__step-line plan-pipeline__step-line--{step.phase.line_suffix()}" }
                                 }
                                 div { class: "plan-pipeline__step-body",
                                     div { class: "plan-pipeline__step-header",
@@ -110,23 +131,16 @@ pub fn PipelineView(steps: Vec<RenderedStep>, hint: Option<String>) -> Element {
                         }
                     }
 
-                    // 底部状态栏：执行前只有步骤总数，其余指标待执行后回填。
+                    if let Some(error) = error {
+                        div { class: "plan-pipeline__error", "⚠ {error}" }
+                    }
+
+                    // 底部状态栏：详细指标在 STATS，这里只给进度与执行状态。
                     div { class: "plan-pipeline__statusbar",
-                        span { class: "plan-pipeline__statusbar-item", "0/{total} steps" }
-                        span { class: "plan-pipeline__statusbar-item",
-                            "⏱ "
-                            span { class: "plan-pipeline__statusbar-val", "—" }
-                        }
-                        span { class: "plan-pipeline__statusbar-item",
-                            "🔧 "
-                            span { class: "plan-pipeline__statusbar-val", "—" }
-                            " calls"
-                        }
-                        span { class: "plan-pipeline__statusbar-item",
-                            "📝 "
-                            span { class: "plan-pipeline__statusbar-val", "—" }
-                            " tk"
-                        }
+                        span { class: "plan-pipeline__statusbar-item", "{progressed}/{total} steps" }
+                        span { class: "plan-pipeline__statusbar-item", "⏱ " }
+                        span { class: "plan-pipeline__statusbar-item", "🔧 " }
+                        span { class: "plan-pipeline__statusbar-item", "📝 " }
                     }
                 }
             }

@@ -16,7 +16,11 @@ use dioxus::{desktop::Config, prelude::*};
 use pages::home::{HomePage, PageRoute};
 use pages::plan::PlanPage;
 use pages::settings::SettingsPage;
+use crate::context::require_resource;
+use services::flexible_run_manager::{FlexibleRunManager, FlexibleRunSignals, RunState};
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+use tokio::sync::watch;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 
@@ -93,6 +97,21 @@ fn app() -> Element {
     // ── MCP 变更通知器（轻量，与 McpContext 解耦；写入后 bump 让 UI 刷新） ──
     let mcp_change_signal = use_signal(|| 0u64);
     use_context_provider(|| McpChangeNotifier::from_signal(mcp_change_signal));
+
+    // ── 执行状态信号：必须在本组件（`ScopeId::ROOT`）创建 ──
+    // 后台任务用 `spawn_forever` 投到 ROOT scope，而 dioxus 要求「使用信号的 scope 是 owner 的
+    // 子孙」。放在 `ReadyShell` 里建方向正好反了（ROOT 是它的父），会触发
+    // `__copy_value_hoisted`，且 `ReadyShell` 重建时信号会先于后台任务被 drop。
+    // 详见 `FlexibleRunSignals` 的文档。
+    let run_states = use_signal_sync(HashMap::<String, RunState>::new);
+    let run_cancels = use_signal_sync(HashMap::<String, watch::Sender<bool>>::new);
+    // 注意必须包一层 `Arc`：`require_resource::<T>()` 找的是 `Arc<T>`（见 context/mod.rs）。
+    use_context_provider(move || {
+        Arc::new(FlexibleRunSignals {
+            states: run_states,
+            cancels: run_cancels,
+        })
+    });
 
     rsx! {
         document::Stylesheet { href: RESET_CSS }
@@ -231,12 +250,34 @@ fn ReadyShell(services: BootServices) -> Element {
     let tools = services.tools.clone();
     let storage = services.storage.clone();
 
+    // ── 灵活计划执行管理器（app 级）──
+    // 放这一层而非 PlanPage：执行是后台任务，切页面 / 退回首页都不能中断，
+    // 状态也必须活到组件之外（见 services/flexible_run_manager.rs 模块文档）。
+    // 故先留一份 ai/tools 副本，再交给下面的 provider（那两行会 move 原值）。
+    let run_ai = ai.clone();
+    let run_tools = tools.clone();
+    // 状态信号在 ROOT scope（`app`）创建，这里只取用；就地新建会因 `spawn_forever` 的
+    // 跳 scope 使用而触发悬挂警告（见 `FlexibleRunSignals`）。
+    let run_signals = require_resource::<FlexibleRunSignals>();
+    let run_states = run_signals.states;
+    let run_cancels = run_signals.cancels;
+
     use_context_provider(move || ai);
     use_context_provider(move || prompt);
     use_context_provider(move || kv);
     use_context_provider(move || mcp);
     use_context_provider(move || tools);
     use_context_provider(move || storage);
+    // context 存 `Arc<...>`（与 AiContext 等一致），故消费方用
+    // `require_resource::<FlexibleRunManager>()` 取到的就是 `Arc<FlexibleRunManager>`。
+    use_context_provider(move || {
+        Arc::new(FlexibleRunManager::new(
+            run_ai,
+            run_tools,
+            run_states,
+            run_cancels,
+        ))
+    });
 
     rsx! { AppRouter {} }
 }
