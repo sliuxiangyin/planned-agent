@@ -131,6 +131,14 @@ pub fn PipelineView(
                                     if !step.track.is_empty() || step.phase == StepPhase::Running {
                                         ThinkBox { phase: step.phase, track: step.track.clone() }
                                     }
+                                    // 本步产出：执行过才有。默认收起 —— 结果可能很长，
+                                    // 与 think box 一样，把「要不要看细节」交给用户。
+                                    if let Some(output) = step.output.clone() {
+                                        StepOutput {
+                                            truncated: step.output_truncated,
+                                            output: output,
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -149,6 +157,26 @@ pub fn PipelineView(
                     }
                 }
             }
+        }
+    }
+}
+
+/// 单步产出（默认收起）：执行过后才有。
+///
+/// 与 think box 分开：think box 是「过程」，这里是「这一步交出了什么」。
+/// 超长时执行器只留前若干字符（`output_truncated`），这里如实标注，不假装完整。
+#[component]
+fn StepOutput(truncated: bool, output: String) -> Element {
+    rsx! {
+        details { class: "plan-step-output",
+            summary { class: "plan-step-output__summary",
+                if truncated {
+                    "本步产出（超长已截断）"
+                } else {
+                    "本步产出"
+                }
+            }
+            pre { class: "plan-step-output__text", "{output}" }
         }
     }
 }

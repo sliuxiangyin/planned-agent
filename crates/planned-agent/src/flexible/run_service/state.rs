@@ -74,6 +74,8 @@ pub fn apply_event(snapshot: &mut RunSnapshot, event: PlanRunEvent) {
                     })
                     .collect::<Vec<_>>();
             }
+            // 最终结果随报告一同到达（执行器算好的）；契约缺失或任务未成功时为 `None`。
+            snapshot.result = report.result.clone();
             snapshot.report = Some(report);
             snapshot.finished_at_ms = Some(now_ms());
         }
@@ -146,6 +148,8 @@ mod tests {
                 completion_tokens: 3,
             }],
             output_summary: None,
+            output: None,
+            output_truncated: false,
             error: error.map(str::to_string),
         }
     }
@@ -257,6 +261,7 @@ mod tests {
             prompt_tokens: 20,
             completion_tokens: 6,
             tool_calls: 2,
+            result: Some("追加完成，文件末尾新增一行".to_string()),
             steps: vec![
                 record(1, StepStatus::Done, None),
                 record(2, StepStatus::Skipped, Some("前序步骤失败")),
@@ -274,6 +279,11 @@ mod tests {
         assert_eq!(snapshot.steps[1].error.as_deref(), Some("前序步骤失败"));
         assert!(snapshot.finished_at_ms.is_some());
         assert_eq!(snapshot.report.as_ref(), Some(&report));
+        // 最终结果由报告带进快照（UI 的结果区就取它）
+        assert_eq!(
+            snapshot.result.as_deref(),
+            Some("追加完成，文件末尾新增一行")
+        );
         // 报告重建步骤时轨迹要按 index 接回来，不能随重建一起丢
         assert_eq!(
             snapshot.steps[0].track,

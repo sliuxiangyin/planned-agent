@@ -23,6 +23,8 @@ use super::dialogs::DeletePlanDialog;
 use super::history::HistoryView;
 use super::params::ParamsView;
 use super::pipeline::PipelineView;
+use super::output_schema::OutputSchemaView;
+use super::run_result::RunResultView;
 use super::stats::StatsView;
 
 /// 左侧面板样式（按需加载）。
@@ -46,6 +48,10 @@ pub(crate) struct RenderedStep {
     pub phase: StepPhase,
     /// 本步的执行轨迹（think box 数据）：思考行与工具动作行按发生顺序排列。
     pub track: Vec<StepTrackLine>,
+    /// 本步产出的全文（执行后才有；`None` = 未执行或该步没产出）。
+    pub output: Option<String>,
+    /// `output` 是否被截断（超长时执行器只留前若干字符）。
+    pub output_truncated: bool,
 }
 
 /// 按当前参数值展开模板步骤。
@@ -72,6 +78,9 @@ fn render_steps(steps: &[PlanStep], values: &BTreeMap<String, String>) -> Vec<Re
                 // 相位与轨迹都由容器在执行状态就绪后叠加（见 PlanLeftPanel）
                 phase: StepPhase::Pending,
                 track: Vec::new(),
+                // 产出同样由容器在执行状态就绪后叠加
+                output: None,
+                output_truncated: false,
             }
         })
         .collect()
@@ -214,6 +223,13 @@ pub fn PlanLeftPanel(
     // 注意它与执行路径的严格版（`render_lenient` vs `render`）有一处**已知差异**：
     // 空字符串在宽容版里算「未填」，在严格版里却是被成功代入的空值 ——
     // 所以「预览 = 执行」目前只对非空值成立，接线执行按钮时需统一（见下方 TODO）。
+    // 输出契约（原始 JSON）：OUTPUT 块自己宽容解析，坏数据降级成一句文案而不 panic。
+    // 与上面那份解构分开取，是为了不改动四个瓷块已依赖的元组形状。
+    let output_schema = match template_res.read().as_ref() {
+        Some(Ok(PlanTemplateState::Ready(template))) => template.output_schema.clone(),
+        _ => None,
+    };
+
     let mut rendered_steps = {
         let overrides = param_values.read();
         let values = effective_param_texts(&inputs, &overrides);
@@ -229,9 +245,11 @@ pub fn PlanLeftPanel(
     if let Some(snapshot) = &run_snapshot {
         for (offset, step) in rendered_steps.iter_mut().enumerate() {
             step.phase = snapshot.phase_of(offset);
-            // 轨迹只在执行期间由服务累积（快照里没有的步骤就是空轨迹）
+            // 轨迹与产出只在执行期间由服务累积（快照里没有的步骤就是空）
             if let Some(executed) = snapshot.steps.get(offset) {
                 step.track = executed.track.clone();
+                step.output = executed.output.clone();
+                step.output_truncated = executed.output_truncated;
             }
         }
     }
@@ -381,6 +399,9 @@ pub fn PlanLeftPanel(
                         report: run_snapshot.as_ref().and_then(|snapshot| snapshot.report.clone()),
                     }
                 }
+                // ⑤ OUTPUT — 输出契约（本次任务要交出什么）
+                OutputSchemaView { schema: output_schema, hint: hint.clone() }
+
                 // ① PIPELINE — 执行时间线（步骤骨架来自当前会话模板）
                 PipelineView {
                     steps: rendered_steps.clone(),
@@ -415,6 +436,14 @@ pub fn PlanLeftPanel(
                     }),
                     on_run: on_run,
                     on_stop: on_stop,
+                }
+
+                // ⑥ RESULT — 本次执行的最终结果（执行器按契约整理）
+                RunResultView {
+                    hint: hint.clone(),
+                    is_running: is_running,
+                    status: run_snapshot.as_ref().map(|snapshot| snapshot.status),
+                    result: run_snapshot.as_ref().and_then(|snapshot| snapshot.result.clone()),
                 }
 
                 // ④ HISTORY — 历史执行记录

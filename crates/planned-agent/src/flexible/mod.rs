@@ -12,6 +12,7 @@
 //! flexible/
 //! ├── mod.rs          门面：声明子模块 + 对外导出（外面只 use 这里）
 //! ├── template.rs     模板强类型：task / inputs / steps
+//! ├── output_schema.rs 输出契约：kind / goal / success / format / required / wanted
 //! ├── placeholder.rs  ${name} 的收集 / 校验 / 替换
 //! ├── params.rs       运行参数表 + 步骤 intent 的展开
 //! ├── event.rs        进度事件 PlanRunEvent + PlanRunSink
@@ -25,6 +26,7 @@
 
 mod event;
 mod executor;
+mod output_schema;
 mod params;
 mod placeholder;
 mod prompt;
@@ -41,7 +43,10 @@ mod testing;
 
 pub use event::{ChannelSink, NullSink, PlanRunEvent, PlanRunSink};
 pub use executor::{ExecutorConfig, FlexibleExecutor};
+pub use output_schema::{OutputKind, OutputSchema};
 pub use params::{render_step_intent, PlanRunParams};
-pub use placeholder::{collect_from_steps, collect_placeholders, render, render_lenient, validate};
+pub use placeholder::{
+    collect_from_schema, collect_from_steps, collect_placeholders, render, render_lenient, validate,
+};
 pub use report::{CallUsage, PlanRunReport, StepRunRecord, StepStatus};
 pub use template::{FlexiblePlanTemplate, PlanInput, PlanStep};

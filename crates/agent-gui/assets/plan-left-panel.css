@@ -640,3 +640,111 @@
 .chat-panel .dx-todo {
     margin: 8px 10px 0;
 }
+
+/* ══════════════════════════════════════════════════════════════════════
+ * ⑤ OUTPUT — 输出契约（本次任务要交出什么）
+ * ══════════════════════════════════════════════════════════════════════ */
+
+.plan-output__kind-row {
+    display: flex;
+    align-items: center;
+    margin-bottom: 6px;
+}
+
+.plan-output__kind {
+    font-size: 0.68rem;
+    height: 18px;
+    line-height: 18px;
+    padding: 0 8px;
+    border-radius: 999px;
+    border: 1px solid var(--focused-border-color);
+    color: var(--focused-border-color);
+    user-select: none;
+}
+
+.plan-output__line {
+    font-size: 0.73rem;
+    line-height: 1.5;
+    color: var(--secondary-color-2);
+    word-break: break-word;
+}
+
+.plan-output__line--muted {
+    color: var(--secondary-color-5);
+}
+
+.plan-output__fields {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 6px;
+}
+
+.plan-output__fields-label {
+    font-size: 0.68rem;
+    color: var(--secondary-color-5);
+}
+
+.plan-output__chip {
+    font-size: 0.68rem;
+    height: 18px;
+    line-height: 18px;
+    padding: 0 6px;
+    border-radius: 4px;
+    border: 1px solid var(--secondary-color-6);
+    color: var(--secondary-color-3);
+    font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+}
+
+.plan-output__chip--required {
+    border-color: var(--focused-border-color);
+    color: var(--focused-border-color);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * ⑥ RESULT — 本次执行的最终结果
+ * ══════════════════════════════════════════════════════════════════════ */
+
+.plan-run-result__text {
+    margin: 0;
+    max-height: 220px;
+    overflow: auto;
+    padding: 8px 10px;
+    border-radius: 4px;
+    border: 1px solid var(--secondary-color-6);
+    font-size: 0.72rem;
+    line-height: 1.5;
+    color: var(--secondary-color-2);
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+}
+
+/* ── 单步产出（PIPELINE 内，默认收起）───────────────────────────────── */
+
+.plan-step-output {
+    margin-top: 6px;
+}
+
+.plan-step-output__summary {
+    cursor: pointer;
+    font-size: 0.7rem;
+    color: var(--secondary-color-5);
+    user-select: none;
+}
+
+.plan-step-output__text {
+    margin: 4px 0 0;
+    max-height: 180px;
+    overflow: auto;
+    padding: 6px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--secondary-color-6);
+    font-size: 0.7rem;
+    line-height: 1.5;
+    color: var(--secondary-color-3);
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+}

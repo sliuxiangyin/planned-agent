@@ -16,6 +16,9 @@ use serde_json::Value;
 /// 占位符里会被扫描的步骤字段。
 const PLACEHOLDER_FIELDS: &[&str] = &["intent", "expected_output"];
 
+/// 占位符里会被扫描的 `output_schema` 文本字段（与 agent-gui 侧 `placeholder.rs` 保持一致）。
+const SCHEMA_PLACEHOLDER_FIELDS: &[&str] = &["goal", "success", "format"];
+
 /// 按出现顺序收集一段文本里的 `${name}` 占位符名（同名去重）。
 ///
 /// 未闭合的 `${`（没有对应的 `}`）不会被当成占位符 —— 校验与替换各自对它的处理见
@@ -56,6 +59,28 @@ pub fn collect_from_steps(steps: &Value) -> Vec<String> {
                 if !names.contains(&name) {
                     names.push(name);
                 }
+            }
+        }
+    }
+    names
+}
+
+/// 收集 `output_schema`（对象）的文本字段里的占位符名（去重保序）。
+///
+/// 非对象（含 `null` 契约）返回空表。执行器用它把契约里的 `${name}` 渲染成实际值后
+/// 再交给输出整理步。
+pub fn collect_from_schema(schema: &Value) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let Some(object) = schema.as_object() else {
+        return names;
+    };
+    for field in SCHEMA_PLACEHOLDER_FIELDS {
+        let Some(text) = object.get(*field).and_then(Value::as_str) else {
+            continue;
+        };
+        for name in collect_placeholders(text) {
+            if !names.contains(&name) {
+                names.push(name);
             }
         }
     }

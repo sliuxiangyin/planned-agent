@@ -12,9 +12,11 @@ use planned_agent_tool_manager::ToolRegistry;
 use tokio::sync::watch;
 
 use super::event::{PlanRunEvent, PlanRunSink};
+use super::output_schema::OutputSchema;
 use super::params::{render_step_intent, PlanRunParams};
+use super::prompt;
 use super::report::{PlanRunReport, StepRunRecord, StepStatus};
-use super::step::{run_step, StepInput};
+use super::step::{run_output_resolve, run_step, StepInput};
 use super::template::{FlexiblePlanTemplate, PlanStep};
 
 /// 执行器配置。
@@ -185,12 +187,24 @@ impl FlexibleExecutor {
             records.push(record);
         }
 
-        // 只有每一步都 Done 才算成功（空模板不算成功）。
+        // 只有模板里的每一步都 Done 才算成功（空模板不算成功）。
         // 不用可变标志：跳过分支不改标志会在「一上来就取消」时漏置。
+        // 末尾可能追加的输出整理步**不参与**这里 —— 它失败只影响「有没有最终结果」，
+        // 不改变任务本身的成败（所以必须在追加它之前先算完）。
         let success = !records.is_empty()
             && records
                 .iter()
                 .all(|record| record.status == StepStatus::Done);
+
+        // ── 输出整理步 ──
+        // 任务步全部成功后，按 `output_schema` 把交付步的输出整理成「最终结果」：
+        // 契约缺失（用户跳过输出定义）则退化为交付步原文；任务未成功则不整理。
+        let result = if success {
+            self.resolve_result(template, params, &store, &mut records, sink, cancel.as_ref())
+                .await
+        } else {
+            None
+        };
 
         let report = PlanRunReport {
             success,
@@ -199,6 +213,7 @@ impl FlexibleExecutor {
             completion_tokens: records.iter().map(|record| record.completion_tokens).sum(),
             tool_calls: records.iter().map(|record| record.tool_calls).sum(),
             steps: records,
+            result,
         };
         if report.success {
             tracing::info!(
@@ -248,6 +263,153 @@ impl FlexibleExecutor {
         };
         selected.into_iter().map(to_tool_definition).collect()
     }
+
+    /// 按 `output_schema` 整理最终结果（必要时向 `records` 追加一步）。
+    ///
+    /// 返回 `None` 的四种情形：契约缺失且交付步无输出、没有可用的交付输出、
+    /// 契约非法（同时补一条 `Failed` 的整理步）、整理步自身失败。
+    async fn resolve_result(
+        &self,
+        template: &FlexiblePlanTemplate,
+        params: &PlanRunParams,
+        store: &HashMap<String, String>,
+        records: &mut Vec<StepRunRecord>,
+        sink: &dyn PlanRunSink,
+        cancel: Option<&watch::Receiver<bool>>,
+    ) -> Option<String> {
+        let Some(raw) = &template.output_schema else {
+            // 没有契约（用户跳过输出定义步 / 选「定不了」）：结果退化为交付步原文
+            let output = deliverable_output(template, store).map(|(_, output)| output.to_string());
+            tracing::info!(has_result = output.is_some(), "无输出契约：以交付步输出作为结果");
+            return output;
+        };
+
+        let schema = match OutputSchema::parse(raw) {
+            Ok(schema) => schema,
+            Err(reason) => {
+                // 契约非法是**数据问题**：记一步 `Failed` 让原因可见，但不改变任务成败
+                tracing::warn!(error = %reason, "输出契约非法，跳过结果整理");
+                let index = records.len() + 1;
+                sink.emit(PlanRunEvent::Failed {
+                    index: Some(index),
+                    error: reason.clone(),
+                });
+                records.push(resolve_failed_record(index, reason));
+                return None;
+            }
+        };
+
+        let Some((reference, output)) = deliverable_output(template, store) else {
+            tracing::warn!("有输出契约但没有可用的交付输出，跳过结果整理");
+            return None;
+        };
+
+        let index = records.len() + 1;
+        let intent = "按输出契约整理本次执行的最终结果".to_string();
+        // 契约文本里的 `${name}` 换成本次参数的实际值（渲染失败就退回原文，不阻断）
+        let contract = params
+            .render(&prompt::build_output_contract_text(&schema))
+            .unwrap_or_else(|err| {
+                tracing::warn!(error = %err, "输出契约渲染失败，用未渲染文本");
+                prompt::build_output_contract_text(&schema)
+            });
+
+        // 交付步的完整输出必须给；再带上各步摘要，让整理步在末步信息不全时能回看。
+        // 摘要不是装饰 —— 这是 `output_summary` 的第一个生产消费点。
+        let mut prior = Vec::with_capacity(records.len() + 1);
+        prior.push((format!("{reference}（交付步的完整输出）"), output.to_string()));
+        for record in records.iter() {
+            if let Some(summary) = &record.output_summary {
+                prior.push((
+                    format!("{} 的输出摘要", record.result_reference),
+                    summary.clone(),
+                ));
+            }
+        }
+
+        let resolve_step = PlanStep {
+            result_reference: RESOLVE_RESULT_REFERENCE.to_string(),
+            intent: intent.clone(),
+            expected_output: contract,
+            dependencies: Vec::new(),
+        };
+        sink.emit(PlanRunEvent::StepStarted {
+            index,
+            intent: intent.clone(),
+        });
+        // 不带工具：整理只做分析，不需要外部数据
+        let outcome = run_output_resolve(
+            StepInput {
+                step: &resolve_step,
+                intent: &intent,
+                prior: &prior,
+                tools: &[],
+                index,
+            },
+            &self.ai,
+            &self.tools,
+            &self.cfg,
+            sink,
+            cancel,
+        )
+        .await;
+        let result = outcome
+            .output
+            .clone()
+            .filter(|_| outcome.record.status == StepStatus::Done);
+        tracing::info!(
+            step = index,
+            status = ?outcome.record.status,
+            result_chars = result.as_deref().map(str::len).unwrap_or(0),
+            "输出整理步结束"
+        );
+        sink.emit(PlanRunEvent::StepFinished {
+            index,
+            record: outcome.record.clone(),
+        });
+        records.push(outcome.record);
+        result
+    }
+}
+
+/// 输出整理步的结果引用标识（它不是模板步骤，标签固定）。
+const RESOLVE_RESULT_REFERENCE: &str = "#RESULT";
+
+/// 交付步的输出 —— 即最后一个「拿到了输出」的模板步骤。
+///
+/// 模板是粗粒度**线性骨架**，最后一步就是交付步（依赖图「出度 0」的判定在该形态下与
+/// 「最后一步」等价，所以不引入依赖图分析）。失败 / 跳过的步骤不会进 `store`
+/// （只有真拿到 output 才写入），所以这里天然只会取到有产出的那一步。
+fn deliverable_output<'t, 's>(
+    template: &'t FlexiblePlanTemplate,
+    store: &'s HashMap<String, String>,
+) -> Option<(&'t str, &'s str)> {
+    template.steps.iter().rev().find_map(|step| {
+        store
+            .get(&step.result_reference)
+            .map(|output| (step.result_reference.as_str(), output.as_str()))
+    })
+}
+
+/// 契约非法时补一条 `Failed` 的整理步记录（让「为什么没有结果」在报告里可见）。
+fn resolve_failed_record(index: usize, error: String) -> StepRunRecord {
+    StepRunRecord {
+        index,
+        result_reference: RESOLVE_RESULT_REFERENCE.to_string(),
+        intent: "按输出契约整理本次执行的最终结果".to_string(),
+        expected_output: "（输出契约非法，未执行整理）".to_string(),
+        status: StepStatus::Failed,
+        duration_ms: 0,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        tool_calls: 0,
+        rounds: 0,
+        call_usages: vec![],
+        output_summary: None,
+        output: None,
+        output_truncated: false,
+        error: Some(error),
+    }
 }
 
 /// 收集某步依赖项的实际输出（按 `dependencies` 顺序）。
@@ -282,6 +444,8 @@ fn placeholder_record(
         rounds: 0,
         call_usages: vec![],
         output_summary: None,
+        output: None,
+        output_truncated: false,
         error: error.map(str::to_string),
     }
 }
@@ -338,6 +502,116 @@ mod tests {
                 },
             ],
         }
+    }
+
+    /// 有契约（`bool`）→ 追加一个整理步，结果取它的输出；契约渲染进请求，且**不带工具**。
+    #[tokio::test]
+    async fn output_contract_appends_resolve_step_and_returns_result() {
+        let ai = FakeAiClient::new(vec![
+            text_response("第一步产出", 10, 1),
+            text_response("第二步产出", 20, 2),
+            text_response("文件末尾已新增一行（index=8）", 30, 3),
+        ]);
+        let template = FlexiblePlanTemplate {
+            output_schema: Some(serde_json::json!({
+                "kind": "bool",
+                "goal": "向 ${path} 末尾追加一行",
+                "success": "文件末尾新增一行即视为成功"
+            })),
+            ..two_step_template()
+        };
+        let params = PlanRunParams::from_template(&template);
+        let sink = RecordingSink::default();
+
+        let report = executor(ai.clone())
+            .run(&template, &params, &sink, None)
+            .await
+            .expect("run 不应失败");
+
+        assert!(report.success, "整理步不参与任务成败");
+        assert_eq!(report.steps.len(), 3, "两个模板步 + 一个整理步");
+        let resolve = &report.steps[2];
+        assert_eq!(resolve.result_reference, "#RESULT");
+        assert_eq!(resolve.index, 3);
+        assert_eq!(resolve.status, StepStatus::Done);
+        assert_eq!(
+            report.result.as_deref(),
+            Some("文件末尾已新增一行（index=8）"),
+            "最终结果 = 整理步的输出"
+        );
+
+        // 第三次请求是整理步：system 换专用 prompt、契约渲染成实际值、交付步输出带上了
+        let requests = ai.requests();
+        assert_eq!(requests.len(), 3);
+        let messages = serde_json::to_string(&requests[2].messages).unwrap();
+        assert!(messages.contains("结果整理助手"), "应换整理专用 system prompt: {messages}");
+        assert!(messages.contains("文件末尾新增一行即视为成功"), "契约应进请求: {messages}");
+        assert!(messages.contains("第二步产出"), "交付步输出应进请求: {messages}");
+        assert!(messages.contains("向 a.txt 末尾追加一行"), "${{path}} 应被渲染: {messages}");
+        assert!(requests[2].tools.is_none(), "整理步不应带工具");
+
+        // 整理步也要有自己的事件，UI 的 pipeline 才能显示它
+        let events = sink.events();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            PlanRunEvent::StepStarted { index: 3, intent } if intent.contains("整理")
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, PlanRunEvent::StepFinished { index: 3, .. })));
+    }
+
+    /// 没有契约（用户跳过输出定义）→ 不追加整理步，结果退化为交付步原文，也不多花一次 LLM 调用。
+    #[tokio::test]
+    async fn missing_contract_falls_back_to_deliverable_output() {
+        let ai = FakeAiClient::new(vec![
+            text_response("第一步产出", 10, 1),
+            text_response("第二步产出", 20, 2),
+        ]);
+        let template = two_step_template();
+        let params = PlanRunParams::from_template(&template);
+        let sink = RecordingSink::default();
+
+        let report = executor(ai.clone())
+            .run(&template, &params, &sink, None)
+            .await
+            .expect("run 不应失败");
+
+        assert_eq!(report.steps.len(), 2, "无契约不应追加整理步");
+        assert_eq!(report.result.as_deref(), Some("第二步产出"));
+        assert_eq!(ai.requests().len(), 2, "无契约不应多一次 LLM 调用");
+    }
+
+    /// 契约非法是数据问题：记一条 `Failed` 的整理步让原因可见，但**不**把任务判失败。
+    #[tokio::test]
+    async fn invalid_contract_records_failed_resolve_step_without_failing_run() {
+        let ai = FakeAiClient::new(vec![
+            text_response("第一步产出", 10, 1),
+            text_response("第二步产出", 20, 2),
+        ]);
+        let template = FlexiblePlanTemplate {
+            output_schema: Some(serde_json::json!({ "kind": "success_only", "success": "s" })),
+            ..two_step_template()
+        };
+        let params = PlanRunParams::from_template(&template);
+        let sink = RecordingSink::default();
+
+        let report = executor(ai.clone())
+            .run(&template, &params, &sink, None)
+            .await
+            .expect("run 不应失败");
+
+        assert!(report.success, "契约非法不该把任务判成失败");
+        assert_eq!(report.steps.len(), 3);
+        let resolve = &report.steps[2];
+        assert_eq!(resolve.status, StepStatus::Failed);
+        assert!(resolve
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("success_only"));
+        assert!(report.result.is_none());
+        assert_eq!(ai.requests().len(), 2, "契约非法时不该再调一次 LLM");
     }
 
     fn executor(ai: Arc<FakeAiClient>) -> FlexibleExecutor {

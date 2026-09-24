@@ -161,3 +161,35 @@ none → task_defined → planned → parameterized → output_defined → saved
    - 「跳过」= 协调器不调输出步、直接从 `parameterized` 调 `flexible_save`；此时 `output_schema = null`，`current_step` 停在 `parameterized`（**不引入 `output_defined` 档位**）。save 的前置检查只要求 `current_step` 至少 `parameterized`（`flexible_global_system.toml:61`），天然成立。
 4. **命名**：工具名 **`flexible_output`** + state 产物/模板字段 **`output_schema`**（与 prompt-manager 的 TOML `[output_schema]` 段层级不同，不冲突）。
 
+---
+
+## 6. v2 修订（用户拍板，已实施）
+
+### 6.1 `output_schema` 结构 v2
+
+| 项 | v1 | v2 |
+|---|---|---|
+| `kind` | `success_only` / `text` / `markdown` / `json` / `csv` / `file` | **`bool`** / `text` / `markdown` / `json` / `csv` / `file` |
+| 要什么 | `description` | **`goal`**（`bool` 之外必填） |
+| 成功判据 | 挤在 `description` 里 | **`success`**（`bool` 必填，其余可选） |
+| 形态细节 | `detail` | **`format`** |
+| 字段清单 | `required` / `wanted`（无条件） | 同名字段，**仅 `json` / `csv` 生效** |
+
+- 定义与校验的唯一处：`crates/planned-agent/src/flexible/output_schema.rs`（`OutputKind` + `OutputSchema::parse`），**保存 / 执行 / 展示三处共用**。
+- **`goal` / `success` / `format` 里的参数值必须写 `${name}`**（与 `steps` 同一套规则）：`placeholder::collect_from_schema` 收集、`validate` 一并校验并**点名来源**（`steps` / `output_schema`）。在模板里写死具体路径 = 模板被一份参数值绑架。
+
+### 6.2 执行期的「输出整理步」
+
+模板步骤全部成功跑完后，执行器追加**一步**（`result_reference = #RESULT`）：
+
+- 输入：交付步（= 最后一个有输出的模板步骤）的**完整输出** + 各步 200 字摘要（`output_summary` 的第一个生产消费点）+ 渲染后的契约文本；
+- 提示词：`prompt::OUTPUT_RESOLVE_SYSTEM_PROMPT`（**不带工具**）；
+- 产物：`PlanRunReport::result` → `RunSnapshot::result` → 左面板 RESULT 块；
+- **不参与任务成败判定**：它失败只让结果为空，任务仍按模板步骤算成功；
+- 契约缺失（`null`）：不追加整理步，结果退化为交付步输出原文；
+- 契约非法：追加一条 `Failed` 的整理步（原因在它的 `error` 里），任务成败不变。
+
+### 6.3 展示
+
+左面板新增 **OUTPUT**（契约）与 **RESULT**（本次结果）两个 Bento 块；PIPELINE 每步多一个**默认收起**的产出折叠区（超长如实标注「已截断」）。数据通路与后续（落库 / 反哺）见 `docs/planned-agent/flexible-output-followups.md`。
+

@@ -24,6 +24,12 @@ use super::template::PlanStep;
 /// 输出摘要的字符上限。
 const SUMMARY_MAX_CHARS: usize = 200;
 
+/// 单步**完整输出**进执行记录的上限（字符）。
+///
+/// 摘要（`SUMMARY_MAX_CHARS`）用于步骤间传播；这一份是给「结果展示 + 输出整理步」用的，
+/// 所以宽松得多 —— 但仍必须封顶：事件与快照是全量推送，不封顶会把推送量撑爆。
+pub(crate) const OUTPUT_MAX_CHARS: usize = 8_000;
+
 /// 单步执行的输入。
 pub(crate) struct StepInput<'a> {
     /// 步骤定义
@@ -46,7 +52,7 @@ pub(crate) struct StepRunResult {
     pub output: Option<String>,
 }
 
-/// 执行一个步骤。
+/// 执行一个步骤（模板步骤：单步 system prompt）。
 ///
 /// 失败（LLM 报错 / 超轮数上限 / 用户取消）通过 `record.status` 与 `record.error`
 /// 表达，**不向上抛错** —— 单步失败只终止这条流水线，不终止宿主。
@@ -58,11 +64,49 @@ pub(crate) async fn run_step(
     sink: &dyn PlanRunSink,
     cancel: Option<&watch::Receiver<bool>>,
 ) -> StepRunResult {
+    run_step_with_prompt(prompt::STEP_SYSTEM_PROMPT, input, ai, registry, cfg, sink, cancel).await
+}
+
+/// 执行「输出整理步」：同一条执行链路，只换 system prompt。
+///
+/// 与模板步骤的差别只有提示词（[`prompt::OUTPUT_RESOLVE_SYSTEM_PROMPT`]）—— 调用方传
+/// 空工具表即可（整理只做分析，不需要外部数据）。轮数上限、token 计量、轨迹、失败语义
+/// 全部复用同一套，不维护第二份。
+pub(crate) async fn run_output_resolve(
+    input: StepInput<'_>,
+    ai: &Arc<dyn AiClient>,
+    registry: &Arc<ToolRegistry>,
+    cfg: &ExecutorConfig,
+    sink: &dyn PlanRunSink,
+    cancel: Option<&watch::Receiver<bool>>,
+) -> StepRunResult {
+    run_step_with_prompt(
+        prompt::OUTPUT_RESOLVE_SYSTEM_PROMPT,
+        input,
+        ai,
+        registry,
+        cfg,
+        sink,
+        cancel,
+    )
+    .await
+}
+
+/// 单步执行的内核：system prompt 由调用方决定。
+async fn run_step_with_prompt(
+    system_prompt: &str,
+    input: StepInput<'_>,
+    ai: &Arc<dyn AiClient>,
+    registry: &Arc<ToolRegistry>,
+    cfg: &ExecutorConfig,
+    sink: &dyn PlanRunSink,
+    cancel: Option<&watch::Receiver<bool>>,
+) -> StepRunResult {
     let started = Instant::now();
     let task = prompt::build_step_task(input.intent, &input.step.expected_output, input.prior);
 
     let mut messages = vec![
-        text_message(MessageRole::System, prompt::STEP_SYSTEM_PROMPT),
+        text_message(MessageRole::System, system_prompt),
         text_message(MessageRole::User, &task),
     ];
 
@@ -253,6 +297,15 @@ pub(crate) async fn run_step(
         StepStatus::Failed
     };
     let output_summary = output.as_deref().map(summarize);
+    // 完整输出单独封顶：`StepRunResult.output` 保持**不截断**（下游 `prior` 依赖它，
+    // 现有语义不动），执行记录里只存封顶后的一份，并如实带上「被截断」标记。
+    let output_truncated = output
+        .as_deref()
+        .map(|text| text.chars().count() > OUTPUT_MAX_CHARS)
+        .unwrap_or(false);
+    let record_output = output
+        .as_deref()
+        .map(|text| truncate_chars(text, OUTPUT_MAX_CHARS));
 
     StepRunResult {
         record: StepRunRecord {
@@ -268,6 +321,8 @@ pub(crate) async fn run_step(
             rounds,
             call_usages,
             output_summary,
+            output: record_output,
+            output_truncated,
             error,
         },
         output,
@@ -386,6 +441,14 @@ fn tool_content(content: &Value) -> String {
 }
 
 /// 生成输出摘要（超长截断）。
+/// 按**字符**（而非字节）截断：UTF-8 安全，不 panic。
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    text.chars().take(max_chars).collect()
+}
+
 fn summarize(text: &str) -> String {
     let trimmed = text.trim();
     if trimmed.chars().count() <= SUMMARY_MAX_CHARS {

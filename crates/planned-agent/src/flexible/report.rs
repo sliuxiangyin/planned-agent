@@ -53,8 +53,14 @@ pub struct StepRunRecord {
     /// 循环每轮重发整个上下文，故第 N 轮的 `prompt_tokens` 含前 N-1 轮内容；
     /// 保留明细是为了诊断"上下文在哪一轮膨胀"。
     pub call_usages: Vec<CallUsage>,
-    /// 该步输出的摘要（若可提取）。
+    /// 该步输出的摘要（若可提取）—— 给 STATS 与后续步骤用的**短**文本。
     pub output_summary: Option<String>,
+    /// 该步输出的**全文**（若可提取，[`super::step`] 的 `OUTPUT_MAX_CHARS` 封顶）。
+    ///
+    /// 与 `output_summary` 的分工：摘要是「紧凑传播」，全文是「结果展示 + 输出整理步的输入」。
+    pub output: Option<String>,
+    /// `output` 是否因超长被截断 —— 界面必须如实告知，不得假装完整。
+    pub output_truncated: bool,
     /// 失败原因。
     pub error: Option<String>,
 }
@@ -75,8 +81,13 @@ pub struct PlanRunReport {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub tool_calls: usize,
-    /// 按执行顺序排列的步骤记录（含未执行的 `Skipped` 步）。
+    /// 按执行顺序排列的步骤记录（含未执行的 `Skipped` 步，以及末尾可能追加的输出整理步）。
     pub steps: Vec<StepRunRecord>,
+    /// 本次执行的**最终结果**（按 `output_schema` 整理后要交付的东西）。
+    ///
+    /// `None` 的三种情形：任务未成功（不整理）、用户跳过输出定义且交付步没有输出、
+    /// 或契约非法（此时末尾的整理步会记为 `Failed`，原因在它的 `error` 里）。
+    pub result: Option<String>,
 }
 
 impl PlanRunReport {
@@ -120,6 +131,8 @@ mod tests {
             rounds: 0,
             call_usages: vec![],
             output_summary: None,
+            output: None,
+            output_truncated: false,
             error: None,
         }
     }
@@ -132,6 +145,7 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 5,
             tool_calls: 3,
+            result: None,
             steps: vec![
                 record(1, StepStatus::Done),
                 record(2, StepStatus::Failed),

@@ -6,10 +6,11 @@
 //! 其它（`status:"error"` / 非 JSON）**不登记、不落库**。
 //!
 //! 职责边界：本回调**直接落库** —— 从 `flexible_state.products` 组装
-//! `{ task, inputs, steps }` 写入 `plans_flexible_sessions.parameterized_task` 列，
-//! 不经协调器 LLM 转抄（转抄会改坏字段）。落库前校验 `steps` 里的 `${name}`
-//! 都能在 `inputs` 中找到定义（[`super::super::super::placeholder`]），
-//! 挡掉「模型自创占位符」这类契约违背。
+//! `{ task, inputs, steps, output_schema }` 写入 `plans_flexible_sessions.parameterized_task` 列，
+//! 不经协调器 LLM 转抄（转抄会改坏字段）。落库前两道校验：
+//! 1. `output_schema` 形态（[`OutputSchema::parse`]：kind 合法 + 按 kind 的必填项）；
+//! 2. `${name}` 占位符 —— `steps` 与 `output_schema` 的文本字段（`goal` / `success` / `format`）
+//!    都必须有同名 `inputs` 定义（[`super::super::super::placeholder`]），挡掉「模型自创占位符」。
 //!
 //! 保存的是**带占位的模板**（模板 / 实例分离）：一个计划可换多套参数值，
 //! 运行时由 `${name}` 替换展开。
@@ -18,6 +19,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use planned_agent::chat::{ResultDecision, SubAgentCall, SubAgentResultCallback};
+use planned_agent::flexible::OutputSchema;
 use serde_json::{json, Map, Value};
 
 use crate::pages::plan::shared::session::TemplateNotifier;
@@ -103,18 +105,18 @@ fn build_payload(products: &str) -> Result<String, String> {
     }
 
     // 输出契约可选：跳过输出定义 / 用户选「定不了」都落 null（两者语义等同，见
-    // `docs/planned-agent/flexible-output-step.md` §5）。非 null 时必须是对象。
-    let output_schema = match obj.get("output_schema") {
+    // `docs/planned-agent/flexible-output-step.md` §5）。
+    // 非 null 时走契约的**唯一定义处**校验（`kind` 合法 + 按 kind 的必填项）。
+    let (output_schema, schema_for_placeholders) = match obj.get("output_schema") {
         Some(schema) if !schema.is_null() => {
-            if !schema.is_object() {
-                return Err("output_schema 必须是对象或 null".to_string());
-            }
-            schema.clone()
+            OutputSchema::parse(schema)?;
+            (schema.clone(), Some(schema))
         }
-        _ => Value::Null,
+        _ => (Value::Null, None),
     };
 
-    placeholder::validate(steps, &inputs)?;
+    // 占位符校验同时覆盖 `steps` 与 `output_schema` 的文本字段
+    placeholder::validate(steps, schema_for_placeholders, &inputs)?;
 
     Ok(json!({
         "task": task,
@@ -225,8 +227,9 @@ mod tests {
             ],
             "output_schema": {
                 "kind": "csv",
-                "description": "追加后的文件清单",
-                "detail": null,
+                "goal": "向 ${filepath} 追加一行并导出清单",
+                "success": "文件末尾新增一行即视为成功",
+                "format": "UTF-8 CSV，首行表头，列 path",
                 "required": ["path"],
                 "wanted": [],
             },
@@ -240,6 +243,11 @@ mod tests {
         // 落库的是「模板」：占位符不被展开
         assert_eq!(v["steps"][0]["intent"], "在 ${filepath} 追加一行");
         assert_eq!(v["output_schema"]["kind"], "csv");
+        // 落库的是模板：占位符不被展开
+        assert_eq!(
+            v["output_schema"]["goal"],
+            "向 ${filepath} 追加一行并导出清单"
+        );
         assert_eq!(v["output_schema"]["required"][0], "path");
         assert!(v.get("parameterized_task").is_none());
     }
@@ -268,6 +276,44 @@ mod tests {
         // 非对象
         let err = build_payload(&base(r#","output_schema":"csv""#)).unwrap_err();
         assert!(err.contains("output_schema"), "应点名字段: {err}");
+    }
+
+    /// 契约形态不合法要挡在落库前：kind 非法 / bool 缺 success / 契约里自创占位符。
+    #[test]
+    fn rejects_invalid_schema_before_saving() {
+        let base = |extra: &str| {
+            format!(
+                r##"{{"task_definition":{{"task":"建目录"}},
+                     "inputs":[{{"name":"dir","default":"/tmp/demo","description":"目录"}}],
+                     "steps":[{{"result_reference":"#E1","intent":"在 ${{dir}} 建目录","expected_output":"o"}}]{extra}}}"##
+            )
+        };
+
+        // kind 非法（旧值 `success_only` 已改名为 `bool`）
+        let err = build_payload(&base(
+            r#","output_schema":{"kind":"success_only","success":"s"}"#,
+        ))
+        .unwrap_err();
+        assert!(err.contains("success_only"), "{err}");
+
+        // bool 缺 success
+        let err = build_payload(&base(r#","output_schema":{"kind":"bool","goal":"g"}"#))
+            .unwrap_err();
+        assert!(err.contains("success"), "{err}");
+
+        // 契约里自创占位符：错误要点名 output_schema
+        let err = build_payload(&base(
+            r#","output_schema":{"kind":"bool","goal":"向 ${gone} 追加","success":"s"}"#,
+        ))
+        .unwrap_err();
+        assert!(err.contains("${gone}"), "{err}");
+        assert!(err.contains("output_schema"), "错误应点名来源: {err}");
+
+        // 合法契约照旧通过（契约里的占位符与 steps 用同一个已定义参数）
+        assert!(build_payload(&base(
+            r#","output_schema":{"kind":"bool","goal":"在 ${dir} 建目录","success":"目录已建"}"#,
+        ))
+        .is_ok());
     }
 
     #[test]

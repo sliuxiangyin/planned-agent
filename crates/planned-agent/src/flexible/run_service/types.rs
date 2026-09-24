@@ -139,6 +139,10 @@ pub struct StepSnapshot {
     pub completion_tokens: u32,
     pub tool_calls: usize,
     pub error: Option<String>,
+    /// 该步输出的**全文**（封顶后）：结果展示与输出整理用。
+    pub output: Option<String>,
+    /// `output` 是否被截断（界面据此提示，不得假装完整）。
+    pub output_truncated: bool,
     /// 本步的执行轨迹（think box 的数据）。**跨事件累积**；
     /// 注意 `from_record` 不产出它，由 `state.rs` 在覆盖前接回。
     pub track: Vec<StepTrackLine>,
@@ -158,6 +162,8 @@ impl StepSnapshot {
             completion_tokens: 0,
             tool_calls: 0,
             error: None,
+            output: None,
+            output_truncated: false,
             track: Vec::new(),
         }
     }
@@ -175,6 +181,8 @@ impl StepSnapshot {
             completion_tokens: record.completion_tokens,
             tool_calls: record.tool_calls,
             error: record.error.clone(),
+            output: record.output.clone(),
+            output_truncated: record.output_truncated,
             // 轨迹不在执行记录里：由调用方按 index 接回（见 `state.rs`）。
             track: Vec::new(),
         }
@@ -193,6 +201,8 @@ impl StepSnapshot {
             completion_tokens: 0,
             tool_calls: 0,
             error: None,
+            output: None,
+            output_truncated: false,
             track: Vec::new(),
         }
     }
@@ -219,6 +229,11 @@ pub struct RunSnapshot {
     pub error: Option<String>,
     /// 终态时带上的执行报告（STATS 块用）。
     pub report: Option<PlanRunReport>,
+    /// 本次执行的**最终结果**（按 `output_schema` 整理后交付的东西）。
+    ///
+    /// `None` = 没有结果契约（用户跳过输出定义）或任务未成功；
+    /// 详情见 [`PlanRunReport::result`]。
+    pub result: Option<String>,
 }
 
 impl RunSnapshot {
@@ -245,6 +260,7 @@ impl RunSnapshot {
             finished_at_ms: None,
             error: None,
             report: None,
+            result: None,
         }
     }
 
