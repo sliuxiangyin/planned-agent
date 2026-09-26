@@ -37,7 +37,7 @@ pub struct ExecutorConfig {
 impl Default for ExecutorConfig {
     fn default() -> Self {
         Self {
-            max_rounds_per_step: 10,
+            max_rounds_per_step: 50,
             temperature: None,
             max_tokens: None,
             allowed_tools: None,
@@ -105,7 +105,12 @@ impl FlexibleExecutor {
                 } else {
                     "前序步骤失败"
                 };
-                records.push(placeholder_record(index, step, StepStatus::Skipped, Some(reason)));
+                records.push(placeholder_record(
+                    index,
+                    step,
+                    StepStatus::Skipped,
+                    Some(reason),
+                ));
                 tracing::info!(step = index, reason, "步骤跳过");
                 continue;
             }
@@ -200,8 +205,15 @@ impl FlexibleExecutor {
         // 任务步全部成功后，按 `output_schema` 把交付步的输出整理成「最终结果」：
         // 契约缺失（用户跳过输出定义）则退化为交付步原文；任务未成功则不整理。
         let result = if success {
-            self.resolve_result(template, params, &store, &mut records, sink, cancel.as_ref())
-                .await
+            self.resolve_result(
+                template,
+                params,
+                &store,
+                &mut records,
+                sink,
+                cancel.as_ref(),
+            )
+            .await
         } else {
             None
         };
@@ -280,7 +292,10 @@ impl FlexibleExecutor {
         let Some(raw) = &template.output_schema else {
             // 没有契约（用户跳过输出定义步 / 选「定不了」）：结果退化为交付步原文
             let output = deliverable_output(template, store).map(|(_, output)| output.to_string());
-            tracing::info!(has_result = output.is_some(), "无输出契约：以交付步输出作为结果");
+            tracing::info!(
+                has_result = output.is_some(),
+                "无输出契约：以交付步输出作为结果"
+            );
             return output;
         };
 
@@ -317,7 +332,10 @@ impl FlexibleExecutor {
         // 交付步的完整输出必须给；再带上各步摘要，让整理步在末步信息不全时能回看。
         // 摘要不是装饰 —— 这是 `output_summary` 的第一个生产消费点。
         let mut prior = Vec::with_capacity(records.len() + 1);
-        prior.push((format!("{reference}（交付步的完整输出）"), output.to_string()));
+        prior.push((
+            format!("{reference}（交付步的完整输出）"),
+            output.to_string(),
+        ));
         for record in records.iter() {
             if let Some(summary) = &record.output_summary {
                 prior.push((
@@ -544,10 +562,22 @@ mod tests {
         let requests = ai.requests();
         assert_eq!(requests.len(), 3);
         let messages = serde_json::to_string(&requests[2].messages).unwrap();
-        assert!(messages.contains("结果整理助手"), "应换整理专用 system prompt: {messages}");
-        assert!(messages.contains("文件末尾新增一行即视为成功"), "契约应进请求: {messages}");
-        assert!(messages.contains("第二步产出"), "交付步输出应进请求: {messages}");
-        assert!(messages.contains("向 a.txt 末尾追加一行"), "${{path}} 应被渲染: {messages}");
+        assert!(
+            messages.contains("结果整理助手"),
+            "应换整理专用 system prompt: {messages}"
+        );
+        assert!(
+            messages.contains("文件末尾新增一行即视为成功"),
+            "契约应进请求: {messages}"
+        );
+        assert!(
+            messages.contains("第二步产出"),
+            "交付步输出应进请求: {messages}"
+        );
+        assert!(
+            messages.contains("向 a.txt 末尾追加一行"),
+            "${{path}} 应被渲染: {messages}"
+        );
         assert!(requests[2].tools.is_none(), "整理步不应带工具");
 
         // 整理步也要有自己的事件，UI 的 pipeline 才能显示它
@@ -647,9 +677,15 @@ mod tests {
         let requests = ai.requests();
         assert_eq!(requests.len(), 2);
         let first = serde_json::to_string(&requests[0].messages).unwrap();
-        assert!(first.contains("a.txt"), "第一步 intent 应展开 ${{path}}: {first}");
+        assert!(
+            first.contains("a.txt"),
+            "第一步 intent 应展开 ${{path}}: {first}"
+        );
         let second = serde_json::to_string(&requests[1].messages).unwrap();
-        assert!(second.contains("第一步产出"), "第二步应收到 #E1 的产出: {second}");
+        assert!(
+            second.contains("第一步产出"),
+            "第二步应收到 #E1 的产出: {second}"
+        );
 
         let events = sink.events();
         assert!(events
@@ -714,7 +750,10 @@ mod tests {
             .expect("run 不应失败");
 
         assert!(!report.success);
-        assert!(report.steps.iter().all(|step| step.status == StepStatus::Skipped));
+        assert!(report
+            .steps
+            .iter()
+            .all(|step| step.status == StepStatus::Skipped));
         assert!(ai.requests().is_empty());
     }
 }
