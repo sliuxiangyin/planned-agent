@@ -24,6 +24,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", features = ["serde"] }
 once_cell = "1"
+which = "4"
 crw-extract = "0.3"
 crw-core = "0.3"
 dioxus = { version = "0.7", features = ["desktop"] }

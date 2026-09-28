@@ -14,7 +14,7 @@ async-trait.workspace = true
 tracing.workspace = true
 chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
-which = "4"
+which.workspace = true
 sysinfo = "0.30"
 readability-rust = "0.1"
 htmd = "0.5"

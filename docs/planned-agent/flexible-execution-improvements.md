@@ -67,7 +67,7 @@
 | 工具描述不清（含平台） | `system_tools.rs:19/23/29` | 守卫（按平台拼描述，§5.4） |
 | **工具返回格式不可预测**（大 JSON / 分页 / 大文本） | — | 守卫（描述里写明返回结构） |
 | **参数形态坑**（含空格路径、引号转义、编码） | `step.rs:242-269`（工具层报错只回灌） | 守卫（工具层校验 + 结构化错误：报「path 是相对路径」，而不是 OS 原文） |
-| **能力缺失**：没有对应工具 → 用 shell 绕 | `system_tools.rs:37` `builtin_command_exists` | 环境段直接告知可用命令（§5.2） |
+| **能力缺失** / **运行时不确定**（不知道本机有没有 node/go/python） | `system_tools.rs:37` `builtin_command_exists` | 守卫（**服务启动时探测本机可执行环境**，§5.2） |
 
 #### D. 模型行为（根治不了，但**能加确定性守卫**）
 
@@ -134,7 +134,7 @@
 | 优先级 | 手段 | 确定性 | 生效时机 | 需要 LLM | 边际成本 |
 |---|---|---|---|---|---|
 | **P0** | 工具调用序列进报告 / UI（度量） | — | 观测 | 否 | 0 |
-| **P0** | 环境事实注入（OS / shell / 分隔符） | 100% | **当次** | 否 | 固定段 |
+| **P0** | 环境事实注入（OS / shell / **可执行环境探测**） | 100% | **当次** | 否 | 固定段 |
 | **P1** | 按步收窄工具（`PlanStep.allowed_tools`） | 100% | 当次 | 否 | 0（工具表变小） |
 | **P1** | 工具 `description` 改进（含平台语法） | 100% | 当次 | 否 | 0（描述本就要传） |
 | **P1** | 重复调用守卫（照抄 planner `max_repeats`，§2.1-D1） | 100% | 当次 | 否 | 0 |
@@ -189,7 +189,7 @@ pub struct ToolCallRecord {
 
 ```rust
 // flexible/environment.rs（新）
-/// 本次执行的运行环境事实（全部可确定性探测）。
+/// 本次执行的运行环境事实（可确定性探测）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeEnvironment {
     pub os: String,                        // std::env::consts::OS
@@ -198,16 +198,26 @@ pub struct RuntimeEnvironment {
     pub line_ending: String,               // CRLF / LF（由 cfg!(windows) 定）
     pub shell: Option<String>,             // COMSPEC / SHELL 环境变量
     pub console_encoding: Option<String>,  // 宿主补（Windows 常见 UTF-8 / GBK）
+    /// ★ 本机可执行环境：探测到的（带版本）/ 明确跑不起来的
+    #[serde(default)]
+    pub executables: ExecutableProbe,
     pub working_dir: Option<String>,       // current_dir()；**默认不注入**，见 §5.2.5
-    pub notes: Option<String>,             // 宿主 / 用户自由补充
+    pub notes: Option<String>,             // 人工补充的「其它说明」
+    /// 探测时刻：**只给 UI 看，不进 prompt**
+    pub probed_at: Option<String>,
 }
 
-impl RuntimeEnvironment {
-    /// 零依赖探测（只用 `std`）：os / arch / 分隔符 / 行尾 / shell。
-    pub fn detect() -> Self;
-    /// 渲染成注入 prompt 的一段（不含前后空行，由调用方拼接）。
-    pub fn render_block(&self) -> String;
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ExecutableProbe {
+    /// 名单里**可用**的：`(命令名, 版本首行)`；版本可能为 None（能跑但取不到版本）
+    pub available: Vec<(String, Option<String>)>,
+    /// 名单里**不可用**的 —— 显式告诉模型「别试」
+    pub missing: Vec<String>,
 }
+
+/// 默认探测名单（可配置覆盖）
+pub const DEFAULT_PROBE_NAMES: &[&str] =
+    &["node", "python", "python3", "php", "go", "cargo", "rustc"];
 ```
 
 **字段来源的三种处置**：
@@ -218,17 +228,40 @@ impl RuntimeEnvironment {
 | `path_separator` / `line_ending` | **自动** | `std::path::MAIN_SEPARATOR` / `cfg!(windows)` |
 | `shell` | **自动** | `COMSPEC` / `SHELL` 环境变量；探测不到就 `None`（**不强猜**） |
 | `console_encoding` | **宿主补** | Windows 下 cmd 输出可能是 GBK；内核无法可靠探测 |
+| **`executables`** | **自动（spawn）** | 名单见 `DEFAULT_PROBE_NAMES`；**并发 + 每命令超时**（§5.2.2） |
 | `working_dir` | **自动** | ⚠️ 含用户名路径 → **默认不注入**（§5.2.5） |
-| `notes` | **宿主 / 用户** | 如「本机没装 python3，只有 python」；**会发给 provider** |
-| ~~可用命令列表~~ | **不探测** | 要跑 `where` / `which`，代价大 → 改用 `notes` 人工补 |
+| `notes` | **宿主 / 用户** | 探测不到的事实（如「目标目录只读」）；**会发给 provider** |
 | ~~时间 / 时区~~ | **不注入** | 每次都变 → 打穿 provider 的 prompt 前缀缓存（§5.2.4） |
 
-#### 5.2.2 探测时机
+**`executables` 的判定规则**（三步，**Q19 = A**）：
 
-**执行开始时探测一次**（在 `FlexibleExecutor` 构造时定死），**不落库、不缓存**：
+| 步 | 条件 | 判定 | 理由 |
+|---|---|---|---|
+| 1 | `which::which(name)` 失败 | `missing` | PATH 里就没有 |
+| 2 | Windows 且**路径位于 `WindowsApps`** | `missing`（**不 spawn**） | Microsoft Store 存根：spawn 会**弹出应用商店** |
+| 3 | spawn `<name> <版本参数>` 退出码 0 | `available` + 版本首行 | 能跑 = 真可用 |
+| 3' | 退出码非 0 / 超时 / 启动失败 | `missing` | 「跑不起来」就应该告诉模型别试 |
+| — | stdout 为空 | **改读 stderr** | ⚠️ Windows 的 `python --version` 把版本写进 **stderr** |
 
-- 每次执行重新探测 → 换机器 / 换 shell 立刻反映（§11）；
-- 同一次执行内每步看到**同一份**事实 → prompt 稳定、可复现。
+> 「是否 Store 存根」抽成**纯函数** `is_store_stub(path) -> bool`（跨平台可单测，见 §5.2.7）。
+
+各命令的版本参数**不一样**（必须内置映射，否则探不到）：
+
+| 命令 | 参数 | 典型输出 |
+|---|---|---|
+| `node` / `python` / `python3` / `php` / `cargo` / `rustc` | `--version` | `v24.15.0` / `Python 3.12.1` / `cargo 1.95.0 (…)` |
+| **`go`** | **`version`**（**不是** `--version`） | `go version go1.21.0 windows/amd64` |
+
+版本**取首行 + 截 60 字符**（不解析版本号本身，避免脆弱）。
+
+#### 5.2.2 探测时机：**服务启动时一次**（用户要求）
+
+- **落点**：`RunServiceCore::run`（`run_service/core.rs:65`，**async**）开头 → `inner.environment = RuntimeEnvironment::detect().await`；
+- **为什么放这里**：`RunLoop::start`（`core.rs:105-108`）明确「**全程不 await**」（为了消除「已受理但还没起跑」的中间态），探测**绝不能**进 `start`；而 `run` 是常驻循环入口，天然就是「服务启动」；
+- **并发 + 超时**：7 个命令**并发**探（`futures::future::join_all`），每命令 `tokio::time::timeout(1.5s, …)` → 启动最多多花 ~1.5 s（实测 node/python 启动 50–200 ms，通常 < 300 ms）；
+- **记录**：存在 `RunLoop.environment`（服务级，所有会话 / 所有执行共用）；**不落库**（Q17）；
+- **过期**：服务常驻 → 装/卸运行时不会自动更新 → **重启应用重探**（Q18），UI 显示 `probed_at`；
+- **覆盖**：`RunRequest.environment: Option<…>`（`None` = 用服务级那份）。
 
 #### 5.2.3 注入落点与确切文本
 
@@ -248,13 +281,17 @@ pub(crate) fn step_system_prompt(env: Option<&RuntimeEnvironment>) -> Cow<'stati
 - 操作系统：windows (x86_64)
 - 路径分隔符：\ ，行尾：CRLF
 - 默认 shell：powershell
+- 本机可执行环境：node v24.15.0、python 3.12.1、cargo 1.95.0、rustc 1.95.0
+  不可用：php、go
 - 执行命令时直接使用本平台语法（Windows：dir / type / where / findstr；不要用 ls / cat / which / grep），路径用绝对路径。
-- 附加：本机没装 python3，只有 python
+- 其它说明：本机只有 python，没有 python3
 ```
 
-- `附加：` 一行**仅在 `notes` 非空时**出现；
+- **`本机可执行环境`**：可用项带版本；`不可用：…` 一行**仅在非空时**出现（这正是「别试 go」的答案）；
+- `其它说明：` = `notes`，**仅在非空时**出现；
 - `console_encoding` 非空时插一行 `- 控制台编码：GBK（工具输出可能非 UTF-8）`；
-- 字段缺失时**该行不出现**（不写「未知」占位）。
+- 字段缺失时**该行不出现**（不写「未知」占位）；
+- **只显示命令名与版本，不显示路径**（`which` 会返回 `C:\Program Files\nodejs\node.exe` 这类 → 外发隐私 + 撑长 prompt）。
 
 #### 5.2.4 为什么放 system、为什么砍掉时间
 
@@ -264,6 +301,7 @@ pub(crate) fn step_system_prompt(env: Option<&RuntimeEnvironment>) -> Cow<'stati
 | **不含**时间 / 时区 | 每次执行都不同 → 打穿 provider 的 **prompt 前缀缓存**，白花钱；它也不是「环境事实」 |
 | 每步都带（不只第一步） | 每步是**独立**消息列表（`step.rs:1-5`），后一步看不到第一步的 system |
 | `#RESULT` 整理步**不注入** | 整理步不碰环境（无工具、只整理数据），注入纯浪费 |
+| **`which` 预过滤 + spawn 定可用性**（Q19 = A） | `which` **只用来剔除 Store 存根**（spawn 它会弹应用商店）；真正的「可用」仍以 `--version` 能否执行为准 |
 
 #### 5.2.5 隐私（**必须定**，见 Q12 / Q14）
 
@@ -283,17 +321,18 @@ pub(crate) fn step_system_prompt(env: Option<&RuntimeEnvironment>) -> Cow<'stati
 
 | 文件 | 改动 |
 |---|---|
-| `flexible/environment.rs` | **新增**：结构 + `detect()` + `render_block()` + 单测 |
+| `flexible/environment.rs` | **新增**：`RuntimeEnvironment` + `ExecutableProbe` + `detect()`（**async**：`which` 预过滤 → 并发 spawn 探版本）+ `is_store_stub()` + `render_block()` + 单测 |
+| `Cargo.toml`（根）+ 两个 crate | `which = "4"` 提到 `[workspace.dependencies]`（根 `Cargo.toml:16`）；`crates/tool-manager` 改 `which.workspace = true`；`crates/planned-agent` 加 `which.workspace = true` |
 | `flexible/prompt.rs` | 新增 `step_system_prompt(env)`；`STEP_SYSTEM_PROMPT` **保持不动** |
 | `flexible/step.rs` | `run_step` 增 `system_prompt: &str` 参数（由 executor 拼好传入）；`run_output_resolve` 不动 |
 | `flexible/executor.rs` | `FlexibleExecutor::new` 增 `environment: Option<RuntimeEnvironment>`；每步取 `step_system_prompt(self.environment.as_ref())` |
 | `run_service/types.rs` | `RunRequest` 增 `environment: Option<RuntimeEnvironment>` |
-| `run_service/core.rs` | `start` 把 `request.environment` 透传给 `FlexibleExecutor::new` |
-| `flexible/mod.rs` | 导出 `RuntimeEnvironment` |
-| `services/run_service.rs`（GUI） | `start_run_with_template(..., environment)`；调用点默认 `Some(RuntimeEnvironment::detect())` |
+| `run_service/core.rs` | **`run` 开头探测一次**（`core.rs:65`）存入 `RunLoop.environment`；`start` 里 `request.environment.clone().or(服务级)` 传给执行器（`start` **保持不 await**） |
+| `flexible/mod.rs` | 导出 `RuntimeEnvironment` / `ExecutableProbe` |
+| `services/run_service.rs`（GUI） | `start_run_with_template` 增可选 `environment` 参数；**默认不传**（用服务级探测结果） |
 | `left_panel/left_panel.rs` | `on_run` 组装 env（**不受开关影响**，§7） |
 
-**成本**：约 5 行 ≈ 150 字符 ≈ 60–100 token / 每次 LLM 请求（N 步 × 轮数）；宿主不传即关闭。
+**成本**：① 服务启动时一次性探测（并发，通常 < 300 ms；最坏受 1.5 s 超时封顶）；② 环境段约 6 行 ≈ 200 字符 ≈ 80–120 token / 每次 LLM 请求（N 步 × 轮数）。宿主不传即关闭。
 
 #### 5.2.7 测试计划
 
@@ -305,6 +344,10 @@ pub(crate) fn step_system_prompt(env: Option<&RuntimeEnvironment>) -> Cow<'stati
 | `prompt::env_appended` | `Some(env)` 以常量为前缀、含「不要试探确认」 |
 | `step::system_prompt_reaches_request` | `FakeAiClient` 抓 `requests()[0].messages[0]`，断言含环境段 |
 | `executor::env_none_no_block` | `RunRequest.environment = None` 时请求里**不含**环境段（回归保护） |
+| `environment::probe_version_args` | `go` 用 `version`、其余用 `--version`（映射表回归） |
+| `environment::probe_reads_stderr` | 版本只在 stderr 时也能取到（Windows `python --version`） |
+| `environment::probe_timeout_is_missing` | 超时 / 非 0 退出 → 归 `missing`，且**不 panic、不堵死启动** |
+| `environment::store_stub_is_skipped` | `is_store_stub()` 对 `…\WindowsApps\python.exe` 返回 `true`（纯函数，跨平台可测） |
 
 > **⚠️ 写代码时的坑**（本仓库踩过）：环境段含反斜杠 —— Rust 源码里写单引号包的双反斜杠字符字面量，提示词文本用 **raw string**（`r#"..."#`）；否则反斜杠会被当转义符。
 
@@ -523,12 +566,12 @@ pub struct RunRequest {
 - **验收**：`cargo test -p planned-agent --lib flexible::report`；手工看 PIPELINE
 - **对应**：§2.1 **D1 / D3 / D4** —— 所有守卫与改进的观测前提
 
-### 2. 环境事实注入（P0，无 LLM，当次生效）
+### 2. 环境事实注入 + 本机可执行环境探测（P0，无 LLM，当次生效）
 
-- **新**：`crates/planned-agent/src/flexible/environment.rs` → `RuntimeEnvironment { os, arch, path_separator, line_ending, working_dir, shell, notes }` + `detect()`（纯 `std`）
-- **改**：`prompt.rs` 加 `step_system_prompt(env)`；`step.rs` 换成它；`run_service/types.rs` 的 `RunRequest` 加 `environment`；GUI 侧补 `shell` / `notes`
-- **验收**：`flexible::environment` / `flexible::prompt` 单测，**env 为 `None` 时输出与今天逐字一致**
-- **对应**：§2.1 **C5** + 用户例子（Win / Linux）
+- **新**：`crates/planned-agent/src/flexible/environment.rs` → `RuntimeEnvironment`（os / arch / 分隔符 / 行尾 / shell / `executables` / working_dir / notes / probed_at）+ `ExecutableProbe` + `detect()`（**async**）+ `render_block()`
+- **改**：`prompt.rs` 加 `step_system_prompt(env)`；`step.rs` 的 `run_step` 加 `system_prompt` 参数；`run_service/core.rs` 的 **`run` 开头探测一次**存进 `RunLoop`；`RunRequest` 加 `environment`（覆盖用）
+- **验收**：`flexible::environment` / `flexible::prompt` 单测（**env 为 `None` 时输出与今天逐字一致**；`go` 用 `version`；stderr 版本能取到；超时归 `missing`）
+- **对应**：§2.1 **C5** + 用户例子（Win / Linux + 「本机有没有 go」）
 
 ### 3. 工具描述按平台生成（P1，无 LLM，全局生效）
 
@@ -599,8 +642,13 @@ pub struct RunRequest {
 | Q10 | 启动前 lint 是「拒绝启动」还是「仅警告」 | 默认**仅警告**（左面板提示），不阻塞 —— 避免 lint 误判把本可跑的计划挡住 |
 | Q11 | `max_rounds_per_step = 50`（`executor.rs:40`）是否调小 | 默认**不调**，先看 §8 的数据 |
 | Q12 | `working_dir` 是否进环境段 | 默认**不注入**（含 `C:\Users\<用户名>`，属**外发**隐私，见 §5.2.5） |
-| Q13 | 环境段是否含「可用命令列表」 | 默认**不含**（要跑 `where` / `which`，代价大）→ 用 `notes` 人工补 |
+| Q13 | 环境段是否含可执行环境 | **含**（已拍板）：可用项带版本 + `不可用：…` 一行 |
 | Q14 | `notes` 由谁维护、是否给左面板加输入框 | 第一版**留空**由宿主填；左面板输入框列为后续可选项 |
+| Q15 | 探测名单 | **默认**：`node / python / python3 / php / go / cargo / rustc`（可配） |
+| Q16 | 探不探版本号 | **一起探**（已拍板）：spawn `<cmd> --version`（`go version`），首行截 60 字符 |
+| Q17 | 探测结果是否落库 | **不落库**（已拍板）：服务级内存 + UI 展示 |
+| Q18 | 环境过期怎么办 | **重启应用重探**（已拍板）；UI 显示 `probed_at`；手动刷新按钮列为可选 |
+| Q19 | Windows Store 的 `python` 存根怎么处理 | **A（已拍板）**：`which` 拿路径 → 含 `WindowsApps` 直接归 `missing`、**不 spawn**；否则再 spawn 取版本 |
 
 ## 11. 风险与边界
 
@@ -608,7 +656,7 @@ pub struct RunRequest {
 |---|---|---|
 | **改错方向** | 若真实弯路主要来自别的成因，§5.2/§5.3 收益为零 | §8 的「测不出差异就停手」是硬闸 |
 | 收窄工具**过窄** | 排除掉必需工具 → 必然失败 | Q2 默认只做软提示；硬约束需人工确认（Q3） |
-| 环境事实**过期** | 换了机器 / 换了 shell | 每次执行**重新探测**（不落库、不缓存） |
+| 环境事实**过期** | 装/卸了运行时（如中途装了 `go`），常驻服务仍报旧结果 | **服务启动时探测一次并记录**（Q18）→ 重启应用重探；UI 显示 `probed_at` |
 | 成功配方**是巧合** | 上次参数恰好对 → 被当成标准答案 | 只作**提示**不作约束；可删；永不覆盖 `intent` |
 | `preferred_tools` **膨胀** | 每次执行都追加 | **覆盖**语义（只留最近一次成功路径），不是累积 |
 | 目标歧义**无法自动消除** | 有些歧义只有真跑到那一步才暴露 | 只产出**建议**，由人拍板（Q5） |
