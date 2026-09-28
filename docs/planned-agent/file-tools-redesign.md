@@ -658,3 +658,52 @@ UTF-16 解码需处理**奇数长度**（报 `invalid_encoding`）与**代理对
 审查同时确认这些**不是**缺陷：分页边界（`offset > total_lines` / 空文件 / 恰好读到末行）、`truncate_at_char_boundary` 不会切多字节字符、`edit_file` 的 `matches` 与 `replacen` 计数一致、`apply_newline_style` 不会产出 `\r\r\n`、`atomic_write` 两路失败都会清临时文件、`&bytes[bom_len..]` 不会越界、日志不泄漏 `content`。
 
 修复后 `cargo test -p planned-agent-tool-manager --lib` → **89 passed**。
+
+---
+
+## 10. 跨平台行为核对（系统环境对这组工具的影响）
+
+**问题**：这四个工具在不同 OS（Windows / Linux / macOS）上行为是否有差异、是否需要在 system prompt 里区分系统环境？
+
+**代码事实**：`file_tools.rs` 与 `fs_support.rs` 里**没有任何 `#[cfg(windows)]` / `#[cfg(unix)]`**（全仓的 cfg 分支都在 `system_tools.rs`）；唯一的平台相关逻辑是 `strip_verbatim`（**运行期判前缀**，不是编译期分支）。
+
+**结论：不需要在 prompt 层为这四个工具区分系统环境。** 与 `execute_command` 形成对照：
+
+| | 输入本质 | 需要平台事实吗 |
+|---|---|---|
+| `builtin_execute_command` | 命令名（`dir` / `ls` / `taskkill`）= **OS 属性** | 是 → 由「执行期运行环境段」提供（`system-tools-redesign.md` 第四轮终审） |
+| `read/write/edit/list_dir` | 换行 / 编码 / 权限 / 路径 = **文件属性** | 否 |
+
+换行是**文件的属性**、不是 OS 的属性 —— 正确行为取决于「这个文件是什么风格」，与「你在什么系统」无关。这是这四个工具比 `execute_command` 干净得多的根本原因。
+
+### 10.1 已消化的差异（0 个平台分支）
+
+| 差异 | 处理方式 |
+|---|---|
+| 换行 | `detect_newline` 按**文件内容**判 lf/crlf/mixed，不查 OS |
+| 读目录报错 | Linux 报 `IsADirectory`、Windows 报 `PermissionDenied` → 读之前**显式 `metadata.is_dir()`** 前置判断，两端统一 `is_a_directory`（不做这步错误码就会随 OS 漂移） |
+| Windows `\\?\` 路径 | `strip_verbatim` 运行期剥前缀，让 `resolved_path` 与其它平台同风格 |
+| rename 覆盖 | Windows 走 `MoveFileEx(REPLACE_EXISTING)`；目标被占用则失败 → 映射 `permission_denied` + 「若文件正被其它程序占用」提示 |
+| 文件名非法字符 / 大小写敏感 | 交给 OS，错误统一映射 |
+
+### 10.2 有意统一掉的差异（是决策，不是 bug）
+
+| 项 | 行为 | 拍板 |
+|---|---|---|
+| 新建文件换行 | 一律 **LF**（不看 OS） | **保持统一**：与「file 工具不区分系统环境」一致，已在 description 声明 |
+| `write_file` 的 BOM | 不写 BOM（`edit_file` 保留原 BOM） | **维持现状**：`content` 是调用方给的全量内容，工具不替它猜 |
+| `edit_file` 编码 | 只支持 UTF-8 | 既定（Q4 零新依赖）。Windows 上 GBK/UTF-16 文件会走 `invalid_encoding`，属已知代价 |
+
+### 10.3 本次补上的缺口：Unix 权限保留
+
+`atomic_write` 原来用 `File::create(&tmp)` 建临时文件 → 权限是 umask 默认（通常 `0644`），`rename` 覆盖后**原文件的 `0600` / `0755` 被静默放宽**。Windows 的 ACL 不随 rename 变化，所以**只在 Unix 上暴露**。
+
+修法（已经落地）：
+
+- 覆盖前取 `std::fs::metadata(path).ok().map(|m| m.permissions())`（不存在则 `None` → 新建文件走默认权限）；
+- 写入后 `file.set_permissions(...)` 复制到临时文件；
+- **刻意用跨平台 API、不加 `#[cfg(unix)]`** —— `#[cfg]` 掉的代码在非 Unix 平台连语法/类型错都发现不了，而 `Permissions` / `set_permissions` 在 Windows 上也有意义（保留只读标志）；
+- 顺序必须放在 `write_all` **之后**：Windows 上先把文件置为只读，后续写入就会失败。
+
+回归：`cargo test -p planned-agent-tool-manager --lib` → **90 passed**。
+⚠️ 其中 Unix 权限的两条断言是 `#[cfg(unix)]`，**在 Windows 开发机上被跳过、未在本机实测** —— 需要一次 Linux/macOS 上的 `cargo test -p planned-agent-tool-manager --lib` 确认（测试名 `atomic_write_preserves_existing_permissions` / `atomic_write_creates_new_files_with_default_permissions`）。
