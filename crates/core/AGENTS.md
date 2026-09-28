@@ -98,3 +98,4 @@ core 是多个 crate 的依赖，改公开 API 后建议再 `cargo check --works
 
 - `mcp/mod.rs:1` 的文档写「Model Context Protocol **实现**」，但 core 实际只放 `McpClient` trait 与数据模型，真实现在 `crates/mcp-rmcp` —— 措辞与「抽象在 core」的约定不符，看到时顺手修。
 - **注释里的示例类型名已过时**，别照抄：`errors/mod.rs:9` 举例 `errors::error_types::AgentError`（实际类型是 `PlanSystemError`）；`events/mod.rs:14` 举例 `events::event_types::ExecutionEvent`（实际是 `SystemEvent`）。**以类型定义为准。**
+- `docs/core.md` 是**早期**设计稿，已与代码脱节：它列出的 `crates/core/src/types.rs`、`factory/` 目录**现在都不存在**。读它时只当历史背景，**不要照抄**。
