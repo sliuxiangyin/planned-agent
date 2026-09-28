@@ -198,21 +198,39 @@ pub fn step_system_prompt(env: Option<&RuntimeEnvironment>) -> Cow<'static, str>
 | # | 决策 | 说明 |
 |---|---|---|
 | P1 | **`Signal + context`** | 见 §3.1。`GlobalSignal<T> = Global<Signal<T>>`，其 storage 类型文档未承诺可跨线程写，而探测要在别的线程写回 —— 仓库已验证的写法是 `use_signal_sync`（`SyncStorage`）。 |
-| P2 | **本期只做 GUI 侧**（改动点 6–8） | 内核通道（2–5）留到下一步。⚠️ 因此**本期环境不会进入执行链路**：`EnvironmentContext` 先就位，等内核开通后一行接上。 |
+| P2 | **值传递，内核侧一并打通** | 曾定「先只做 GUI 侧」，随后按次轮决策改为**值传递**并一次做完（改动点 2–8）。理由：`RuntimeEnvironment` 来自 core（L0），内核收它**不新增依赖边**；若改成内核定义 `EnvironmentProvider` trait，则属于 v2 已删除的「依赖接缝」（`run_service/mod.rs:9`、设计稿 §12.1）。 |
 | P3 | **`detect_host()` 同步播种** | 首帧即有宿主事实，无空窗期。 |
 | P4 | **只交付代码层方法**（不做 UI） | `snapshot()` / `is_probing()` / `refresh()` + `use_environment()`；刷新入口等 UI 需求出现时再接。 |
 | P5 | **全量重探** | `refresh()` 即 `detect()` 全量；不做定点补探。 |
+| P6 | **环境段拼在 system prompt 尾部、一次执行算一次** | 每步拿到完全相同的字符串 → 整段可命中 provider 前缀缓存；`#RESULT` 整理步**不拼**环境段。 |
+| P7 | 渲染与「该用什么命令」的建议由**内核侧**生成（`flexible/prompt.rs`） | 守住 `core/host` 的边界：core 只给事实、不给策略。 |
 
 ## 6. 实施记录（本期）
 
-已落地，`cargo check -p planned-agent-gui` 通过：
+全部落地，`planned-agent` 与 `planned-agent-gui` 测试均全绿。
 
-| 文件 | 内容 |
+**内核侧（`crates/planned-agent/src/flexible/`）**
+
+| 文件 | 改动 |
 |---|---|
-| `crates/agent-gui/src/context/environment.rs` | **新增** `EnvironmentContext`：`new()`（`detect_host()` 播种 + 后台探测）、`snapshot()`、`is_probing()`、`refresh()`、`use_environment()` |
-| `crates/agent-gui/src/context/mod.rs` | `pub mod environment;` + `pub use environment::EnvironmentContext;` |
-| `crates/agent-gui/src/main.rs` | `app()` 里 `use_context_provider(EnvironmentContext::new)`（与 `GuiConfig` / `McpChangeNotifier` 同级；不阻塞首屏） |
+| `prompt.rs` | 新增 `step_system_prompt(env) -> Cow` + `render_environment_into` + `command_hint`；`None` ⇒ `Cow::Borrowed(STEP_SYSTEM_PROMPT)` 零分配。**不渲染** `working_dir` / `probed_at`。3 个新单测 |
+| `step.rs` | `run_step` 的 system prompt 由硬编码改为**入参** |
+| `executor.rs` | `run(…, environment, …)`；开头算**一次** system prompt，每步复用 |
+| `run_service/types.rs` | `RunRequest` 加 `environment: Option<RuntimeEnvironment>`（+ Debug 字段） |
+| `run_service/core.rs` | 解构 `environment` 并传入 `executor.run` |
 
-**实现取舍**：后台探测用**独立线程 + 独立 tokio runtime**（`new_current_thread().enable_all()`），而不是 dioxus 的 `spawn` —— 探测依赖 `tokio::process`（需要 process driver），GUI 里没有该先例（`kv.rs` 用的 `spawn_blocking` 只需 blocking pool，要求更低）。写回走 `SyncStorage`，跨线程写正是它的用途。代价：每次刷新新建一次 runtime（低频操作，可接受）。
+**GUI 侧（`crates/agent-gui/src/`）**
 
-**未做**：内核通道（§3.5 的改动点 2–5）、执行链路接线、UI。
+| 文件 | 改动 |
+|---|---|
+| `context/environment.rs` | **新增** `EnvironmentContext`：`new()`（`detect_host()` 播种 + 后台探测）、`snapshot()`、`is_probing()`、`refresh()` |
+| `context/mod.rs` | 登记 + re-export `EnvironmentContext` / `use_environment` |
+| `main.rs` | `app()` 里 `use_context_provider(EnvironmentContext::new)` |
+| `services/run_service.rs` | `start_run_with_template` 加 `environment` 参数，在**组装请求那一刻** `snapshot()` |
+| `pages/plan/left_panel/left_panel.rs` | 取句柄并传入（`Copy`，可重复用于多次点击） |
+
+**实现取舍**：后台探测用**独立线程 + 独立 tokio runtime**（`new_current_thread().enable_all()`），而不是 dioxus 的 `spawn` —— 探测依赖 `tokio::process`（需要 process driver），GUI 里没有该先例（`kv.rs` 用的 `spawn_blocking` 只需 blocking pool）。写回走 `SyncStorage`，跨线程写正是它的用途。代价：每次刷新新建一次 runtime（低频，可接受）。
+
+**验证**：`cargo test -p planned-agent --lib flexible::` → **72 passed / 0 failed**；`cargo test -p planned-agent-gui --bins` → **62 passed / 0 failed**。
+
+**未做**：UI（刷新入口按 P4 暂不交付 —— 因此 `refresh()` / `is_probing()` 当前无调用点，是预期状态）。
