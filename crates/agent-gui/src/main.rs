@@ -42,6 +42,14 @@ impl PartialEq for BootServices {
 /// 全局配置实例（main 中初始化一次，app 中通过 Context 消费）
 static APP_CONFIG: OnceLock<GuiConfig> = OnceLock::new();
 
+/// 启动时加载的全局配置；未初始化（如 GUI 单测）时退回默认值。
+pub fn app_config() -> &'static GuiConfig {
+    static FALLBACK: OnceLock<GuiConfig> = OnceLock::new();
+    APP_CONFIG
+        .get()
+        .unwrap_or_else(|| FALLBACK.get_or_init(GuiConfig::default))
+}
+
 /// 日志文件写入器 guard：必须常驻进程生命周期，否则非阻塞写入会被 drop 后丢失。
 /// `OnceLock` 保证只初始化一次；故意 leak，保持静态生命周期。
 static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();

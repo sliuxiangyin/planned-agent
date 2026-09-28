@@ -52,6 +52,22 @@ pub fn start_run_service(services: &ReadyServices) -> (Arc<RunService>, Arc<Plan
 /// 为什么不做成「传 `session_id` 让服务去读库」：那正是 v1 的接缝形态，会把「会话是否定稿 /
 /// 模板能否反序列化」带进执行路径（见设计稿 §12）。将来首页要「直接跑某个会话」时，
 /// 在调用方 `load_template` 之后再调本函数即可 —— 三态解析留在 UI 层。
+/// 组装执行器配置：**会话段在这里拼上** —— 执行器不认识「会话」概念
+/// （见 `docs/planned-agent/flexible-step-output-spill.md` §5.2）。
+fn executor_config_for(session_id: &str) -> ExecutorConfig {
+    let flexible = &crate::app_config().flexible;
+    ExecutorConfig {
+        cache_dir: std::path::PathBuf::from(&flexible.output_cache_dir).join(session_id),
+        spill_threshold_chars: flexible.spill_threshold_chars,
+        spill_preview_chars: flexible.spill_preview_chars,
+        // `0` 在配置里表示「不限制」，对应内核的 `None`。
+        llm_timeout: (flexible.llm_timeout_secs > 0)
+            .then(|| std::time::Duration::from_secs(flexible.llm_timeout_secs)),
+        llm_timeout_retries: flexible.llm_timeout_retries,
+        ..ExecutorConfig::default()
+    }
+}
+
 pub fn start_run_with_template(
     service: Arc<RunService>,
     ai: Arc<AiContext>,
@@ -59,20 +75,23 @@ pub fn start_run_with_template(
     template: FlexiblePlanTemplate,
     params: PlanRunParams,
     environment: EnvironmentContext,
-) -> Result<(), String> {
-    let client = ai.manager.default().map_err(|error| {
+) -> Result<(), String> {    let client = ai.manager.default().map_err(|error| {
         // 启动失败原先只弹 toast，日志里没有任何痕迹，事后无从追查 —— 这里补上。
         let reason = format!("AI 客户端不可用：{error}");
         tracing::warn!(session = %session_id, reason = %reason, "执行未启动");
         reason
     })?;
 
+    // 先算配置（要用 `session_id` 拼缓存目录 —— 执行器不认识会话概念），
+    // 再把 `session_id` move 进请求。
+    let config = executor_config_for(&session_id);
+
     service.start(RunRequest {
         session_id,
         template,
         params,
         client,
-        config: ExecutorConfig::default(),
+        config,
         // 在**组装请求的这一刻**取环境：`snapshot()` 读的是信号的当下值。
         // 刷新只影响此后新发起的执行；正在跑的那次用它自己启动时的快照。
         environment: Some(environment.snapshot()),

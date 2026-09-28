@@ -150,6 +150,7 @@ mod tests {
             output_summary: None,
             output: None,
             output_truncated: false,
+            output_file: None,
             error: error.map(str::to_string),
         }
     }

@@ -144,6 +144,8 @@ pub struct StepSnapshot {
     pub output: Option<String>,
     /// `output` 是否被截断（界面据此提示，不得假装完整）。
     pub output_truncated: bool,
+    /// 该步产出落盘时的文件路径（未落盘为 `None`）。
+    pub output_file: Option<String>,
     /// 本步的执行轨迹（think box 的数据）。**跨事件累积**；
     /// 注意 `from_record` 不产出它，由 `state.rs` 在覆盖前接回。
     pub track: Vec<StepTrackLine>,
@@ -165,6 +167,7 @@ impl StepSnapshot {
             error: None,
             output: None,
             output_truncated: false,
+            output_file: None,
             track: Vec::new(),
         }
     }
@@ -184,6 +187,7 @@ impl StepSnapshot {
             error: record.error.clone(),
             output: record.output.clone(),
             output_truncated: record.output_truncated,
+            output_file: record.output_file.clone(),
             // 轨迹不在执行记录里：由调用方按 index 接回（见 `state.rs`）。
             track: Vec::new(),
         }
@@ -204,6 +208,7 @@ impl StepSnapshot {
             error: None,
             output: None,
             output_truncated: false,
+            output_file: None,
             track: Vec::new(),
         }
     }

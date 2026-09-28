@@ -42,7 +42,10 @@ pub mod run_service;
 mod testing;
 
 pub use event::{ChannelSink, NullSink, PlanRunEvent, PlanRunSink};
-pub use executor::{ExecutorConfig, FlexibleExecutor};
+pub use executor::{
+    ExecutorConfig, FlexibleExecutor, DEFAULT_CACHE_DIR, DEFAULT_LLM_TIMEOUT_RETRIES,
+    DEFAULT_LLM_TIMEOUT_SECS, DEFAULT_SPILL_PREVIEW_CHARS, DEFAULT_SPILL_THRESHOLD_CHARS,
+};
 pub use output_schema::{OutputKind, OutputSchema};
 pub use params::{render_step_expected_output, render_step_intent, PlanRunParams};
 pub use placeholder::{

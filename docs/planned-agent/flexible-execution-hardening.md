@@ -36,12 +36,18 @@ A 组执行正确性、B 组执行状态机、C 组工具收窄（不落库部�
 
 ## 2. 批次与实施顺序
 
-| 批次 | 内容 | 理由 |
-|---|---|---|
-| **P0** | C1（工具序列进报告）、A1、A2 | C1 零风险且是后续一切观测的前提；A1/A2 是硬缺陷 |
-| **P1** | D1、D2、B1a（取消即时） | 确定性守卫 + 一个真实卡死风险 |
-| **P2** | A3、A4、A5、B2、C2、C3 | 语义/预算类，需先定参数 |
-| **P3** | B3、B4、D3、C4 | 动 UI / 动其它 crate / 只是文档约定 |
+| 批次 | 内容 | 状态 | 理由 |
+|---|---|---|---|
+| **P0** | C1（工具序列进报告）、A1、A2 | A1 ✅ · A2 ✅ · C1 未做 | C1 零风险且是后续一切观测的前提；A1/A2 是硬缺陷 |
+| **P1** | D1、D2、B1a（取消即时）、B1b（超时 + 超时重试） | B1a ✅ · B1b ✅ · D1/D2 未做 | 确定性守卫 + 一个真实卡死风险 |
+| **P2** | A3、A4、A5、B2、C2、C3 | A3 ✅ · A4 ✅ · A5 ✅ · 其余未做 | 语义/预算类，需先定参数 |
+| **P3** | B3、B4、D3、C4 | 未做 | 动 UI / 动其它 crate / 只是文档约定 |
+
+> **A 组（A1–A5）已全部完成**（2026-09-28）。A1/A2/A3 按本节设计直接实施；
+> **A4/A5 不是按本节的原设计实现的** —— 原方案（硬截断 + 预算）被判定「不比截取」而放弃，
+> 改为**产出落文件 + 下游按需分页读取**，见 `flexible-step-output-spill.md`。
+> 回归基线（实测）：`cargo test -p planned-agent --lib flexible::` = **88 passed**；
+> `cargo test -p planned-agent-gui --bins` = **63 passed**。
 
 > 每项完成后单独跑 `cargo test -p planned-agent --lib flexible::`；D3 跑 `cargo test -p planned-agent-tool-manager`。
 
@@ -51,21 +57,21 @@ A 组执行正确性、B 组执行状态机、C 组工具收窄（不落库部�
 
 ### A 组 · 执行正确性
 
-#### A1（高）`expected_output` 里的 `${name}` 从未展开  ✅ 已实施（2026-09-28）
+#### A1（高）`expected_output` 里的 `${name}` 从未展开  ✅ 已完成（2026-09-28）
 
 - **现状**：`executor.rs:128` 只 `render_step_intent(step, params)`；`step.rs:107` 把 `input.step.expected_output` **原文**交给 `build_step_task`，进 user message。
 - **设计**：`StepInput` 增加 `expected_output: &str`（**已展开**）。`executor.rs:128` 处一并渲染 `step.expected_output`，失败走与 `intent` **完全相同**的 `Failed` 路径（同一 match 分支）。
 - **刻意不动的**：`StepRunRecord.expected_output`（`step.rs:316`）与 `StepSnapshot`（`types.rs:159`）**仍存原文** —— 记录/UI 展示模板原样是既定语义（`report.rs:40-41`）。**只改发给 LLM 的那一份**。
 - **验收**：模板 `expected_output: "写入 ${path}"`，断言请求 user message 含展开值、**不含** `${path}`；`None` 环境段时输出与今天逐字一致（除该字段）。
 
-#### A2（高）空输出被判成功  ✅ 已实施（2026-09-28）
+#### A2（高）空输出被判成功  ✅ 已完成（2026-09-28）
 
 - **现状**：`step.rs:190-202` 收敛时 `output = Some(answer)`，`answer` 可能为空串；`step.rs:295-299` 只看 `output.is_some()` → `Done`。
 - **设计**：收敛分支先判 `answer.trim().is_empty()` —— 空则 `error = Some("模型未产出内容（空回答）")`、`output` 保持 `None`（→ `Failed`）。
 - **连带**：`deliverable_output`（`executor.rs:412-421`）按「有键」取交付输出，A2 保证 store 里不再出现空串，故**不必改**；但需在代码注释里写明这一依赖关系。
 - **验收**：`FakeAiClient` 返回空 content + 空 reasoning → 该步 `status == Failed`、`report.result == None`。
 
-#### A3（中）`dependencies` 指向不存在 / 未产出的引用被静默丢弃  ✅ 已实施（2026-09-28）
+#### A3（中）`dependencies` 指向不存在 / 未产出的引用被静默丢弃  ✅ 已完成（2026-09-28）
 
 - **现状**：`executor.rs` 的 `collect_prior` 用 `filter_map`，未命中直接跳过，**无日志无痕迹**。
 - **关键修正（实施时确认，原稿此处写错）**：「前序失败 → 依赖没产出」**走不到 `collect_prior`** ——
@@ -83,33 +89,48 @@ A 组执行正确性、B 组执行状态机、C 组工具收窄（不落库部�
 - **验收**：`dependency_issues_cover_missing_self_and_forward_refs`（三种错误都报）、
   `dependency_issues_accept_backward_refs`（合法依赖不报）、`bad_dependency_warns_but_does_not_block`（不阻断执行）。
 
-#### A4（中）`prior` 无长度预算
+#### A4（中）`prior` 无长度预算  ✅ 已完成（2026-09-28，经 `flexible-step-output-spill.md` 实现）
+
+> **⚠️ 实际实现与本节的「原设计」不同**：原方案是「硬截断 + 预算」（`PRIOR_ITEM_MAX_CHARS` /
+> `PRIOR_TOTAL_MAX_CHARS`），被判定「不比截取」而**放弃**；改为**产出落文件 + 下游按需分页读取**。
+> 下面的原设计**保留供追溯，未实现**。
 
 - **现状**：`step.rs:301-302` 明确「`StepRunResult.output` 不截断」；`executor.rs:158` 存入 store → `prompt.rs:154-163` 原样进下游 user message。
-- **设计**：新增两个常量，在 `collect_prior` 拼装处生效：
+- **设计（原方案，未采用）**：新增两个常量，在 `collect_prior` 拼装处生效：
   - `PRIOR_ITEM_MAX_CHARS`（单条上限，**建议 4 000**）；
   - `PRIOR_TOTAL_MAX_CHARS`（总量上限，**建议 12 000**）。
   - 触顶时截断并追加「…（已截断，共 N 字符）」。
-- **待定**：建议值需拍板（见 §5-Q4）。**注意与 A5 联动** —— 整理步要的是完整输出，不能与下游步骤同一预算（见 A5）。
-- **验收**：造 10 万字符输出，断言下游 user message 长度 ≤ `PRIOR_TOTAL_MAX_CHARS` + 固定开销。
+- **实际方案（已完成）**：见 `flexible-step-output-spill.md` —— 产出超阈值就写
+  `<cache_dir>/<run>/step-<index>.txt`，下游 `prior` 只拿「文件说明 + 预览」，用 `builtin_read_file` 按需读。
+- **验收（已完成）**：`large_output_spills_to_file_and_prior_gives_path`、`spill_threshold_boundary_is_inclusive`（见新稿 §12）。
 
-#### A5（中）输出整理步只看到 200 字符摘要
+#### A5（中）输出整理步只看到 200 字符摘要  ✅ 已完成（2026-09-28，经 `flexible-step-output-spill.md` 实现）
+
+> **⚠️ 实际实现与本节的「原设计」不同**：原方案（各步改用 `record.output` + 沿用 A4 的总量控制）
+> 随 A4 一起放弃。实际做法：各步产出走**同一套「文件说明 + 预览」渲染**，交付产出落盘时
+> 整理步改用 `builtin_read_file` 读回。
 
 - **现状**：`executor.rs:350-357` 整理步的 `prior` = 交付步完整输出 + 各步 `output_summary`（`SUMMARY_MAX_CHARS = 200`，`step.rs:25`）。
-- **设计**：各步改用 `record.output`（`OUTPUT_MAX_CHARS = 8000` 上限），并沿用 A4 的**总量**控制（可给整理步单独、更宽的额度，如 24 000）。
-- **验收**：非交付步产出 500 字符 → 断言整理步请求含这 500 字符（当前只有前 200）。
+- **设计（原方案，未采用）**：各步改用 `record.output`（`OUTPUT_MAX_CHARS = 8000` 上限），并沿用 A4 的**总量**控制（可给整理步单独、更宽的额度，如 24 000）。
+- **实际方案（已完成）**：整理步 `prior` 改用 `render_prior_output`（未落盘给全文，落盘给「文件说明 + 预览」），
+  并给整理步 `builtin_read_file` 工具 —— 原「不带工具」在落盘机制下不成立。
+- **验收（已完成）**：`resolve_step_prior_points_at_spilled_file`（见新稿 §12）。
 
 ---
 
 ### B 组 · 执行状态机
 
-#### B1（高）取消不能即时生效；LLM 请求无超时
+#### B1（高）取消不能即时生效；LLM 请求无超时  ✅ 已完成（2026-09-28）
 
-- **现状**：取消只在 `step.rs:121-125`（轮前）与 `:223-227`（工具循环中）被检查；`step.rs:138` 的 `ai.chat_completion(request).await` **未被 `select!` 包住**。`ai-openai` 全 crate 无请求超时（唯一 `sleep` 在 `client.rs:575`，属重试）。
-- **设计（拆两条，分开拍板）**：
-  - **B1a（建议做）取消即时**：把 `:138` 的调用包进 `tokio::select! { r = ai.chat_completion(req) => ..., _ = wait_cancel(cancel) => { error = Some("用户取消"); break } }`。纯收益、不改语义。
-  - **B1b（待拍板）超时**：`ExecutorConfig` 加超时。⚠️ 该字段**历史上被删过**（当时理由：工作流可能天然很长，固定总时长会误杀）。若加回，建议是**「单次 LLM 请求超时」而非「整步/整次超时」**，且默认 `None`（不启用），由宿主显式开。见 §5-Q3。
-- **验收**：B1a —— `SlowAi` 永不返回，`stop()` 后会话能在 <1s 内到终态；B1b —— 超时后该步 `Failed`、错误信息可辨认。
+**实现**（B1a + B1b 一起做，B1b 含超时重试）：
+
+- **落点**：`step.rs` 新增 `request_llm()`（超时 + 超时重试 + 取消即时）、`wait_cancel()`、`with_timeout()`；原裸调用 `ai.chat_completion(request).await` 改为 `request_llm(...)`。模板步与输出整理步**共用**这一条路径。
+- **B1a 取消即时**：`tokio::select! { biased; _ = wait_cancel(cancel) => Err("用户取消"), result = with_timeout(...) => result }`。⚠️ `wait_cancel` 在 `cancel` 为 `None` 或发送端已 drop 时**永久挂起** —— 否则该分支会立即完成，把每次调用都误判成「已取消」。
+- **B1b 超时 + 重试**：`ExecutorConfig` 新增 `llm_timeout: Option<Duration>`（默认 `Some(180s)`）与 `llm_timeout_retries: usize`（默认 1）。**超时→重试**，用尽次数后该步 `Failed`（错误文本含「已尝试 N 次」）。
+- **⚠️ 超时的语义（关键）**：`llm_timeout` 是「**一次 `AiClient::chat_completion` 调用**的墙钟上限」。该调用在 `ai-openai` 内部**本身已有 3 次重试**（`client.rs:558-578`，任何错误都重试），所以超时**包住整次调用**；也正因如此，超时后的重试必须在**这一层**做 —— `timeout` 会把内层 future 一并丢掉，内层没有机会再重试。
+- **只重试超时**：其它失败（4xx/5xx/网络）在 `ai-openai` 内部已重试过，这一层**不再叠加**（避免倍数放大：外层 N × 内层 3）。
+- **配置**：GUI `[flexible]` 段 `llm_timeout_secs`（**0 = 不限制** ↔ 内核 `None`）与 `llm_timeout_retries`。
+- **验收（已完成）**：`cancel_interrupts_in_flight_llm_request`（`HangingAi` + 取消 → 5s 内结束且错误为「用户取消」）、`llm_timeout_retries_and_then_succeeds`（第一次挂 → 重试成功，恰好 2 次尝试）、`llm_timeout_exhausts_retries_then_fails`（一直挂 → 用尽重试后失败，错误含超时与次数）。
 
 #### B2（中）思考轨迹无上限，且随快照全量 clone 广播
 
@@ -222,7 +243,7 @@ A 组执行正确性、B 组执行状态机、C 组工具收窄（不落库部�
 |---|---|---|
 | **Q1** | C2 按整次任务收窄用哪种形态？① 宿主给正向列表 ② 引入负向 token ③ 运行时判断 | **① 宿主给正向列表**（零新机制；`ExecutorConfig.allowed_tools` 已在，只是宿主现在传 `None`） |
 | **Q2** | 本批范围？只做 P0（C1+A1+A2）／ 做到 P2 ／ 全做（含 C3、C4、D3） | 先 **P0+P1**，P2 里的 A4/A5/B2/C2 需先定参数 |
-| **Q3** | B1b 是否加「单次 LLM 请求超时」？ | **先只做 B1a（取消即时）**；超时默认不启用，值是后续话题 |
+| **Q3** | ~~B1b 是否加「单次 LLM 请求超时」？~~ | **已拍板（2026-09-28）**：加，且**超时后重试**。默认 `180s` + 重试 1 次；GUI 侧 `llm_timeout_secs = 0` 表示不限制。 |
 | **Q4** | A4 的预算值（`PRIOR_ITEM_MAX_CHARS` / `PRIOR_TOTAL_MAX_CHARS`） | 建议 4 000 / 12 000（整理步单独 24 000） |
 | **Q5** | `max_rounds_per_step` 是否从 50 调小？调到多少 | 建议 15，但**不属本稿必做**，可放到 C 组之后 |
 
