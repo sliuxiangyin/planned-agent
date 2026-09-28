@@ -1,5 +1,6 @@
 pub mod file_tools;
 pub mod text_tools;
+pub(crate) mod fs_support;
 pub mod system_tools;
 pub mod data_tools;
 pub mod ai_tools;

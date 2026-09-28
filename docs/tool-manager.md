@@ -352,9 +352,14 @@ registry.update_tool_categories("tool_name", vec![
 
 | 工具名 | 描述 |
 |--------|------|
-| `builtin_read_file` | 读取文件内容 |
-| `builtin_write_file` | 写入文件内容 |
-| `builtin_list_dir` | 列出目录内容 |
+| `builtin_read_file` | 读取文本文件，带行号前缀；支持 `offset`/`limit` 分页、`encoding`（auto/BOM）、二进制拒绝、`max_bytes` 截断 |
+| `builtin_write_file` | 写入文本文件；`mode` 三态（overwrite / append / create_new），overwrite 走原子写；支持 `ensure_newline`、`create_parents` |
+| `builtin_edit_file` | 精确替换文件中的一个片段（`old_string` 默认必须唯一，否则返回 `no_match` / `ambiguous_match`；`replace_all` 可全替换） |
+| `builtin_list_dir` | 列出目录条目（不递归） |
+
+四个工具的可预期失败**统一返回错误码**（`Ok` + `is_error: true` 的 `{ error, message }`），不返回 `Err`。
+完整的 schema / 返回结构 / 错误码表见 `docs/planned-agent/file-tools-redesign.md` §3；
+共享实现（编码与 BOM、二进制探测、换行风格、原子写、行号渲染）在 `src/builtin/fs_support.rs`。
 
 ### 文本工具 (TextToolsProvider)
 

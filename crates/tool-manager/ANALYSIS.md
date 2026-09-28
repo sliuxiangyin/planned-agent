@@ -64,6 +64,7 @@ src/
 │   ├── data_tools.rs
 │   ├── doc_tools.rs
 │   ├── file_tools.rs
+│   ├── fs_support.rs  # 文件工具共享件（错误码/编码+BOM/二进制探测/换行/原子写/行号渲染）
 │   ├── system_tools.rs
 │   ├── text_tools.rs
 │   └── web_tools.rs
@@ -181,7 +182,7 @@ pub struct ToolRegistry {
 
 提供 7 类内置工具：
 
-1. **`file_tools`**: 文件操作（读写、创建、删除）
+1. **`file_tools`**: 文件操作（读取、写入、精确替换、列举目录；**不提供删除**）
 2. **`text_tools`**: 文本处理（格式化、转换）
 3. **`system_tools`**: 系统信息（CPU、内存、进程）
 4. **`data_tools`**: 数据处理（JSON、CSV、统计）
