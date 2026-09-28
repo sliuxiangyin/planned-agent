@@ -51,28 +51,37 @@ A 组执行正确性、B 组执行状态机、C 组工具收窄（不落库部�
 
 ### A 组 · 执行正确性
 
-#### A1（高）`expected_output` 里的 `${name}` 从未展开
+#### A1（高）`expected_output` 里的 `${name}` 从未展开  ✅ 已实施（2026-09-28）
 
 - **现状**：`executor.rs:128` 只 `render_step_intent(step, params)`；`step.rs:107` 把 `input.step.expected_output` **原文**交给 `build_step_task`，进 user message。
 - **设计**：`StepInput` 增加 `expected_output: &str`（**已展开**）。`executor.rs:128` 处一并渲染 `step.expected_output`，失败走与 `intent` **完全相同**的 `Failed` 路径（同一 match 分支）。
 - **刻意不动的**：`StepRunRecord.expected_output`（`step.rs:316`）与 `StepSnapshot`（`types.rs:159`）**仍存原文** —— 记录/UI 展示模板原样是既定语义（`report.rs:40-41`）。**只改发给 LLM 的那一份**。
 - **验收**：模板 `expected_output: "写入 ${path}"`，断言请求 user message 含展开值、**不含** `${path}`；`None` 环境段时输出与今天逐字一致（除该字段）。
 
-#### A2（高）空输出被判成功
+#### A2（高）空输出被判成功  ✅ 已实施（2026-09-28）
 
 - **现状**：`step.rs:190-202` 收敛时 `output = Some(answer)`，`answer` 可能为空串；`step.rs:295-299` 只看 `output.is_some()` → `Done`。
 - **设计**：收敛分支先判 `answer.trim().is_empty()` —— 空则 `error = Some("模型未产出内容（空回答）")`、`output` 保持 `None`（→ `Failed`）。
 - **连带**：`deliverable_output`（`executor.rs:412-421`）按「有键」取交付输出，A2 保证 store 里不再出现空串，故**不必改**；但需在代码注释里写明这一依赖关系。
 - **验收**：`FakeAiClient` 返回空 content + 空 reasoning → 该步 `status == Failed`、`report.result == None`。
 
-#### A3（中）`dependencies` 指向不存在 / 未产出的引用被静默丢弃
+#### A3（中）`dependencies` 指向不存在 / 未产出的引用被静默丢弃  ✅ 已实施（2026-09-28）
 
-- **现状**：`executor.rs:445-454` `collect_prior` 用 `filter_map`，未命中直接跳过，**无日志无痕迹**。
-- **设计**：`collect_prior` 返回 `(prior, missing: Vec<String>)`。`missing` 非空时：
-  1. `tracing::warn!(step = index, missing = ?missing, "依赖未产出，已从 prior 中跳过")`；
-  2. 在 `prior` 里**追加一条说明段**（如「注意：以下依赖未产出 —— `#E9`；若无数据请勿臆造」），让 LLM 也知道缺口。
-- **不做的**：本步**不因此失败**（是否失败交给 D2 的 lint，对齐 `imp` Q10「默认仅警告」）。
-- **验收**：模板 `dependencies: ["#E9"]`，断言产生 warn，且 user message 含「未产出」说明段。
+- **现状**：`executor.rs` 的 `collect_prior` 用 `filter_map`，未命中直接跳过，**无日志无痕迹**。
+- **关键修正（实施时确认，原稿此处写错）**：「前序失败 → 依赖没产出」**走不到 `collect_prior`** ——
+  一有步骤非 `Done`，其后每步都直接记 `Skipped`（`executor.rs` 的 `blocked_earlier`），
+  而 `Done ⇒ output.is_some() ⇒ 产出一定在 store 里`。所以未命中**只可能是模板静态写错**：
+  引用不存在 / 自依赖 / 依赖后面的步骤 / 环 —— **四种都可在 start 时判定**。
+- **设计（已按此实施）**：
+  1. **主防线 · start 时静态校验**：`collect_dependency_issues(template)` 维护「已出现过的 reference」集合，
+     检查每个 `dependencies` 是否都**在本步之前出现**；一条规则覆盖上述四种错误
+     （线性执行 + 只允许引用前面 ⇒ 环必然表现为「依赖后面的步骤」）。`run` 开头逐条 `warn`，**不阻断**。
+  2. **运行期兜底**：`collect_prior` 改显式循环，未命中时 `warn`（防御性，正常不可达）。
+- **不做的**：不因依赖写错失败（对齐 `imp` Q10「默认仅警告」）。
+- **前提**：结论依赖「依赖只指向已执行完的前序步骤」+「严格按数组顺序执行」；将来若支持并行 /
+  跳步重跑，需重算。
+- **验收**：`dependency_issues_cover_missing_self_and_forward_refs`（三种错误都报）、
+  `dependency_issues_accept_backward_refs`（合法依赖不报）、`bad_dependency_warns_but_does_not_block`（不阻断执行）。
 
 #### A4（中）`prior` 无长度预算
 

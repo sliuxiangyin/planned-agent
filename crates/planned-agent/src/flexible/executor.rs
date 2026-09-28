@@ -1,6 +1,6 @@
 //! 总编排：按顺序跑每步，把前序输出递给后面的步，播事件，响应取消。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -77,6 +77,13 @@ impl FlexibleExecutor {
         sink: &dyn PlanRunSink,
         cancel: Option<watch::Receiver<bool>>,
     ) -> Result<PlanRunReport> {
+        // 依赖校验：**只警告不阻断**（对齐「先观测、不挡路」的既定策略）。
+        // 一条规则同时覆盖「引用不存在 / 自依赖 / 依赖后面的步骤 / 环」——
+        // 线性执行 + 只允许引用前面 ⇒ 环必然表现为「依赖后面的步骤」。
+        for issue in collect_dependency_issues(template) {
+            tracing::warn!(issue = %issue, "计划依赖校验未通过（该步会拿不到前序数据）");
+        }
+
         // 整次执行只算一次 system prompt，每步复用：同一次执行内每步字符串完全一致，
         // 使「环境段」成为可命中的 provider 前缀缓存（见 `prompt::step_system_prompt`）。
         let system_prompt = prompt::step_system_prompt(environment);
@@ -449,16 +456,53 @@ fn resolve_failed_record(index: usize, error: String) -> StepRunRecord {
     }
 }
 
+/// 校验步骤依赖：每个 `dependencies` 引用的 `result_reference` 必须**已在本步之前出现**。
+///
+/// 一条规则同时覆盖四种模板错误：引用不存在、自依赖、依赖后面的步骤、依赖环
+/// （线性执行 + 只允许引用前面 ⇒ 环必然表现为「依赖后面的步骤」）。
+///
+/// 返回问题描述（空 = 通过）。**调用方只警告不阻断** —— 运行期 [`collect_prior`]
+/// 会再兜底一次（对未命中的引用跳过并告警）。
+///
+/// 为什么能静态判定：「前序失败导致没产出」不会走到 `collect_prior` ——
+/// 一有步骤非 `Done`，其后每步都直接记 `Skipped`（见 `run` 的 `blocked_earlier`）。
+fn collect_dependency_issues(template: &FlexiblePlanTemplate) -> Vec<String> {
+    let mut seen: HashSet<&str> = HashSet::with_capacity(template.steps.len());
+    let mut issues = Vec::new();
+    for (offset, step) in template.steps.iter().enumerate() {
+        for dependency in &step.dependencies {
+            if !seen.contains(dependency.as_str()) {
+                issues.push(format!(
+                    "步骤 {}（{}）的依赖 {} 未在此之前出现",
+                    offset + 1,
+                    step.result_reference,
+                    dependency
+                ));
+            }
+        }
+        seen.insert(step.result_reference.as_str());
+    }
+    issues
+}
+
 /// 收集某步依赖项的实际输出（按 `dependencies` 顺序）。
+///
+/// 未命中的引用会被跳过 —— 正常情况下不该发生（能执行到本步 ⇒ 前序全 `Done`
+/// ⇒ 产出都在 store 里），走到这里只可能是模板依赖写错（`collect_dependency_issues`
+/// 只警告未阻断），故留一条 warn 作痕迹。
 fn collect_prior(step: &PlanStep, store: &HashMap<String, String>) -> Vec<(String, String)> {
-    step.dependencies
-        .iter()
-        .filter_map(|reference| {
-            store
-                .get(reference)
-                .map(|output| (reference.clone(), output.clone()))
-        })
-        .collect()
+    let mut prior = Vec::with_capacity(step.dependencies.len());
+    for reference in &step.dependencies {
+        match store.get(reference) {
+            Some(output) => prior.push((reference.clone(), output.clone())),
+            None => tracing::warn!(
+                step = %step.result_reference,
+                reference = %reference,
+                "依赖结果不在结果表中，已跳过（模板依赖可能写错）"
+            ),
+        }
+    }
+    prior
 }
 
 /// 未执行步骤的占位记录（`Skipped` / 展开失败）。
@@ -721,6 +765,75 @@ mod tests {
             report.steps[0].error
         );
         assert!(ai.requests().is_empty(), "展开失败不该发起 LLM 调用");
+    }
+
+    /// 依赖校验：引用必须**已在本步之前出现**，一条规则覆盖不存在 / 自依赖 / 依赖后续步。
+    #[test]
+    fn dependency_issues_cover_missing_self_and_forward_refs() {
+        let template = FlexiblePlanTemplate {
+            output_schema: None,
+            task: "t".to_string(),
+            inputs: vec![],
+            steps: vec![
+                PlanStep {
+                    result_reference: "#E1".to_string(),
+                    intent: "一".to_string(),
+                    expected_output: "a".to_string(),
+                    dependencies: vec!["#E2".to_string()], // 依赖后面的步骤
+                },
+                PlanStep {
+                    result_reference: "#E2".to_string(),
+                    intent: "二".to_string(),
+                    expected_output: "b".to_string(),
+                    dependencies: vec!["#E2".to_string()], // 自依赖
+                },
+                PlanStep {
+                    result_reference: "#E3".to_string(),
+                    intent: "三".to_string(),
+                    expected_output: "c".to_string(),
+                    dependencies: vec!["#E9".to_string()], // 引用不存在
+                },
+            ],
+        };
+        let issues = collect_dependency_issues(&template);
+        assert_eq!(issues.len(), 3, "三处都该报警: {issues:?}");
+        assert!(issues[0].contains("#E2"), "{}", issues[0]);
+        assert!(issues[1].contains("#E2"), "{}", issues[1]);
+        assert!(issues[2].contains("#E9"), "{}", issues[2]);
+    }
+
+    /// 只引用前面步骤的合法依赖不该报警。
+    #[test]
+    fn dependency_issues_accept_backward_refs() {
+        // `two_step_template` 的 #E2 依赖 #E1（在其之前）
+        assert!(collect_dependency_issues(&two_step_template()).is_empty());
+    }
+
+    /// 依赖写错只警告不阻断：执行照样跑完，只是该步拿不到 prior。
+    #[tokio::test]
+    async fn bad_dependency_warns_but_does_not_block() {
+        let ai = FakeAiClient::new(vec![text_response("产出", 10, 1)]);
+        let template = FlexiblePlanTemplate {
+            output_schema: None,
+            task: "t".to_string(),
+            inputs: vec![],
+            steps: vec![PlanStep {
+                result_reference: "#E1".to_string(),
+                intent: "一".to_string(),
+                expected_output: "a".to_string(),
+                dependencies: vec!["#E9".to_string()],
+            }],
+        };
+        let params = PlanRunParams::from_template(&template);
+        let sink = RecordingSink::default();
+
+        let report = executor(ai.clone())
+            .run(&template, &params, None, &sink, None)
+            .await
+            .expect("run 不应失败");
+
+        assert!(report.success, "依赖写错不该阻断执行");
+        assert_eq!(ai.requests().len(), 1, "仍应正常发起一次 LLM 调用");
     }
 
     /// 契约非法是数据问题：记一条 `Failed` 的整理步让原因可见，但**不**把任务判失败。

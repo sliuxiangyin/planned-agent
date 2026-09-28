@@ -196,6 +196,17 @@ async fn run_step_with_prompt(
         if tool_calls.is_empty() {
             // 收敛：优先用回答正文，没有正文才退回思考内容
             let answer = if !content.is_empty() { content } else { reasoning };
+            // 空产出不能当成功：`Done` 的判据是「有产出」（见下方 status 计算），
+            // 若放一个空串进 store，下游 `prior` 会拿到空数据、甚至成为最终 result。
+            if answer.trim().is_empty() {
+                tracing::warn!(
+                    step = input.index,
+                    round = rounds,
+                    "模型既无正文也无思考内容（空回答），该步失败"
+                );
+                error = Some("模型未产出内容（空回答）".to_string());
+                break;
+            }
             tracing::info!(
                 step = input.index,
                 rounds,
@@ -813,6 +824,45 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("LLM 调用失败"));
+    }
+
+    /// 空产出（既无正文也无思考）不能被当成功 —— 否则空串会进 store 传给下游。
+    #[tokio::test]
+    async fn empty_answer_marks_step_failed() {
+        let ai = FakeAiClient::new(vec![text_response("", 10, 5)]);
+        let (registry, _tool) = registry_with("noop", json!("x"), false);
+        let step_def = step("#E1");
+        let sink = RecordingSink::default();
+
+        let result = run_step(
+            prompt::STEP_SYSTEM_PROMPT,
+            StepInput {
+                step: &step_def,
+                intent: "做事",
+                expected_output: "做完",
+                prior: &[],
+                tools: &[],
+                index: 1,
+            },
+            &(ai as Arc<dyn AiClient>),
+            &registry,
+            &cfg(MAX_ROUNDS),
+            &sink,
+            None,
+        )
+        .await;
+
+        assert_eq!(result.record.status, StepStatus::Failed);
+        assert!(
+            result.output.is_none(),
+            "空产出不该进 store（否则会传给下游 prior）"
+        );
+        assert!(result
+            .record
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("未产出内容"));
     }
 
     /// 取消应在下一次检查点终止本步。
