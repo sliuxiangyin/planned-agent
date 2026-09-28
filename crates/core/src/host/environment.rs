@@ -17,7 +17,14 @@ use std::path::Path;
 use std::time::Duration;
 
 /// 单个命令的版本探测超时（超时即判不可用，避免拖死服务启动）。
-const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+///
+/// 给 3s 的余量：配上 `CREATE_NO_WINDOW` 之后版本命令通常 <100ms，
+/// 但首次冷启动（杀软扫描 / 磁盘冷读）偶发变慢 —— 实测 1.5s 曾导致整批压线超时。
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Windows `CREATE_NO_WINDOW`：子进程不新建控制台窗口。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// 版本原文保留的最大字符数（取首行）。
 const VERSION_MAX_CHARS: usize = 60;
@@ -57,9 +64,10 @@ pub struct RuntimeEnvironment {
     pub path_separator: char,
     /// 行尾显示名：`"CRLF"` / `"LF"`（给 prompt 看的，非实际字符）。
     pub line_ending: String,
-    /// 默认 shell 名（`COMSPEC` / `SHELL` 的文件名）；探测不到为 `None`。
+    /// **优先使用的** shell 名 —— 按可用性探测得出，不是「系统默认解释器」。
     pub shell: Option<String>,
-    /// 控制台输出编码（宿主补；内核无法可靠探测，Windows 下可能是 GBK）。
+    /// 控制台输出编码。**当前恒为 `None`**：内核无法可靠探测（要问 Win32 API 或跑 `chcp`），
+    /// 而工具层已在执行时把命令输出强制成 UTF-8，因此不必再知道原始代码页。
     pub console_encoding: Option<String>,
     /// 本机可执行环境（`detect()` 才会填）。
     #[serde(default)]
@@ -92,7 +100,7 @@ impl RuntimeEnvironment {
             arch: std::env::consts::ARCH.to_string(),
             path_separator: std::path::MAIN_SEPARATOR,
             line_ending: if cfg!(windows) { "CRLF" } else { "LF" }.to_string(),
-            shell: shell_name(),
+            shell: preferred_shell(),
             console_encoding: None,
             executables: ExecutableProbe::default(),
             working_dir: std::env::current_dir()
@@ -104,16 +112,46 @@ impl RuntimeEnvironment {
     }
 }
 
-/// 默认 shell 名（`COMSPEC` / `SHELL` 的文件名；失败即 `None`，不强猜）。
-fn shell_name() -> Option<String> {
-    let raw = if cfg!(windows) {
-        std::env::var("COMSPEC").ok()
-    } else {
-        std::env::var("SHELL").ok()
-    }?;
-    let stem = Path::new(&raw).file_stem()?;
-    let name = stem.to_string_lossy().to_string();
-    (!name.trim().is_empty()).then_some(name)
+/// **优先使用的** shell —— 按可用性挑，而不是看 `COMSPEC`。
+///
+/// `COMSPEC` 答的是「系统默认命令解释器」（中文 Windows 上恒为 `cmd.exe`），
+/// 但用户与工具链实际该用的是 PowerShell，照它写进 prompt 会误导模型。
+/// 故按优先级探测：Windows `pwsh`(7+) → `powershell`(5.1) → `cmd`；其它平台 `$SHELL` → `sh`。
+///
+/// 只做 PATH 查找（`which`），**不 spawn**，所以能留在同步的 `detect_host()` 里。
+fn preferred_shell() -> Option<String> {
+    #[cfg(windows)]
+    {
+        ["pwsh", "powershell", "cmd"]
+            .into_iter()
+            .find(|name| which::which(name).is_ok())
+            .map(str::to_string)
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("SHELL")
+            .and_then(|raw| {
+                Path::new(&raw)
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().to_string())
+            })
+            .filter(|name| !name.trim().is_empty())
+            .or_else(|| which::which("sh").is_ok().then(|| "sh".to_string()))
+    }
+}
+
+/// Windows：禁止为子进程新建控制台窗口。
+///
+/// GUI 进程本身没有控制台，此时 spawn 一个 console 程序会让系统为它拉起
+/// `conhost.exe` —— 表现就是「启动时冒出一堆黑框」，而且这个开销会把探测压满超时。
+#[cfg(windows)]
+fn no_window(command: &mut tokio::process::Command) -> &mut tokio::process::Command {
+    command.creation_flags(CREATE_NO_WINDOW)
+}
+
+#[cfg(not(windows))]
+fn no_window(command: &mut tokio::process::Command) -> &mut tokio::process::Command {
+    command
 }
 
 /// 某个命令的版本参数：**`go` 用 `version`**（`go --version` 会失败），其余用 `--version`。
@@ -191,14 +229,9 @@ async fn probe_one(name: &str) -> ProbeOutcome {
         return ProbeOutcome::Missing;
     }
     // 3. 执行版本命令（带超时；直接跑解析出的路径，避免二次 PATH 查找）
-    let output = match tokio::time::timeout(
-        PROBE_TIMEOUT,
-        tokio::process::Command::new(&path)
-            .args(version_args(name))
-            .output(),
-    )
-    .await
-    {
+    let mut command = tokio::process::Command::new(&path);
+    command.args(version_args(name));
+    let output = match tokio::time::timeout(PROBE_TIMEOUT, no_window(&mut command).output()).await {
         Ok(Ok(output)) => output,
         // 超时 / 启动失败 → 不可用
         _ => return ProbeOutcome::Missing,
@@ -266,11 +299,43 @@ mod tests {
         assert!(env.probed_at.is_none());
     }
 
+    /// shell 探测只做 PATH 查找（不 spawn），且任何受支持平台都该有一个默认 shell。
+    #[test]
+    fn preferred_shell_is_resolved_without_spawning() {
+        let shell = preferred_shell().expect("任何受支持平台上都应能解析出一个 shell");
+        assert!(!shell.trim().is_empty());
+    }
+
+    /// Windows 上不该因为 `COMSPEC` 就答成 `cmd`：只要有 PowerShell 就该优先报它。
+    #[test]
+    fn preferred_shell_prefers_powershell_over_comspec_cmd() {
+        if !cfg!(windows) {
+            return;
+        }
+        let has_powershell = which::which("powershell").is_ok() || which::which("pwsh").is_ok();
+        if has_powershell {
+            let shell = preferred_shell().unwrap();
+            assert_ne!(shell, "cmd", "有 PowerShell 时不该报 cmd（COMSPEC 是另一回事）");
+        }
+    }
+
     #[tokio::test]
     async fn probe_missing_command_is_not_available() {
         // 必然不存在的命令名 → 走 which 失败分支，不 panic、不 spawn
         let probe = probe_executables(&["definitely-not-a-real-command-xyz"]).await;
         assert!(probe.available.is_empty());
         assert_eq!(probe.missing, vec!["definitely-not-a-real-command-xyz".to_string()]);
+    }
+
+    /// 「探测到可用命令」这条路径此前没有任何测试（只有 missing 分支有）。
+    ///
+    /// `cargo` 必然在 PATH —— 这个测试本身就是 cargo 跑起来的，因此断言与环境无关。
+    #[tokio::test]
+    async fn probe_real_command_reports_available_with_version() {
+        let probe = probe_executables(&["cargo"]).await;
+        assert!(
+            probe.available.iter().any(|(name, _)| name == "cargo"),
+            "cargo 应当可用；实际探测结果: {probe:?}"
+        );
     }
 }

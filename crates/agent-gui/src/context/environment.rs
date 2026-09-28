@@ -36,7 +36,13 @@ impl EnvironmentContext {
         let current = use_signal_sync(RuntimeEnvironment::detect_host);
         let probing = use_signal_sync(|| false);
         let ctx = Self { current, probing };
-        ctx.spawn_probe();
+        // 探测放到**渲染之后**（effect）再启动：渲染期间写信号（`probing.set`）是 dioxus
+        // 的忌讳。用 `peek` 取值不建立对 `probing` 的依赖，因此本 effect 只在挂载时跑一次。
+        use_effect(move || {
+            if !*ctx.probing.peek() {
+                ctx.spawn_probe();
+            }
+        });
         ctx
     }
 
@@ -107,4 +113,44 @@ impl EnvironmentContext {
 /// 不要在此处把值取出来长期持有。
 pub fn use_environment() -> EnvironmentContext {
     use_context::<EnvironmentContext>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归锁：`app()` 曾写成 `use_context_provider(EnvironmentContext::new)`。
+    ///
+    /// `EnvironmentContext::new()` 内部要注册 hook（`use_signal_sync` / `use_effect`），
+    /// 而 `use_context_provider` 的初始化闭包本身就跑在 `use_hook` 里 —— **在 hook 里
+    /// 再注册 hook**，dioxus 会报 "violates the rules of hooks" 并抛 `BorrowMutError`
+    /// （表现为 `dx serve` 一启动就崩）。
+    ///
+    /// 这里照 `app()` 的正确写法（先在组件体注册 hook、再 provide 一个 Copy 值）
+    /// 跑一次真实渲染，并让子组件消费 context，把这条约束锁住。
+    #[test]
+    fn provisioned_environment_reaches_child_component() {
+        #[allow(non_snake_case)]
+        fn Child() -> Element {
+            let environment = use_environment();
+            rsx! {
+                span { "{environment.snapshot().os}" }
+            }
+        }
+
+        let mut dom = VirtualDom::new(|| {
+            let environment = EnvironmentContext::new();
+            use_context_provider(|| environment);
+            rsx! { Child {} }
+        });
+        dom.rebuild_in_place();
+        dom.mark_all_dirty();
+        dom.render_immediate_to_vec();
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains(std::env::consts::OS),
+            "子组件应能读到注入的环境，实际 HTML: {html}"
+        );
+    }
 }

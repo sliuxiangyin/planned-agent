@@ -93,9 +93,11 @@ fn app() -> Element {
     use_context_provider(|| config);
 
     // ── 运行环境（宿主事实：os / shell / 可用命令）──
-    // 同步播种宿主事实、后台补全可执行环境；刷新走 `EnvironmentContext::refresh`。
-    // 与启动无关（不阻塞首屏），也不属于资源装配，故在此顶层注入。
-    use_context_provider(EnvironmentContext::new);
+    // ⚠️ 必须先在组件体内注册 hook、再 provide：不能写成 `use_context_provider(EnvironmentContext::new)`
+    // —— 那会在 `use_context_provider` 的初始化闭包（本身是 hook）里再注册 hook，
+    // 触发 dioxus 的 "violates the rules of hooks" + `BorrowMutError`。
+    let environment = EnvironmentContext::new();
+    use_context_provider(|| environment);
 
     // ── MCP 变更通知器（轻量，与 McpContext 解耦；写入后 bump 让 UI 刷新） ──
     let mcp_change_signal = use_signal(|| 0u64);

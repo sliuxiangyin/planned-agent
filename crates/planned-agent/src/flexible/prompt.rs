@@ -4,7 +4,7 @@
 
 use std::borrow::Cow;
 
-use planned_agent_core::host::RuntimeEnvironment;
+use planned_agent_core::host::{RuntimeEnvironment, DEFAULT_PROBE_NAMES};
 
 use super::output_schema::{OutputKind, OutputSchema};
 
@@ -29,8 +29,8 @@ pub(crate) const STEP_SYSTEM_PROMPT: &str = "\
 /// 追加位置固定在尾部、内容只取决于 `env` —— 同一次执行内每步拿到**完全相同**的
 /// 字符串，从而整段成为可命中的 provider 前缀缓存。
 ///
-/// 「该用什么命令」这类**建议**由本函数生成：`core::host` 只给事实，不替调用方下结论
-/// （见 `crates/core/AGENTS.md`）。
+/// 本段**只陈述宿主事实**；「怎么调用某个工具」属于工具契约（按需加载，不占常驻 prompt）。
+/// 环境事实本身由 `core::host` 提供，本函数只负责把它组织成文本。
 pub(crate) fn step_system_prompt(env: Option<&RuntimeEnvironment>) -> Cow<'static, str> {
     let Some(env) = env else {
         return Cow::Borrowed(STEP_SYSTEM_PROMPT);
@@ -41,10 +41,14 @@ pub(crate) fn step_system_prompt(env: Option<&RuntimeEnvironment>) -> Cow<'stati
     Cow::Owned(text)
 }
 
-/// 把「运行环境段」写进 `out`（标题 + 事实清单 + 平台命令提示）。
+/// 把「运行环境段」写进 `out`（标题 + 宿主事实 + 编码风险）。
 ///
 /// **不写** `working_dir` / `probed_at`：前者含用户名等路径信息（会随 prompt 发给
 /// provider），后者与执行无关。
+///
+/// **不写**缺失命令清单：可用项本身就是完整信息 —— 没列出来的自然没有，
+/// 把「探测范围」写进标题即可。
+/// **不写**「怎么调用工具」：那属于工具契约，见 `builtin_execute_command` 的 description。
 fn render_environment_into(env: &RuntimeEnvironment, out: &mut String) {
     out.push_str("\n## 运行环境（事实，直接采用，不要试探确认）\n");
 
@@ -60,39 +64,24 @@ fn render_environment_into(env: &RuntimeEnvironment, out: &mut String) {
     out.push_str(&env.line_ending);
     out.push('\n');
 
-    if let Some(shell) = env.shell.as_deref().filter(|s| !s.is_empty()) {
-        out.push_str("- 默认 shell：");
+    let shell = env.shell.as_deref().filter(|s| !s.is_empty());
+    if let Some(shell) = shell {
+        out.push_str("- 执行命令的 shell：");
         out.push_str(shell);
         out.push('\n');
     }
-    if let Some(encoding) = env.console_encoding.as_deref().filter(|s| !s.is_empty()) {
-        out.push_str("- 控制台编码：");
-        out.push_str(encoding);
+
+    if !env.executables.available.is_empty() {
+        out.push_str("- 本机可用命令（已探测 ");
+        out.push_str(&DEFAULT_PROBE_NAMES.join("/"));
+        out.push_str("）：");
+        out.push_str(&render_available(&env.executables.available));
         out.push('\n');
     }
 
-    if !env.executables.is_empty() {
-        let available = env
-            .executables
-            .available
-            .iter()
-            .map(|(name, version)| match version {
-                Some(version) if !version.is_empty() => format!("{name} {version}"),
-                _ => name.clone(),
-            })
-            .collect::<Vec<_>>()
-            .join("、");
-        out.push_str("- 本机可执行环境：");
-        out.push_str(if available.is_empty() { "（无）" } else { &available });
-        out.push('\n');
-        if !env.executables.missing.is_empty() {
-            out.push_str("  不可用（不要尝试）：");
-            out.push_str(&env.executables.missing.join("、"));
-            out.push('\n');
-        }
+    if let Some(hint) = shell.and_then(encoding_hint) {
+        out.push_str(hint);
     }
-
-    out.push_str(command_hint(&env.os));
 
     if let Some(notes) = env.notes.as_deref().filter(|s| !s.trim().is_empty()) {
         out.push_str("- 其它说明：");
@@ -101,13 +90,37 @@ fn render_environment_into(env: &RuntimeEnvironment, out: &mut String) {
     }
 }
 
-/// 按平台给一句命令语法提示 —— 砍掉「先跑 `uname` 再跑 `ver`」的那句。
-fn command_hint(os: &str) -> &'static str {
-    if os == "windows" {
-        "- 执行命令时直接使用本平台语法（Windows：dir / type / where / findstr），不要用其它平台的命令（ls / cat / which / grep）；路径用绝对路径。\n"
-    } else {
-        "- 执行命令时直接使用本平台语法（Unix：ls / cat / which / grep），不要用其它平台命令（dir / type / where）；路径用绝对路径。\n"
-    }
+/// 渲染可用命令，如 `node v24.15.0、cargo 1.95.0`。
+///
+/// 版本原文常自带命令名前缀（`cargo --version` → `cargo 1.95.0 (…)`），直接拼会得到
+/// `cargo cargo 1.95.0`，故剥掉与名字重复的前缀。
+fn render_available(available: &[(String, Option<String>)]) -> String {
+    available
+        .iter()
+        .map(|(name, version)| match version.as_deref().filter(|v| !v.is_empty()) {
+            Some(version) => {
+                let version = version
+                    .strip_prefix(name.as_str())
+                    .map_or(version, str::trim_start);
+                format!("{name} {version}")
+            }
+            None => name.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join("、")
+}
+
+/// 编码风险一行 —— 只在**真的可能乱码**的 shell 下输出。
+///
+/// `pwsh`（7+）与 Unix shell 写 stdout 默认就是 UTF-8，不必提醒；
+/// `powershell`（5.1）与 `cmd` 按**控制台代码页**写 stdout（中文系统为 GBK），
+/// 而工具侧按 UTF-8 解码 → 中文会变成 `???`。
+fn encoding_hint(shell: &str) -> Option<&'static str> {
+    matches!(shell, "powershell" | "cmd").then_some(
+        "- 命令输出按 UTF-8 解码：本机 shell 默认按控制台代码页输出（中文为 GBK），\
+         中文可能变乱码 —— 需要时在那条命令里先切码（chcp 65001 / \
+         [Console]::OutputEncoding=[Text.Encoding]::UTF8）。\n",
+    )
 }
 
 /// 输出整理步的 system prompt。
@@ -299,11 +312,18 @@ mod tests {
         assert!(prompt.starts_with(STEP_SYSTEM_PROMPT));
         // 事实
         assert!(prompt.contains("操作系统：windows (x86_64)"), "{prompt}");
-        assert!(prompt.contains("默认 shell：powershell"), "{prompt}");
+        assert!(prompt.contains("执行命令的 shell：powershell"), "{prompt}");
         assert!(prompt.contains("node v24.15.0、python"), "{prompt}");
-        assert!(prompt.contains("不可用（不要尝试）：go"), "{prompt}");
-        // 平台建议由本侧生成（core 不做的那部分）
-        assert!(prompt.contains("Windows：dir / type / where"), "{prompt}");
+        // 可用项带「已探测」范围；缺失项不再单列（没列出来的自然没有）
+        assert!(
+            prompt.contains("已探测 node/python/python3/php/go/cargo/rustc"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("不可用"), "不该再列缺失命令: {prompt}");
+        // 编码风险：powershell 5.1 按控制台代码页写 stdout，中文会乱
+        assert!(prompt.contains("命令输出按 UTF-8 解码"), "{prompt}");
+        // 「怎么调用工具」不占常驻 prompt（属于工具 description）
+        assert!(!prompt.contains("builtin_execute_command"), "{prompt}");
         // 隐私：工作目录、探测时刻不得外发
         assert!(!prompt.contains("secret-dir"), "working_dir 不应进 prompt");
         assert!(!prompt.contains("2026-01-01"), "probed_at 不应进 prompt");
@@ -326,10 +346,65 @@ mod tests {
         };
         let first = step_system_prompt(Some(&env));
         assert_eq!(first, step_system_prompt(Some(&env)));
-        // 平台提示按 `os` 选：Unix 那条在、Windows 那条不在。
-        // 注意两条提示互以「不要用的命令」互指，所以断言必须带平台前缀，只匹配命令名会假阳性。
-        assert!(first.contains("Unix：ls / cat / which / grep"), "{first}");
-        assert!(!first.contains("Windows：dir / type / where"), "{first}");
-        assert!(!first.contains("本机可执行环境"), "无探测结果时省略该行");
+        // shell 为 None：不写 shell 名，也不输出编码风险行（无从判断是哪家的编码行为）
+        assert!(!first.contains("执行命令的 shell"), "{first}");
+        assert!(!first.contains("命令输出按 UTF-8 解码"), "{first}");
+        assert!(!first.contains("cmd"), "无 shell 时不该出现平台专属名: {first}");
+        assert!(!first.contains("本机可用命令"), "无探测结果时省略该行");
+    }
+
+    #[test]
+    fn render_available_strips_duplicated_command_name_from_version() {
+        // `cargo --version` 输出 `cargo 1.95.0 (…)`，直接拼会得到 `cargo cargo 1.95.0`
+        let available = vec![
+            (
+                "cargo".to_string(),
+                Some("cargo 1.95.0 (f2d3ce0bd 2026-03-21)".to_string()),
+            ),
+            (
+                "rustc".to_string(),
+                Some("rustc 1.95.0 (59807616e 2026-04-14)".to_string()),
+            ),
+            ("node".to_string(), Some("v24.15.0".to_string())),
+            ("python".to_string(), None),
+        ];
+        let rendered = render_available(&available);
+        assert!(rendered.contains("cargo 1.95.0"), "{rendered}");
+        assert!(!rendered.contains("cargo cargo"), "{rendered}");
+        assert!(!rendered.contains("rustc rustc"), "{rendered}");
+        assert!(rendered.contains("node v24.15.0"), "{rendered}");
+        assert!(rendered.ends_with("python"), "{rendered}");
+    }
+
+    #[test]
+    fn encoding_hint_only_for_code_page_shells() {
+        // pwsh（7+）与 Unix shell 写 stdout 默认 UTF-8，不必提醒
+        assert!(encoding_hint("pwsh").is_none());
+        assert!(encoding_hint("bash").is_none());
+        // PowerShell 5.1 与 cmd 按控制台代码页写 stdout，中文会乱
+        assert!(encoding_hint("powershell").is_some());
+        assert!(encoding_hint("cmd").is_some());
+    }
+
+    #[test]
+    fn linux_env_has_no_encoding_hint() {
+        // 判据是 shell 而不是 os：Unix shell 默认写 UTF-8，不该出现任何编码提醒
+        // （这也是「不要针对 Windows 硬编码」的回归锁 —— 提示跟着运行时事实走）
+        let env = RuntimeEnvironment {
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+            path_separator: '/',
+            line_ending: "LF".to_string(),
+            shell: Some("bash".to_string()),
+            console_encoding: None,
+            executables: Default::default(),
+            working_dir: None,
+            notes: None,
+            probed_at: None,
+        };
+        let prompt = step_system_prompt(Some(&env));
+        assert!(prompt.contains("执行命令的 shell：bash"), "{prompt}");
+        assert!(!prompt.contains("命令输出按 UTF-8 解码"), "{prompt}");
+        assert!(!prompt.contains("chcp"), "{prompt}");
     }
 }
