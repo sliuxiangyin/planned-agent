@@ -14,7 +14,7 @@ use tokio::sync::watch;
 
 use super::event::{PlanRunEvent, PlanRunSink};
 use super::output_schema::OutputSchema;
-use super::params::{render_step_intent, PlanRunParams};
+use super::params::{render_step_expected_output, render_step_intent, PlanRunParams};
 use super::prompt;
 use super::report::{PlanRunReport, StepRunRecord, StepStatus};
 use super::step::{run_output_resolve, run_step, StepInput};
@@ -125,9 +125,15 @@ impl FlexibleExecutor {
                 continue;
             }
 
-            let intent = match render_step_intent(step, params) {
-                Ok(intent) => intent,
-                Err(err) => {
+            // `intent` 与 `expected_output` 都可能含 `${name}`（`placeholder::PLACEHOLDER_FIELDS`），
+            // 两者都必须展开后才能交给 LLM —— 否则模型会在「期望产出」段读到未展开的 `${...}`。
+            // 任一个失败都走同一条路径（该步 Failed），与「缺参数不带病执行」一致。
+            let (intent, expected_output) = match (
+                render_step_intent(step, params),
+                render_step_expected_output(step, params),
+            ) {
+                (Ok(intent), Ok(expected_output)) => (intent, expected_output),
+                (Err(err), _) | (_, Err(err)) => {
                     let message = err.to_string();
                     tracing::warn!(step = index, error = %message, "步骤参数展开失败，该步失败");
                     sink.emit(PlanRunEvent::Failed {
@@ -161,6 +167,7 @@ impl FlexibleExecutor {
                 StepInput {
                     step,
                     intent: &intent,
+                    expected_output: &expected_output,
                     prior: &prior,
                     tools: &tools,
                     index,
@@ -371,6 +378,7 @@ impl FlexibleExecutor {
             StepInput {
                 step: &resolve_step,
                 intent: &intent,
+                expected_output: resolve_step.expected_output.as_str(),
                 prior: &prior,
                 tools: &[],
                 index,
@@ -621,6 +629,98 @@ mod tests {
         assert_eq!(report.steps.len(), 2, "无契约不应追加整理步");
         assert_eq!(report.result.as_deref(), Some("第二步产出"));
         assert_eq!(ai.requests().len(), 2, "无契约不应多一次 LLM 调用");
+    }
+
+    /// `expected_output` 里的 `${name}` 必须展开后才进 prompt；
+    /// 而执行记录里仍保留**模板原文**（UI 展示用）。
+    #[tokio::test]
+    async fn expands_expected_output_in_prompt_but_keeps_raw_in_record() {
+        let ai = FakeAiClient::new(vec![
+            text_response("第一步产出", 10, 1),
+            text_response("第二步产出", 20, 2),
+        ]);
+        let template = FlexiblePlanTemplate {
+            steps: vec![
+                PlanStep {
+                    result_reference: "#E1".to_string(),
+                    intent: "读取 ${path}".to_string(),
+                    // 占位符写在 expected_output 里 —— 它必须展开后才能发给模型
+                    expected_output: "${path} 的末尾新增一行".to_string(),
+                    dependencies: vec![],
+                },
+                PlanStep {
+                    result_reference: "#E2".to_string(),
+                    intent: "收尾".to_string(),
+                    expected_output: "完成".to_string(),
+                    dependencies: vec!["#E1".to_string()],
+                },
+            ],
+            ..two_step_template()
+        };
+        let params = PlanRunParams::from_template(&template);
+        let sink = RecordingSink::default();
+
+        let report = executor(ai.clone())
+            .run(&template, &params, None, &sink, None)
+            .await
+            .expect("run 不应失败");
+
+        let first = serde_json::to_string(&ai.requests()[0].messages).unwrap();
+        assert!(
+            first.contains("a.txt 的末尾新增一行"),
+            "期望产出应展开为实际值: {first}"
+        );
+        assert!(
+            !first.contains("${path}"),
+            "不得把未展开的占位符发给模型: {first}"
+        );
+
+        assert_eq!(
+            report.steps[0].expected_output, "${path} 的末尾新增一行",
+            "执行记录仍应是模板原文"
+        );
+    }
+
+    /// `expected_output` 的占位符缺值时该步失败（与 `intent` 同一路径），
+    /// 且**在发起 LLM 调用之前**就失败。
+    #[tokio::test]
+    async fn missing_param_in_expected_output_fails_step_before_llm() {
+        let ai = FakeAiClient::new(vec![]);
+        let template = FlexiblePlanTemplate {
+            output_schema: None,
+            task: "维护文件".to_string(),
+            inputs: vec![PlanInput {
+                name: "no_default".to_string(),
+                default: None,
+                description: None,
+            }],
+            steps: vec![PlanStep {
+                result_reference: "#E1".to_string(),
+                intent: "做事".to_string(),
+                expected_output: "写入 ${no_default}".to_string(),
+                dependencies: vec![],
+            }],
+        };
+        let params = PlanRunParams::from_template(&template);
+        let sink = RecordingSink::default();
+
+        let report = executor(ai.clone())
+            .run(&template, &params, None, &sink, None)
+            .await
+            .expect("run 不应失败");
+
+        assert!(!report.success);
+        assert_eq!(report.steps[0].status, StepStatus::Failed);
+        assert!(
+            report.steps[0]
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("expected_output"),
+            "失败原因应点名 expected_output: {:?}",
+            report.steps[0].error
+        );
+        assert!(ai.requests().is_empty(), "展开失败不该发起 LLM 调用");
     }
 
     /// 契约非法是数据问题：记一条 `Failed` 的整理步让原因可见，但**不**把任务判失败。

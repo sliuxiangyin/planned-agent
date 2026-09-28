@@ -1,7 +1,11 @@
-//! 运行参数表：一次执行的参数值，以及步骤 `intent` 的占位符展开。
+//! 运行参数表：一次执行的参数值，以及步骤 `intent` / `expected_output` 的占位符展开。
 //!
 //! - 取值规则：用户填的 > 模板 `inputs[].default`；
-//! - 展开：把 `steps[].intent` 里的 `${name}` 换成实际值（见 [`render_step_intent`]）。
+//! - 展开：把 `steps[].intent` 与 `steps[].expected_output` 里的 `${name}` 换成实际值
+//!   （见 [`render_step_intent`] / [`render_step_expected_output`]）。
+//!
+//! 两个字段都必须展开：它们都会进 LLM 的 user 文本（见 `prompt::build_step_task`），
+//! 未展开的 `${name}` 会让模型读到无法解析的占位符。
 
 use std::collections::BTreeMap;
 
@@ -73,6 +77,24 @@ impl PlanRunParams {
 pub fn render_step_intent(step: &PlanStep, params: &PlanRunParams) -> Result<String> {
     params.render(&step.intent).map_err(|reason| {
         anyhow::anyhow!("展开步骤 {} 的 intent 失败：{reason}", step.result_reference)
+    })
+}
+
+/// 展开一个步骤的 `expected_output`：把 `${name}` 换成参数值。
+///
+/// 语义与 [`render_step_intent`] **完全一致**（[`placeholder::render`] 的严格版：
+/// 缺值或未定义占位符都 `Err`），失败信息同样带步骤的 `result_reference`。
+///
+/// **为什么不复用 `step.expected_output` 原文**：该字段有两种消费方 ——
+/// 执行记录 / UI 展示要**模板原文**（`report::StepRunRecord::expected_output`），
+/// 而发给 LLM 的 user 文本要**实际值**（`prompt::build_step_task`）。
+/// 本函数产出后者；前者一律直接取 `step.expected_output`。
+pub fn render_step_expected_output(step: &PlanStep, params: &PlanRunParams) -> Result<String> {
+    params.render(&step.expected_output).map_err(|reason| {
+        anyhow::anyhow!(
+            "展开步骤 {} 的 expected_output 失败：{reason}",
+            step.result_reference
+        )
     })
 }
 
@@ -173,5 +195,30 @@ mod tests {
         let params = PlanRunParams::from_template(&tpl);
         let err = render_step_intent(&step, &params).unwrap_err().to_string();
         assert!(err.contains("${ghost}"), "错误应点名未定义占位符: {err}");
+    }
+
+    /// `expected_output` 里的 `${name}` 也要展开（`sample_template` 的 steps[0]
+    /// 写的是 `"${file_path} 内容"`）。
+    #[test]
+    fn renders_step_expected_output() {
+        let tpl = sample_template();
+        let params = PlanRunParams::from_template(&tpl);
+        let rendered = render_step_expected_output(&tpl.steps[0], &params).expect("应能展开");
+        assert_eq!(rendered, "C:/a/b.txt 内容");
+        assert!(!rendered.contains("${"), "不应残留占位符: {rendered}");
+    }
+
+    /// 缺值（定义了但表里没有）时 `expected_output` 展开失败，错误带字段名与占位符名。
+    #[test]
+    fn rejects_expected_output_with_missing_param() {
+        let tpl = sample_template();
+        let mut step = tpl.steps[0].clone();
+        step.expected_output = "写入 ${no_default}".to_string();
+        let params = PlanRunParams::from_template(&tpl);
+        let err = render_step_expected_output(&step, &params)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("expected_output"), "错误应点名字段: {err}");
+        assert!(err.contains("no_default"), "错误应点名占位符: {err}");
     }
 }

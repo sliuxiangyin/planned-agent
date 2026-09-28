@@ -44,7 +44,7 @@ mod testing;
 pub use event::{ChannelSink, NullSink, PlanRunEvent, PlanRunSink};
 pub use executor::{ExecutorConfig, FlexibleExecutor};
 pub use output_schema::{OutputKind, OutputSchema};
-pub use params::{render_step_intent, PlanRunParams};
+pub use params::{render_step_expected_output, render_step_intent, PlanRunParams};
 pub use placeholder::{
     collect_from_schema, collect_from_steps, collect_placeholders, render, render_lenient, validate,
 };

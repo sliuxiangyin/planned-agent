@@ -32,10 +32,15 @@ pub(crate) const OUTPUT_MAX_CHARS: usize = 8_000;
 
 /// 单步执行的输入。
 pub(crate) struct StepInput<'a> {
-    /// 步骤定义
+    /// 步骤定义（**模板原文**：`expected_output` 保持未展开，供记录与 UI 用）
     pub step: &'a PlanStep,
     /// 已展开占位符的 `intent`
     pub intent: &'a str,
+    /// 已展开占位符的 `expected_output`
+    ///
+    /// 与 `step.expected_output`（模板原文）的区别：**这一份才是进 prompt 的**。
+    /// 两者为何分开见 `params::render_step_expected_output`。
+    pub expected_output: &'a str,
     /// 依赖项的实际输出（`#En` → 文本），按依赖顺序
     pub prior: &'a [(String, String)],
     /// 暴露给 LLM 的工具定义
@@ -104,7 +109,7 @@ async fn run_step_with_prompt(
     cancel: Option<&watch::Receiver<bool>>,
 ) -> StepRunResult {
     let started = Instant::now();
-    let task = prompt::build_step_task(input.intent, &input.step.expected_output, input.prior);
+    let task = prompt::build_step_task(input.intent, input.expected_output, input.prior);
 
     let mut messages = vec![
         text_message(MessageRole::System, system_prompt),
@@ -578,6 +583,7 @@ mod tests {
             StepInput {
                 step: &step_def,
                 intent: "做事",
+                expected_output: "做完",
                 prior: &[],
                 tools: &[],
                 index: 1,
@@ -616,6 +622,7 @@ mod tests {
             StepInput {
                 step: &step_def,
                 intent: "做事",
+                expected_output: "做完",
                 prior: &[],
                 tools: &[],
                 index: 1,
@@ -654,6 +661,7 @@ mod tests {
             StepInput {
                 step: &step_def,
                 intent: "读文件",
+                expected_output: "做完",
                 prior: &[],
                 tools: &[],
                 index: 1,
@@ -711,6 +719,7 @@ mod tests {
             StepInput {
                 step: &step_def,
                 intent: "读文件",
+                expected_output: "做完",
                 prior: &[],
                 tools: &[],
                 index: 1,
@@ -748,6 +757,7 @@ mod tests {
             StepInput {
                 step: &step_def,
                 intent: "读文件",
+                expected_output: "做完",
                 prior: &[],
                 tools: &[],
                 index: 1,
@@ -783,6 +793,7 @@ mod tests {
             StepInput {
                 step: &step_def,
                 intent: "读文件",
+                expected_output: "做完",
                 prior: &[],
                 tools: &[],
                 index: 1,
@@ -819,6 +830,7 @@ mod tests {
             StepInput {
                 step: &step_def,
                 intent: "读文件",
+                expected_output: "做完",
                 prior: &[],
                 tools: &[],
                 index: 1,
