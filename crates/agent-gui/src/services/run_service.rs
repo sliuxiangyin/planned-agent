@@ -19,7 +19,7 @@ use planned_agent::flexible::run_service::{
 use planned_agent::flexible::{ExecutorConfig, FlexiblePlanTemplate, PlanRunParams};
 
 use crate::boot::ReadyServices;
-use crate::context::{require_resource, AiContext};
+use crate::context::{require_resource, AiContext, EnvironmentContext};
 use crate::services::plans_flexible_service::PlansFlexibleService;
 
 /// 组装并启动执行服务（在 `ReadyShell` 调用一次）。
@@ -58,6 +58,7 @@ pub fn start_run_with_template(
     session_id: String,
     template: FlexiblePlanTemplate,
     params: PlanRunParams,
+    environment: EnvironmentContext,
 ) -> Result<(), String> {
     let client = ai.manager.default().map_err(|error| {
         // 启动失败原先只弹 toast，日志里没有任何痕迹，事后无从追查 —— 这里补上。
@@ -72,6 +73,9 @@ pub fn start_run_with_template(
         params,
         client,
         config: ExecutorConfig::default(),
+        // 在**组装请求的这一刻**取环境：`snapshot()` 读的是信号的当下值。
+        // 刷新只影响此后新发起的执行；正在跑的那次用它自己启动时的快照。
+        environment: Some(environment.snapshot()),
     });
     Ok(())
 }

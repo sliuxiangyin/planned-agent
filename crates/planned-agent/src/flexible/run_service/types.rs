@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use planned_agent_core::ai::AiClient;
+use planned_agent_core::host::RuntimeEnvironment;
 
 use crate::flexible::event::PlanRunEvent;
 use crate::flexible::executor::ExecutorConfig;
@@ -342,7 +343,7 @@ impl SessionFilter {
 /// 一次执行的完整输入：**能执行所需的一切都由调用方给**。
 ///
 /// 内核不再定义「模板从哪来 / AI 从哪取」这类接缝（见设计稿 §12）：会话是否已定稿、
-/// 模板能不能反序列化、有没有配 provider，都是宿主的问题；宿主解析完再把这四样递进来。
+/// 模板能不能反序列化、有没有配 provider，都是宿主的问题；宿主解析完再把这些递进来。
 #[derive(Clone)]
 pub struct RunRequest {
     pub session_id: SessionId,
@@ -353,6 +354,11 @@ pub struct RunRequest {
     pub client: Arc<dyn AiClient>,
     /// 执行配置（与 `client` 同侧：都是 `FlexibleExecutor::new` 的入参，见 §12.1）。
     pub config: ExecutorConfig,
+    /// 宿主探测到的运行环境（在步骤 system prompt 尾部拼「运行环境段」）。
+    ///
+    /// 同样是「宿主解析完再递进来」的**数据**，不是接缝：内核不回调、不查库。
+    /// `None` ⇒ 不拼环境段，行为与未引入该字段时**逐字一致**。
+    pub environment: Option<RuntimeEnvironment>,
 }
 
 impl std::fmt::Debug for RunRequest {
@@ -363,6 +369,7 @@ impl std::fmt::Debug for RunRequest {
             .field("steps", &self.template.steps.len())
             .field("provider", &self.client.provider_name())
             .field("model", &self.client.model_name())
+            .field("environment", &self.environment.is_some())
             .finish_non_exhaustive()
     }
 }

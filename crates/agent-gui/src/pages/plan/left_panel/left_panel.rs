@@ -14,7 +14,7 @@ use crate::components::dropdown_menu::{
 };
 use crate::components::page_header::PageHeader;
 use crate::pages::plan::shared::session::SessionManager;
-use crate::context::{require_resource, AiContext};
+use crate::context::{require_resource, use_environment, AiContext};
 use crate::services::run_service::{start_run_with_template, use_run_service, use_run_subscription};
 use crate::services::plans_flexible_service::{PlanTemplateState, PlansFlexibleService};
 use crate::storage::entities::plan;
@@ -271,6 +271,9 @@ pub fn PlanLeftPanel(
         let ready_template = ready_template.clone();
         let inputs = inputs.clone();
         let session_id = session_id.clone();
+        // 取环境上下文句柄（`Copy`）；真正的取值在 `start_run_with_template` 内部，
+        // 保证用的是「点执行那一刻」的最新环境。
+        let environment = use_environment();
         let toast = use_toast();
         EventHandler::new(move |_: MouseEvent| {
             let (Some(template), Some(session_id)) = (ready_template.clone(), session_id.clone())
@@ -278,9 +281,14 @@ pub fn PlanLeftPanel(
                 return;
             };
             let params = build_run_params(&inputs, &param_values.read());
-            if let Err(reason) =
-                start_run_with_template(run_service.clone(), ai.clone(), session_id, template, params)
-            {
+            if let Err(reason) = start_run_with_template(
+                run_service.clone(),
+                ai.clone(),
+                session_id,
+                template,
+                params,
+                environment,
+            ) {
                 toast.error("执行未开始".to_string(), ToastOptions::new().description(reason));
             }
         })

@@ -7,6 +7,7 @@ use std::time::Instant;
 use anyhow::Result;
 use planned_agent_core::ai::types::{FunctionDefinition, ToolDefinition, ToolType};
 use planned_agent_core::ai::AiClient;
+use planned_agent_core::host::RuntimeEnvironment;
 use planned_agent_core::mcp::types::Tool;
 use planned_agent_tool_manager::ToolRegistry;
 use tokio::sync::watch;
@@ -66,13 +67,19 @@ impl FlexibleExecutor {
     /// - 单步失败不抛错：该步记 `Failed`，其后步骤记 `Skipped`，报告 `success = false`；
     /// - 取消同理：未执行的步骤记 `Skipped`（保留占位，UI 可显示 `N/M`）；
     /// - 展开失败（缺参数 / 未定义占位符）记为 `Failed` 并放事件，不中断整个流程。
+    /// - 展开失败（缺参数 / 未定义占位符）记为 `Failed` 并放事件，不中断整个流程；
+    /// - `environment` 为 `None` 时不拼环境段，system prompt 与历史行为**逐字一致**。
     pub async fn run(
         &self,
         template: &FlexiblePlanTemplate,
         params: &PlanRunParams,
+        environment: Option<&RuntimeEnvironment>,
         sink: &dyn PlanRunSink,
         cancel: Option<watch::Receiver<bool>>,
     ) -> Result<PlanRunReport> {
+        // 整次执行只算一次 system prompt，每步复用：同一次执行内每步字符串完全一致，
+        // 使「环境段」成为可命中的 provider 前缀缓存（见 `prompt::step_system_prompt`）。
+        let system_prompt = prompt::step_system_prompt(environment);
         let started = Instant::now();
         sink.emit(PlanRunEvent::RunStarted {
             total_steps: template.steps.len(),
@@ -85,6 +92,9 @@ impl FlexibleExecutor {
             max_rounds_per_step = self.cfg.max_rounds_per_step,
             allowed_tools = ?self.cfg.allowed_tools,
             task = %template.task.chars().take(80).collect::<String>(),
+            // 整次执行只在这里打一次（每步复用同一个 system prompt，不必逐步重复）。
+            // `%` 是 Display：环境段的多行会被原样输出，便于直接看清拼装结果。
+            system_prompt = %system_prompt,
             "灵活计划开始执行"
         );
 
@@ -147,6 +157,7 @@ impl FlexibleExecutor {
 
             let prior = collect_prior(step, &store);
             let result = run_step(
+                &system_prompt,
                 StepInput {
                     step,
                     intent: &intent,
@@ -542,7 +553,7 @@ mod tests {
         let sink = RecordingSink::default();
 
         let report = executor(ai.clone())
-            .run(&template, &params, &sink, None)
+            .run(&template, &params, None, &sink, None)
             .await
             .expect("run 不应失败");
 
@@ -603,7 +614,7 @@ mod tests {
         let sink = RecordingSink::default();
 
         let report = executor(ai.clone())
-            .run(&template, &params, &sink, None)
+            .run(&template, &params, None, &sink, None)
             .await
             .expect("run 不应失败");
 
@@ -627,7 +638,7 @@ mod tests {
         let sink = RecordingSink::default();
 
         let report = executor(ai.clone())
-            .run(&template, &params, &sink, None)
+            .run(&template, &params, None, &sink, None)
             .await
             .expect("run 不应失败");
 
@@ -663,7 +674,7 @@ mod tests {
         let sink = RecordingSink::default();
 
         let report = executor(ai.clone())
-            .run(&template, &params, &sink, None)
+            .run(&template, &params, None, &sink, None)
             .await
             .expect("run 不应失败");
 
@@ -705,7 +716,7 @@ mod tests {
         let sink = RecordingSink::default();
 
         let report = executor(ai.clone())
-            .run(&template, &params, &sink, None)
+            .run(&template, &params, None, &sink, None)
             .await
             .expect("run 不应失败");
 
@@ -724,7 +735,7 @@ mod tests {
         let ai = FakeAiClient::new(vec![text_response("不该被调用", 1, 1)]);
 
         let report = executor(ai.clone())
-            .run(&template, &params, &sink, None)
+            .run(&template, &params, None, &sink, None)
             .await
             .expect("run 不应失败");
 
@@ -745,7 +756,7 @@ mod tests {
         drop(tx);
 
         let report = executor(ai.clone())
-            .run(&template, &params, &sink, Some(rx))
+            .run(&template, &params, None, &sink, Some(rx))
             .await
             .expect("run 不应失败");
 

@@ -113,6 +113,7 @@ impl RunLoop {
             params,
             client,
             config,
+            environment,
         } = request;
 
         // 同一会话已在跑 → 拒绝（不同会话可并发）。
@@ -159,10 +160,15 @@ impl RunLoop {
             // `catch_unwind`：执行任务与常驻循环在**同一个 future** 里被轮询，任务 panic 会
             // unwind 穿过 `core.run` 把整个服务带走 —— 那时所有会话都停了，而 `start` 依旧
             // 返回成功，是最难排查的一种死法。这里把它收敛成「本次执行失败」。
-            let outcome =
-                AssertUnwindSafe(executor.run(&template, &params, &sink, Some(cancel_rx)))
-                    .catch_unwind()
-                    .await;
+            let outcome = AssertUnwindSafe(executor.run(
+                &template,
+                &params,
+                environment.as_ref(),
+                &sink,
+                Some(cancel_rx),
+            ))
+            .catch_unwind()
+            .await;
 
             let reason = match outcome {
                 // 正常收尾（含「单步失败」——它只进报告、不以 Err 退出）：终态事件已由 sink 回送。
@@ -357,6 +363,7 @@ mod tests {
             params,
             client,
             config: ExecutorConfig::default(),
+            environment: None,
         }
     }
 

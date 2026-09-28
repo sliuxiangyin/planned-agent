@@ -11,7 +11,7 @@ mod storage;
 use boot::{bootstrap, ReadyServices};
 use components::toast::ToastProvider;
 use config::GuiConfig;
-use context::McpChangeNotifier;
+use context::{EnvironmentContext, McpChangeNotifier};
 use dioxus::{desktop::Config, prelude::*};
 use pages::home::{HomePage, PageRoute};
 use pages::plan::PlanPage;
@@ -91,6 +91,11 @@ fn app() -> Element {
     // ── 全局配置（与启动无关，顶层注入） ──
     let config = use_signal(|| APP_CONFIG.get().cloned().unwrap_or_default());
     use_context_provider(|| config);
+
+    // ── 运行环境（宿主事实：os / shell / 可用命令）──
+    // 同步播种宿主事实、后台补全可执行环境；刷新走 `EnvironmentContext::refresh`。
+    // 与启动无关（不阻塞首屏），也不属于资源装配，故在此顶层注入。
+    use_context_provider(EnvironmentContext::new);
 
     // ── MCP 变更通知器（轻量，与 McpContext 解耦；写入后 bump 让 UI 刷新） ──
     let mcp_change_signal = use_signal(|| 0u64);

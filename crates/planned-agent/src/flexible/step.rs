@@ -57,6 +57,7 @@ pub(crate) struct StepRunResult {
 /// 失败（LLM 报错 / 超轮数上限 / 用户取消）通过 `record.status` 与 `record.error`
 /// 表达，**不向上抛错** —— 单步失败只终止这条流水线，不终止宿主。
 pub(crate) async fn run_step(
+    system_prompt: &str,
     input: StepInput<'_>,
     ai: &Arc<dyn AiClient>,
     registry: &Arc<ToolRegistry>,
@@ -64,7 +65,7 @@ pub(crate) async fn run_step(
     sink: &dyn PlanRunSink,
     cancel: Option<&watch::Receiver<bool>>,
 ) -> StepRunResult {
-    run_step_with_prompt(prompt::STEP_SYSTEM_PROMPT, input, ai, registry, cfg, sink, cancel).await
+    run_step_with_prompt(system_prompt, input, ai, registry, cfg, sink, cancel).await
 }
 
 /// 执行「输出整理步」：同一条执行链路，只换 system prompt。
@@ -573,6 +574,7 @@ mod tests {
         let sink = RecordingSink::default();
 
         let result = run_step(
+            prompt::STEP_SYSTEM_PROMPT,
             StepInput {
                 step: &step_def,
                 intent: "做事",
@@ -610,6 +612,7 @@ mod tests {
         let sink = RecordingSink::default();
 
         let result = run_step(
+            prompt::STEP_SYSTEM_PROMPT,
             StepInput {
                 step: &step_def,
                 intent: "做事",
@@ -647,6 +650,7 @@ mod tests {
         let sink = RecordingSink::default();
 
         let result = run_step(
+            prompt::STEP_SYSTEM_PROMPT,
             StepInput {
                 step: &step_def,
                 intent: "读文件",
@@ -703,6 +707,7 @@ mod tests {
         let sink = RecordingSink::default();
 
         let result = run_step(
+            prompt::STEP_SYSTEM_PROMPT,
             StepInput {
                 step: &step_def,
                 intent: "读文件",
@@ -739,6 +744,7 @@ mod tests {
         let sink = RecordingSink::default();
 
         let result = run_step(
+            prompt::STEP_SYSTEM_PROMPT,
             StepInput {
                 step: &step_def,
                 intent: "读文件",
@@ -773,6 +779,7 @@ mod tests {
         let sink = RecordingSink::default();
 
         let result = run_step(
+            prompt::STEP_SYSTEM_PROMPT,
             StepInput {
                 step: &step_def,
                 intent: "读文件",
@@ -808,6 +815,7 @@ mod tests {
         drop(tx);
 
         let result = run_step(
+            prompt::STEP_SYSTEM_PROMPT,
             StepInput {
                 step: &step_def,
                 intent: "读文件",

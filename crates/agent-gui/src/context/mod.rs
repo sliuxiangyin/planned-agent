@@ -10,6 +10,7 @@ use std::sync::Arc;
 use dioxus::prelude::*;
 
 pub mod ai;
+pub mod environment;
 pub mod kv;
 pub mod mcp;
 pub mod prompt;
@@ -19,6 +20,7 @@ pub mod sub_agent;
 pub mod tools;
 
 pub use ai::AiContext;
+pub use environment::{use_environment, EnvironmentContext};
 pub use kv::KvContext;
 pub use mcp::{McpChangeNotifier, McpContext};
 pub use prompt::PromptContext;
