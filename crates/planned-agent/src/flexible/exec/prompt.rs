@@ -6,7 +6,7 @@ use std::borrow::Cow;
 
 use planned_agent_core::host::{RuntimeEnvironment, DEFAULT_PROBE_NAMES};
 
-use super::output_schema::{OutputKind, OutputSchema};
+use super::super::plan::output_schema::{OutputKind, OutputSchema};
 
 /// 单步执行的 system prompt。
 pub(crate) const STEP_SYSTEM_PROMPT: &str = "\

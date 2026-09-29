@@ -5,8 +5,8 @@
 //!
 //! 终态收尾（清取消通道）由服务循环负责；本函数只做事件自身的语义。
 
-use crate::flexible::event::PlanRunEvent;
-use crate::flexible::report::ToolCallRecord;
+use crate::flexible::exec::event::PlanRunEvent;
+use crate::flexible::exec::report::ToolCallRecord;
 
 use super::types::{now_ms, RunSnapshot, RunStatus, StepPhase, StepSnapshot, StepTrackLine};
 
@@ -110,11 +110,11 @@ pub fn apply_event(snapshot: &mut RunSnapshot, event: PlanRunEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flexible::event::PlanRunEvent;
-    use crate::flexible::report::{
+    use crate::flexible::exec::event::PlanRunEvent;
+    use crate::flexible::exec::report::{
         CallUsage, PlanRunReport, StepRunRecord, StepStatus,
     };
-    use crate::flexible::template::{FlexiblePlanTemplate, PlanStep};
+    use crate::flexible::plan::template::{FlexiblePlanTemplate, PlanStep};
 
     /// 两步模板（第二步依赖第一步）。
     fn template() -> FlexiblePlanTemplate {

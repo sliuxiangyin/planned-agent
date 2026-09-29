@@ -205,7 +205,7 @@ impl RunStore {
 mod tests {
     use super::*;
     use crate::flexible::run_service::types::StartRejectReason;
-    use crate::flexible::template::{FlexiblePlanTemplate, PlanStep};
+    use crate::flexible::plan::template::{FlexiblePlanTemplate, PlanStep};
     use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
     fn template() -> FlexiblePlanTemplate {

@@ -21,8 +21,8 @@ use tokio::sync::watch;
 
 use tracing::Instrument;
 
-use crate::flexible::event::{PlanRunEvent, PlanRunSink};
-use crate::flexible::executor::FlexibleExecutor;
+use crate::flexible::exec::event::{PlanRunEvent, PlanRunSink};
+use crate::flexible::exec::executor::FlexibleExecutor;
 
 use super::state::apply_event;
 use super::store::RunStore;
@@ -289,10 +289,10 @@ mod tests {
     use planned_agent_core::ai::{AiClient, ChatCompletionStream};
     use tokio::sync::mpsc::unbounded_channel;
 
-    use crate::flexible::executor::ExecutorConfig;
-    use crate::flexible::params::PlanRunParams;
-    use crate::flexible::report::{PlanRunReport, StepStatus};
-    use crate::flexible::template::{FlexiblePlanTemplate, PlanStep};
+    use crate::flexible::exec::executor::ExecutorConfig;
+    use crate::flexible::plan::params::PlanRunParams;
+    use crate::flexible::exec::report::{PlanRunReport, StepStatus};
+    use crate::flexible::plan::template::{FlexiblePlanTemplate, PlanStep};
     use crate::flexible::testing::{text_response, FakeAiClient};
 
     use super::super::types::{

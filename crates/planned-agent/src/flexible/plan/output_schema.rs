@@ -5,7 +5,7 @@
 //! - `bool` 必须有非空 `success`（只有成败，没有交付内容）；其余 kind 必须有非空 `goal`；
 //! - `format` 是形态细节；`required` / `wanted` 只在 `json` / `csv` 下才有意义；
 //! - 文本字段（`goal` / `success` / `format`）里出现的参数值必须写 `${name}`
-//!   （收集与替换见 [`crate::flexible::placeholder`]）。
+//!   （收集与替换见 [`crate::flexible::plan::placeholder`]）。
 //!
 //! 契约整体可以是 `null`：用户跳过了输出定义步，或明确表示「现在还定不了」——
 //! 此时执行器不做输出整理，直接以交付步的输出作为结果（见 `executor.rs`）。

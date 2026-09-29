@@ -14,7 +14,7 @@ use planned_agent_core::mcp::types::ToolResult;
 use planned_agent_core::tool_registry::ToolExecutor;
 use serde_json::Value;
 
-use super::event::{PlanRunEvent, PlanRunSink};
+use super::exec::event::{PlanRunEvent, PlanRunSink};
 
 /// 脚本化的假 AI 客户端：按调用顺序返回预设响应，并记录收到的请求。
 pub(crate) struct FakeAiClient {

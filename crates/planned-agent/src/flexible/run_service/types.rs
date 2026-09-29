@@ -9,11 +9,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use planned_agent_core::ai::AiClient;
 use planned_agent_core::host::RuntimeEnvironment;
 
-use crate::flexible::event::PlanRunEvent;
-use crate::flexible::executor::ExecutorConfig;
-use crate::flexible::params::PlanRunParams;
-use crate::flexible::report::{PlanRunReport, StepRunRecord, StepStatus, ToolCallRecord};
-use crate::flexible::template::{FlexiblePlanTemplate, PlanStep};
+use crate::flexible::exec::event::PlanRunEvent;
+use crate::flexible::exec::executor::ExecutorConfig;
+use crate::flexible::plan::params::PlanRunParams;
+use crate::flexible::exec::report::{PlanRunReport, StepRunRecord, StepStatus, ToolCallRecord};
+use crate::flexible::plan::template::{FlexiblePlanTemplate, PlanStep};
 
 /// 会话 id（= `plans_flexible_sessions.id`）：服务里一切按它定位。
 pub type SessionId = String;
