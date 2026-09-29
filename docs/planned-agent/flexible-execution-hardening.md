@@ -47,7 +47,7 @@ A 组执行正确性、B 组执行状态机、C 组工具收窄（不落库部�
 > **A4/A5 不是按本节的原设计实现的** —— 原方案（硬截断 + 预算）被判定「不比截取」而放弃，
 > 改为**产出落文件 + 下游按需分页读取**，见 `flexible-step-output-spill.md`。
 > 回归基线（实测）：`cargo test -p planned-agent --lib flexible::` = **95 passed**；
-> `cargo test -p planned-agent-gui --bins` = **63 passed**。
+> `cargo test -p planned-agent-gui --bins` = **66 passed**。
 
 > 每项完成后单独跑 `cargo test -p planned-agent --lib flexible::`；D3 跑 `cargo test -p planned-agent-tool-manager`。
 
@@ -214,8 +214,18 @@ A 组执行正确性、B 组执行状态机、C 组工具收窄（不落库部�
   看不出「调了什么」。这是本项在 UI 之外的**直接可见出口**。
 - **验收（已通过）**：`report_records_tool_sequence_per_step` —— 一步内两次调用（一成功、一工具层报错），
   断言两条记录**按发生顺序**、工具名/入参/`ok` 都对得上；未调工具的步骤为空序列。
-- **⚠️ 仍未做的消费点**：GUI 的 `stats.rs` 只读 `report.tool_calls`（仍是数字），**没有**读 `tool_sequence`；
-  `StepSnapshot` 也**未**带上该字段。要做「界面里看见工具序列」需另开一项（见下）。
+- **宿主消费点（2026-09-28 补做）**：
+  - `stats.rs` 新增 **`Tools used`** 行（去重工具名 + 次数，超 3 个折成「等 N 个」；
+    不排序 —— 首次出现顺序本身反映流程「先读后写」）。与上一行 `Tools called`（次数）互补。
+  - `StepSnapshot` 加 `tool_sequence` 字段：`state.rs` 在 `StepToolCall` 时**逐条累积**
+    （所以**执行中**就能看到这一步用了什么），`StepFinished` 时被 `from_record` 整体覆盖为报告版本。
+  - **STATS 顺带改为实时**（原本「结束才显示」）：数据源由 `RunSnapshot.report` 换成 `RunSnapshot` 本身 ——
+    报告只在 `RunFinished` 才有，用它会让整块 STATS 全程 `—`，结束那一下才全部跳出来。
+    现在 Exec time / Tools called / Steps done / Errors 都随事件更新；`Tokens` 按步结算
+    （`StepFinished` 才有值，不是逐 token）。
+  - ⚠️ `Exec time` 只随**事件**刷新：一次 LLM 调用期间没有事件，数字会停住不涨（不会算错，只是暂停）。
+    要严格逐秒跳动得引入定时器，代价不成比例，故未做。
+  - 验收：`stats.rs` 单测 3 个（去重顺序 / 空占位 / 超量折数）；GUI 总 66 passed。
 
 #### C2（P2）按「整次任务」收窄工具表（形态待定）
 

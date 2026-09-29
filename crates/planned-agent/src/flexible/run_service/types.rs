@@ -12,7 +12,7 @@ use planned_agent_core::host::RuntimeEnvironment;
 use crate::flexible::event::PlanRunEvent;
 use crate::flexible::executor::ExecutorConfig;
 use crate::flexible::params::PlanRunParams;
-use crate::flexible::report::{PlanRunReport, StepRunRecord, StepStatus};
+use crate::flexible::report::{PlanRunReport, StepRunRecord, StepStatus, ToolCallRecord};
 use crate::flexible::template::{FlexiblePlanTemplate, PlanStep};
 
 /// 会话 id（= `plans_flexible_sessions.id`）：服务里一切按它定位。
@@ -149,6 +149,13 @@ pub struct StepSnapshot {
     /// 本步的执行轨迹（think box 的数据）。**跨事件累积**；
     /// 注意 `from_record` 不产出它，由 `state.rs` 在覆盖前接回。
     pub track: Vec<StepTrackLine>,
+    /// 本步的工具**序列**（按发生顺序）。
+    ///
+    /// 与 `track` 里的 `$` 行**同源、不同用途**：`$` 行是给人看的单行摘要；
+    /// 这里是结构化的 `tool` / `args` / `ok`。执行中由 `StepToolCall` 逐条累积
+    /// （所以宿主能在跑的时候就看到「这一步用了哪些工具」），步骤结束时被
+    /// `from_record` 覆盖为报告里的版本（`args` 是全量 JSON，比事件的更完整）。
+    pub tool_sequence: Vec<ToolCallRecord>,
 }
 
 impl StepSnapshot {
@@ -169,6 +176,7 @@ impl StepSnapshot {
             output_truncated: false,
             output_file: None,
             track: Vec::new(),
+            tool_sequence: Vec::new(),
         }
     }
 
@@ -190,6 +198,7 @@ impl StepSnapshot {
             output_file: record.output_file.clone(),
             // 轨迹不在执行记录里：由调用方按 index 接回（见 `state.rs`）。
             track: Vec::new(),
+            tool_sequence: record.tool_sequence.clone(),
         }
     }
 
@@ -210,6 +219,7 @@ impl StepSnapshot {
             output_truncated: false,
             output_file: None,
             track: Vec::new(),
+            tool_sequence: Vec::new(),
         }
     }
 

@@ -1,46 +1,59 @@
 //! STATS Bento 块：执行统计。
 //!
-//! 指标来自执行器返回的 `PlanRunReport`（由执行服务的快照带上来：`RunSnapshot::report`）。
+//! 数据源是**执行快照**（`RunSnapshot`），不是终态的 `PlanRunReport`。
+//! 报告只在 `RunFinished` 时才被填进快照（`state.rs`），用它会让整块 STATS
+//! 全程显示 `—`，直到执行结束才「跳」出来。快照则在每个事件后更新，所以
+//! 执行中就能看到 Exec time / Tokens / Tools / Steps done / Errors 在涨。
+//!
+//! 一处例外：`Tokens` 按步结算（`StepFinished` 时才有值），正在跑的那一步
+//! 还没计入 —— 它不是逐 token 实时，但也不像以前那样全程空着。
+//!
 //! 没跑过（或模板未就绪）时，除 `Mode` 与步骤总数外一律显示占位符 `—`。
 //!
 //! 历史多次执行的对比属于执行记录落库（见 `docs/planned-agent/flexible-executor.md` 阶段 6）。
 
 use dioxus::prelude::*;
-use planned_agent::flexible::PlanRunReport;
+use planned_agent::flexible::run_service::{RunSnapshot, StepPhase};
 
 #[component]
 pub fn StatsView(
     plan_mode_label: String,
     total_steps: usize,
     hint: Option<String>,
-    // 最近一次执行的报告；`None` = 本会话还没跑过
-    report: Option<PlanRunReport>,
+    /// 该会话当前（或最近一次）的执行快照；`None` = 本会话还没跑过。
+    snapshot: Option<RunSnapshot>,
 ) -> Element {
     // 先把要显示的文本算好，避免 rsx 里塞三元表达式。
-    let exec_time = report
+    let exec_time = snapshot
         .as_ref()
-        .map(|r| format_duration(r.total_duration_ms))
+        .map(format_exec_time)
         .unwrap_or_else(|| "—".to_string());
-    let tokens = report
+    let tokens = snapshot
         .as_ref()
-        .map(|r| format_tokens(r.total_tokens()))
+        .map(|s| format_tokens(steps_token_sum(s)))
         .unwrap_or_else(|| "—".to_string());
-    let tools_called = report
+    let tools_called = snapshot
         .as_ref()
-        .map(|r| r.tool_calls.to_string())
+        .map(|s| {
+            s.steps
+                .iter()
+                .map(|step| step.tool_calls)
+                .sum::<usize>()
+                .to_string()
+        })
         .unwrap_or_else(|| "—".to_string());
     // 与上行互补：上行答「调了几次」，这行答「调了什么」。
-    let tools_used = report
+    let tools_used = snapshot
         .as_ref()
         .map(format_tools_used)
         .unwrap_or_else(|| "—".to_string());
-    let steps_done = report
+    let steps_done = snapshot
         .as_ref()
-        .map(|r| format!("{}/{}", r.steps_done(), total_steps))
+        .map(|s| format!("{}/{total_steps}", count_phase(s, StepPhase::Done)))
         .unwrap_or_else(|| format!("0/{total_steps}"));
-    let errors = report
+    let errors = snapshot
         .as_ref()
-        .map(|r| r.errors().to_string())
+        .map(|s| count_phase(s, StepPhase::Failed).to_string())
         .unwrap_or_else(|| "—".to_string());
 
     rsx! {
@@ -88,22 +101,57 @@ pub fn StatsView(
     }
 }
 
+/// 执行耗时：运行中显示「到现在为止」，已结束显示起止之差。
+///
+/// ⚠️ 只随**事件**刷新 —— 一次 LLM 调用期间没有事件，数字会停住不涨
+/// （不会算错，只是暂停）。要严格逐秒跳动得引入定时器，代价不成比例。
+fn format_exec_time(snapshot: &RunSnapshot) -> String {
+    let end = snapshot.finished_at_ms.unwrap_or_else(now_ms);
+    format_duration(end.saturating_sub(snapshot.started_at_ms))
+}
+
+/// 已完成步骤的 token 之和（`StepFinished` 才结算，正在跑的那步还没计入）。
+fn steps_token_sum(snapshot: &RunSnapshot) -> u32 {
+    snapshot
+        .steps
+        .iter()
+        .map(|step| step.prompt_tokens + step.completion_tokens)
+        .sum()
+}
+
+/// 处于某相位的步骤数。
+fn count_phase(snapshot: &RunSnapshot, phase: StepPhase) -> usize {
+    snapshot
+        .steps
+        .iter()
+        .filter(|step| step.phase == phase)
+        .count()
+}
+
 /// 本次执行**用到过**的工具：去重后按首次出现顺序，带次数（`read_file ×2`）。
 ///
-/// 特意不截到「只看前几个」而不报剩余 —— 工具数量本身就是「该不该收窄工具表」的信号。
 /// 一步都没调工具时返回 `—`。
-fn format_tools_used(report: &PlanRunReport) -> String {
+fn format_tools_used(snapshot: &RunSnapshot) -> String {
+    format_tool_names(
+        snapshot
+            .steps
+            .iter()
+            .flat_map(|step| step.tool_sequence.iter())
+            .map(|call| call.tool.as_str()),
+    )
+}
+
+/// 工具名序列 → `read_file ×2、write_file ×1`。
+///
+/// 去重、按**首次出现顺序**（不排序 —— 顺序本身反映流程：先读后写），
+/// 最多列 3 个，其余的折成「等 N 个」（工具数本身就是「该不该收窄工具表」的信号）。
+fn format_tool_names<'a>(names: impl Iterator<Item = &'a str>) -> String {
     // `(工具名, 次数)`，按首次出现顺序。
     let mut counts: Vec<(&str, usize)> = Vec::new();
-    for step in &report.steps {
-        for call in &step.tool_sequence {
-            match counts
-                .iter_mut()
-                .find(|(name, _)| *name == call.tool.as_str())
-            {
-                Some((_, count)) => *count += 1,
-                None => counts.push((call.tool.as_str(), 1)),
-            }
+    for name in names {
+        match counts.iter_mut().find(|(seen, _)| *seen == name) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((name, 1)),
         }
     }
     if counts.is_empty() {
@@ -123,6 +171,14 @@ fn format_tools_used(report: &PlanRunReport) -> String {
     text
 }
 
+/// 当前 Unix 毫秒（与内核 `now_ms` 同口径）。
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// 毫秒 → `345ms` / `1.2s`。
 fn format_duration(ms: u64) -> String {
     if ms < 1000 {
@@ -138,5 +194,29 @@ fn format_tokens(tokens: u32) -> String {
         tokens.to_string()
     } else {
         format!("{:.1}k", tokens as f64 / 1000.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_names_are_deduped_in_first_seen_order() {
+        assert_eq!(
+            format_tool_names(["read_file", "write_file", "read_file"].into_iter()),
+            "read_file ×2、write_file ×1"
+        );
+    }
+
+    #[test]
+    fn no_tool_calls_shows_placeholder() {
+        assert_eq!(format_tool_names(std::iter::empty()), "—");
+    }
+
+    #[test]
+    fn extra_tools_are_folded_into_a_count() {
+        let names = ["a", "b", "c", "d", "e"];
+        assert_eq!(format_tool_names(names.into_iter()), "a ×1、b ×1、c ×1 等 5 个");
     }
 }

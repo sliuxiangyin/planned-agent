@@ -404,7 +404,9 @@ pub fn PlanLeftPanel(
                         plan_mode_label: plan_mode_label,
                         total_steps: total_steps,
                         hint: hint.clone(),
-                        report: run_snapshot.as_ref().and_then(|snapshot| snapshot.report.clone()),
+                        // 传**整个快照**（而不是只传 `report`）：快照每个事件后都更新，
+                        // 所以 STATS 在执行中就有数，不必等 `RunFinished`。
+                        snapshot: run_snapshot.as_ref().cloned(),
                     }
                 }
                 // ⑤ OUTPUT — 输出契约（本次任务要交出什么）

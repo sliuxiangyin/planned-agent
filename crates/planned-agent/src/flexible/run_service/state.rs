@@ -6,6 +6,7 @@
 //! 终态收尾（清取消通道）由服务循环负责；本函数只做事件自身的语义。
 
 use crate::flexible::event::PlanRunEvent;
+use crate::flexible::report::ToolCallRecord;
 
 use super::types::{now_ms, RunSnapshot, RunStatus, StepPhase, StepSnapshot, StepTrackLine};
 
@@ -36,6 +37,14 @@ pub fn apply_event(snapshot: &mut RunSnapshot, event: PlanRunEvent) {
         } => {
             let step = snapshot.step_or_insert(index);
             step.tool_calls += 1;
+            // 工具序列**逐条累积**（不是等 `StepFinished`）—— 宿主 STATS 靠它
+            // 在执行中就显示「这一步用了哪些工具」。注意事件里的 `args` 是展示用的
+            // 单行摘要；`StepFinished` 时 `from_record` 会用报告里的全量版整体覆盖。
+            step.tool_sequence.push(ToolCallRecord {
+                tool: tool.clone(),
+                args: args.clone(),
+                ok,
+            });
             step.track.push(StepTrackLine::Tool { tool, args, ok });
         }
         PlanRunEvent::StepFinished { index, record } => {
