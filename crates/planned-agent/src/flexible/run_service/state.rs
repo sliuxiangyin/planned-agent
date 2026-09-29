@@ -141,6 +141,7 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 3,
             tool_calls: 1,
+            tool_sequence: vec![],
             rounds: 1,
             call_usages: vec![CallUsage {
                 round: 1,

@@ -28,6 +28,24 @@ pub struct CallUsage {
     pub completion_tokens: u32,
 }
 
+/// 一次工具调用的记录（步骤级，按发生顺序排列）。
+///
+/// 与快照 `track` 里的 `$` 行**同源、不同用途**：
+/// - `$` 行是给人看的单行摘要（`describe_tool_args`，`args` 封顶 120 字符）；
+/// - 这里是给排查/统计用的结构化记录（`describe_arguments` 全量 JSON）。
+///
+/// 两者**不合并**：一个求短，一个求全（见 `crates/planned-agent/src/flexible/step.rs`
+/// 里「渲染一次，三处复用」的说明）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCallRecord {
+    /// 工具名，如 `read_file`。
+    pub tool: String,
+    /// 入参（JSON 文本，`describe_arguments` 渲染）。
+    pub args: String,
+    /// 是否失败。工具**返回错误结果**与工具**执行异常**都算 `false`。
+    pub ok: bool,
+}
+
 /// 单步执行记录。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StepRunRecord {
@@ -44,8 +62,15 @@ pub struct StepRunRecord {
     /// 该步所有轮次 token 之和（= `call_usages` 的 sum）。
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
-    /// 该步调用的工具次数。
+    /// 该步调用的工具次数（= `tool_sequence.len()`）。
     pub tool_calls: usize,
+    /// 该步的工具**序列**（按发生顺序排列）。
+    ///
+    /// C1：与 `PlanRunEvent::StepToolCall` **同一处**采集 —— 一处采集、两条出口
+    /// （事件 → 快照 `track` → think box 显示；这里 → 报告）。
+    /// `#[serde(default)]` 让缺失该字段的旧 JSON 仍可解析。
+    #[serde(default)]
+    pub tool_sequence: Vec<ToolCallRecord>,
     /// 该步的工具循环轮数（= `call_usages.len()`）。
     pub rounds: usize,
     /// 单次（每轮 LLM 请求）token 明细。
@@ -134,6 +159,7 @@ mod tests {
             prompt_tokens: 0,
             completion_tokens: 0,
             tool_calls: 0,
+            tool_sequence: vec![],
             rounds: 0,
             call_usages: vec![],
             output_summary: None,

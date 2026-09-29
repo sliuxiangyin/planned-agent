@@ -29,6 +29,11 @@ pub fn StatsView(
         .as_ref()
         .map(|r| r.tool_calls.to_string())
         .unwrap_or_else(|| "—".to_string());
+    // 与上行互补：上行答「调了几次」，这行答「调了什么」。
+    let tools_used = report
+        .as_ref()
+        .map(format_tools_used)
+        .unwrap_or_else(|| "—".to_string());
     let steps_done = report
         .as_ref()
         .map(|r| format!("{}/{}", r.steps_done(), total_steps))
@@ -61,6 +66,10 @@ pub fn StatsView(
                         span { class: "plan-stats__value", "{tools_called}" }
                     }
                     div { class: "plan-stats__row",
+                        span { class: "plan-stats__label", "Tools used" }
+                        span { class: "plan-stats__value", "{tools_used}" }
+                    }
+                    div { class: "plan-stats__row",
                         span { class: "plan-stats__label", "Steps done" }
                         span { class: "plan-stats__value plan-stats__value--success", "{steps_done}" }
                     }
@@ -77,6 +86,41 @@ pub fn StatsView(
             }
         }
     }
+}
+
+/// 本次执行**用到过**的工具：去重后按首次出现顺序，带次数（`read_file ×2`）。
+///
+/// 特意不截到「只看前几个」而不报剩余 —— 工具数量本身就是「该不该收窄工具表」的信号。
+/// 一步都没调工具时返回 `—`。
+fn format_tools_used(report: &PlanRunReport) -> String {
+    // `(工具名, 次数)`，按首次出现顺序。
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for step in &report.steps {
+        for call in &step.tool_sequence {
+            match counts
+                .iter_mut()
+                .find(|(name, _)| *name == call.tool.as_str())
+            {
+                Some((_, count)) => *count += 1,
+                None => counts.push((call.tool.as_str(), 1)),
+            }
+        }
+    }
+    if counts.is_empty() {
+        return "—".to_string();
+    }
+
+    const MAX_SHOWN: usize = 3;
+    let mut text = counts
+        .iter()
+        .take(MAX_SHOWN)
+        .map(|(name, count)| format!("{name} ×{count}"))
+        .collect::<Vec<_>>()
+        .join("、");
+    if counts.len() > MAX_SHOWN {
+        text.push_str(&format!(" 等 {} 个", counts.len()));
+    }
+    text
 }
 
 /// 毫秒 → `345ms` / `1.2s`。

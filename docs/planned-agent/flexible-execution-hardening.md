@@ -38,7 +38,7 @@ A 组执行正确性、B 组执行状态机、C 组工具收窄（不落库部�
 
 | 批次 | 内容 | 状态 | 理由 |
 |---|---|---|---|
-| **P0** | C1（工具序列进报告）、A1、A2 | A1 ✅ · A2 ✅ · C1 未做 | C1 零风险且是后续一切观测的前提；A1/A2 是硬缺陷 |
+| **P0** | C1（工具序列进报告）、A1、A2 | A1 ✅ · A2 ✅ · C1 ✅ | C1 零风险且是后续一切观测的前提；A1/A2 是硬缺陷 |
 | **P1** | D1、D2、B1a（取消即时）、B1b（超时 + 超时重试） | B1a ✅ · B1b ✅ · D1/D2 未做 | 确定性守卫 + 一个真实卡死风险 |
 | **P2** | A3、A4、A5、B2、C2、C3 | A3 ✅ · A4 ✅ · A5 ✅ · 其余未做 | 语义/预算类，需先定参数 |
 | **P3** | B3、B4、D3、C4 | B3 ✅ · 其余未做 | 动 UI / 动其它 crate / 只是文档约定 |
@@ -46,7 +46,7 @@ A 组执行正确性、B 组执行状态机、C 组工具收窄（不落库部�
 > **A 组（A1–A5）已全部完成**（2026-09-28）。A1/A2/A3 按本节设计直接实施；
 > **A4/A5 不是按本节的原设计实现的** —— 原方案（硬截断 + 预算）被判定「不比截取」而放弃，
 > 改为**产出落文件 + 下游按需分页读取**，见 `flexible-step-output-spill.md`。
-> 回归基线（实测）：`cargo test -p planned-agent --lib flexible::` = **94 passed**；
+> 回归基线（实测）：`cargo test -p planned-agent --lib flexible::` = **95 passed**；
 > `cargo test -p planned-agent-gui --bins` = **63 passed**。
 
 > 每项完成后单独跑 `cargo test -p planned-agent --lib flexible::`；D3 跑 `cargo test -p planned-agent-tool-manager`。
@@ -192,15 +192,30 @@ A 组执行正确性、B 组执行状态机、C 组工具收窄（不落库部�
 
 ### C 组 · 工具收窄（本稿核心）
 
-#### C1（P0）工具序列进报告
+#### C1（P0）工具序列进报告  ✅ 已完成（2026-09-28）
 
-- **现状**：`step.rs:280-285` 已发 `StepToolCall` 事件，`state.rs:34-40` 存进快照 `track`；但 `StepRunRecord`（`report.rs:33-66`）**没有任何工具序列字段** —— 数据采集了，没人汇总。
-- **设计**：
-  - `report.rs` 加 `ToolCallRecord { tool: String, args: String, ok: bool }`（`Serialize/Deserialize`）与 `StepRunRecord.tool_sequence: Vec<ToolCallRecord>`（`#[serde(default)]`）。
-  - **采集点**：`step.rs:280` 发事件**同一处** push 进局部 `Vec`，末尾塞进 `record` —— **一处采集、两条出口**（事件 + 记录）。
-  - **与 `imp` 条目 1 的偏差（需知）**：`imp` 写「数据从 `StepSnapshot.track` 派生（单一数据源）」，但 `StepRunRecord` 由 `step.rs` 产出、`track` 在 `state.rs`（executor 之外），跨层派生反而要新增通路。**改为在采集点同处产出**，仍是单一来源、更简单。
-  - **`args` 用哪个**：记录用 `describe_arguments`（800 上限，排查用），事件/快照 `$` 行继续用 `describe_tool_args`（120，展示用）—— 两者用途不同，**不合**（与 `flexible-think-box-track` 的既有约定一致）。
-- **验收**：`cargo test -p planned-agent --lib flexible::report`；跑一次执行后 report 每步有工具序列。
+- **现状（改造前）**：`step.rs` 已发 `StepToolCall` 事件，`state.rs` 存进快照 `track`；
+  但 `StepRunRecord` 只有 `tool_calls: usize`（**次数**）—— 「那 5 次是哪 5 个工具、在第几步、传了什么」
+  一个都答不出来。
+- **设计（已实现）**：
+  - `report.rs` 新增 `ToolCallRecord { tool, args, ok }`（`Serialize/Deserialize`）；
+    `StepRunRecord` 加 `#[serde(default)] pub tool_sequence: Vec<ToolCallRecord>`。
+  - **采集点**：`step.rs` 发 `StepToolCall` 事件**同一处** push 进局部 `Vec`，末尾塞进 `record`
+    —— **一处采集、两条出口**（事件 → 快照 `track` → think box；这里 → 报告）。
+  - ⚠️ 实现细节：`tool_name` / `args_line` 原本是**被 move 进事件**的，所以 push 必须在 `emit`
+    **之前** clone，否则拿不到。顺手把 `ok = !is_error` 提成一个局部变量，两处共用。
+  - **与 `imp` 条目 1 的偏差（需知）**：`imp` 写「数据从 `StepSnapshot.track` 派生（单一数据源）」，
+    但 `StepRunRecord` 由 `step.rs` 产出、`track` 在 `state.rs`（executor 之外），跨层派生反而要新增通路。
+    **改为在采集点同处产出**，仍是单一来源、更简单。
+  - **`args` 用哪个**：记录用 `describe_arguments`（全量 JSON，排查用），事件/快照 `$` 行继续用
+    `describe_tool_args`（120 字符，展示用）—— 两者用途不同，**不合**。
+- **收尾**：`executor.rs` 的「步骤结束」/「步骤失败」日志新增 `tools=` 字段
+  （`summarize_tools`：去重后的工具名，按首次出现顺序）—— 此前只有 `tool_calls=3`（次数），
+  看不出「调了什么」。这是本项在 UI 之外的**直接可见出口**。
+- **验收（已通过）**：`report_records_tool_sequence_per_step` —— 一步内两次调用（一成功、一工具层报错），
+  断言两条记录**按发生顺序**、工具名/入参/`ok` 都对得上；未调工具的步骤为空序列。
+- **⚠️ 仍未做的消费点**：GUI 的 `stats.rs` 只读 `report.tool_calls`（仍是数字），**没有**读 `tool_sequence`；
+  `StepSnapshot` 也**未**带上该字段。要做「界面里看见工具序列」需另开一项（见下）。
 
 #### C2（P2）按「整次任务」收窄工具表（形态待定）
 

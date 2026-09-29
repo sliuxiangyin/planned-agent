@@ -18,7 +18,7 @@ use super::event::{PlanRunEvent, PlanRunSink};
 use super::output_schema::OutputSchema;
 use super::params::{render_step_expected_output, render_step_intent, PlanRunParams};
 use super::prompt;
-use super::report::{PlanRunReport, StepRunRecord, StepStatus};
+use super::report::{PlanRunReport, StepRunRecord, StepStatus, ToolCallRecord};
 use super::step::{run_output_resolve, run_step, StepInput};
 use super::template::{FlexiblePlanTemplate, PlanStep};
 
@@ -409,6 +409,7 @@ impl FlexibleExecutor {
                     step = index,
                     rounds = record.rounds,
                     tool_calls = record.tool_calls,
+                    tools = %summarize_tools(&record.tool_sequence),
                     duration_ms = record.duration_ms,
                     error = record.error.as_deref().unwrap_or("未记录原因"),
                     output_file = ?record.output_file,
@@ -421,6 +422,7 @@ impl FlexibleExecutor {
                     status = ?record.status,
                     rounds = record.rounds,
                     tool_calls = record.tool_calls,
+                    tools = %summarize_tools(&record.tool_sequence),
                     duration_ms = record.duration_ms,
                     output_file = ?record.output_file,
                     output = %result.output.as_deref().map(log_output).unwrap_or_default(),
@@ -673,6 +675,7 @@ fn resolve_failed_record(index: usize, error: String) -> StepRunRecord {
         prompt_tokens: 0,
         completion_tokens: 0,
         tool_calls: 0,
+        tool_sequence: vec![],
         rounds: 0,
         call_usages: vec![],
         output_summary: None,
@@ -756,6 +759,7 @@ fn placeholder_record(
         prompt_tokens: 0,
         completion_tokens: 0,
         tool_calls: 0,
+        tool_sequence: vec![],
         rounds: 0,
         call_usages: vec![],
         output_summary: None,
@@ -779,6 +783,20 @@ fn to_tool_definition(tool: Tool) -> ToolDefinition {
     }
 }
 
+/// 报告里工具序列的**日志摘要**：去重后的工具名，按首次出现顺序，逗号分隔。
+///
+/// 步骤日志里 `tool_calls=3` 只说「调了几次」，看不出「调了什么」；
+/// 补上 `tools=read_file,write_file` 才能一眼判断这一步用没用（用错了）工具。
+fn summarize_tools(sequence: &[ToolCallRecord]) -> String {
+    let mut seen: Vec<&str> = Vec::new();
+    for call in sequence {
+        if !seen.contains(&call.tool.as_str()) {
+            seen.push(call.tool.as_str());
+        }
+    }
+    seen.join(",")
+}
+
 /// 是否已收到取消信号。
 fn is_cancelled(cancel: &Option<watch::Receiver<bool>>) -> bool {
     cancel
@@ -796,7 +814,11 @@ mod tests {
     use planned_agent_core::ai::types::{ChatCompletionRequest, ChatCompletionResponse};
     use planned_agent_core::ai::ChatCompletionStream;
 
-    use crate::flexible::testing::{text_response, FakeAiClient, RecordingSink};
+    use crate::flexible::testing::{
+        fake_tool, text_response, tool_response, FakeAiClient, FakeTool, RecordingSink,
+    };
+    use planned_agent_core::tool_registry::ToolCategory;
+    use serde_json::json;
     use crate::flexible::{PlanInput, PlanStep};
 
     /// 两步模板：第二步依赖第一步的 `#E1`，且 `intent` 含 `${path}` 占位符。
@@ -1107,6 +1129,89 @@ mod tests {
             .contains("success_only"));
         assert!(report.result.is_none());
         assert_eq!(ai.requests().len(), 2, "契约非法时不该再调一次 LLM");
+    }
+
+    // ── C1：工具序列进报告 ──
+
+    /// 把假工具注册进 registry。
+    fn register(registry: &ToolRegistry, name: &str, tool: Arc<FakeTool>) {
+        registry.register_custom_tool(
+            planned_agent_core::mcp::types::Tool {
+                name: name.to_string(),
+                description: "测试工具".to_string(),
+                input_schema: json!({"type": "object"}),
+            },
+            vec![ToolCategory::File],
+            tool,
+        );
+    }
+
+    /// C1：每步记下「调了哪些工具、什么入参、成功没有」。
+    ///
+    /// 在此之前报告里只有 `tool_calls`（**次数**）—— 事后想知道那几次是什么工具、
+    /// 在哪一步、传了什么，只能去翻 UI 轨迹（而且那份入参已被截到 120 字符）。
+    #[tokio::test]
+    async fn report_records_tool_sequence_per_step() {
+        let registry = Arc::new(ToolRegistry::new());
+        register(
+            &registry,
+            "read_file",
+            fake_tool("read_file", json!({"content": "甲"}), false),
+        );
+        register(
+            &registry,
+            "write_file",
+            fake_tool("write_file", json!({"error": "磁盘满"}), true),
+        );
+
+        let ai = FakeAiClient::new(vec![
+            // 第 1 步第 1 轮：要调两个工具（先成功、后工具层报错）
+            tool_response("call-1", "read_file", json!({"path": "a.txt"}), 10, 1),
+            tool_response(
+                "call-2",
+                "write_file",
+                json!({"path": "b.txt", "content": "乙"}),
+                11,
+                2,
+            ),
+            // 第 1 步第 2 轮：给正文收敛
+            text_response("第一步产出", 12, 3),
+            // 第 2 步：不调工具
+            text_response("第二步产出", 20, 4),
+        ]);
+
+        let template = two_step_template();
+        let params = PlanRunParams::from_template(&template);
+        let sink = RecordingSink::default();
+        let executor =
+            FlexibleExecutor::new(ai as Arc<dyn AiClient>, registry, ExecutorConfig::default());
+
+        let report = executor
+            .run(&template, &params, None, &sink, None)
+            .await
+            .expect("run 不应失败");
+
+        // 第 1 步：两条记录，**按发生顺序**，工具名/入参/成败都对得上。
+        let first = &report.steps[0];
+        assert_eq!(first.tool_calls, 2);
+        assert_eq!(first.tool_sequence.len(), 2);
+        assert_eq!(first.tool_sequence[0].tool, "read_file");
+        assert!(
+            first.tool_sequence[0].args.contains("a.txt"),
+            "入参应带路径：{:?}",
+            first.tool_sequence[0].args
+        );
+        assert!(first.tool_sequence[0].ok);
+        assert_eq!(first.tool_sequence[1].tool, "write_file");
+        assert!(first.tool_sequence[1].args.contains("b.txt"));
+        assert!(
+            !first.tool_sequence[1].ok,
+            "工具返回错误结果应记 ok=false"
+        );
+
+        // 第 2 步：没调工具 → 空序列（而不是缺字段/None）。
+        assert_eq!(report.steps[1].tool_calls, 0);
+        assert!(report.steps[1].tool_sequence.is_empty());
     }
 
     fn executor(ai: Arc<FakeAiClient>) -> FlexibleExecutor {

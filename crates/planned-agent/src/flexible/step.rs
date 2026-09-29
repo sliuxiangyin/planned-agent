@@ -19,7 +19,7 @@ use tokio::sync::watch;
 use super::event::{PlanRunEvent, PlanRunSink};
 use super::executor::ExecutorConfig;
 use super::prompt;
-use super::report::{CallUsage, StepRunRecord, StepStatus};
+use super::report::{CallUsage, StepRunRecord, StepStatus, ToolCallRecord};
 use super::template::PlanStep;
 
 /// 输出摘要的字符上限。
@@ -119,6 +119,8 @@ async fn run_step_with_prompt(
 
     let mut call_usages: Vec<CallUsage> = Vec::new();
     let mut tool_call_count = 0usize;
+    // C1：工具序列 —— 与 `StepToolCall` 事件**同一处**采集（一处采集、两条出口）。
+    let mut tool_sequence: Vec<ToolCallRecord> = Vec::new();
     let mut rounds = 0usize;
     let mut output: Option<String> = None;
     let mut error: Option<String> = None;
@@ -281,18 +283,28 @@ async fn run_step_with_prompt(
             };
 
             tool_call_count += 1;
+            let ok = !is_error;
             tracing::debug!(
                 step = input.index,
                 round = rounds,
                 tool = %tool_name,
-                ok = !is_error,
+                ok,
                 "工具调用完成"
             );
+            // C1：与下面的事件**同处**采集，但**用途不同** —— 事件那条 `$` 行的入参
+            // （`args_line`）截到 120 字符是给 UI 看的；报告这条用 `args_desc`（全量 JSON）
+            // 是给排查/统计看的。**必须在 `emit` 之前 clone**：`tool_name` / `args_line`
+            // 会被 move 进事件。
+            tool_sequence.push(ToolCallRecord {
+                tool: tool_name.clone(),
+                args: args_desc.clone(),
+                ok,
+            });
             sink.emit(PlanRunEvent::StepToolCall {
                 index: input.index,
                 tool: tool_name,
                 args: args_line,
-                ok: !is_error,
+                ok,
             });
             messages.push(tool_message(&call.id, &tool_output));
         }
@@ -330,6 +342,7 @@ async fn run_step_with_prompt(
             prompt_tokens,
             completion_tokens,
             tool_calls: tool_call_count,
+            tool_sequence,
             rounds,
             call_usages,
             output_summary,

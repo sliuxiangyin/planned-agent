@@ -51,5 +51,5 @@ pub use params::{render_step_expected_output, render_step_intent, PlanRunParams}
 pub use placeholder::{
     collect_from_schema, collect_from_steps, collect_placeholders, render, render_lenient, validate,
 };
-pub use report::{CallUsage, PlanRunReport, StepRunRecord, StepStatus};
+pub use report::{CallUsage, PlanRunReport, StepRunRecord, StepStatus, ToolCallRecord};
 pub use template::{FlexiblePlanTemplate, PlanInput, PlanStep};
