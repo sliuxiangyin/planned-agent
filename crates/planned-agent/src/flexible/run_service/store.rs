@@ -14,7 +14,7 @@ use std::sync::RwLock;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
 
-use super::types::{RunSnapshot, RunUpdate, SessionFilter, SessionId, SubscriptionId};
+use super::types::{RunNotice, RunSnapshot, RunUpdate, SessionFilter, SessionId, SubscriptionId};
 
 /// 一个订阅者：会话范围 + 推送出口。
 struct Subscription {
@@ -81,16 +81,38 @@ impl RunStore {
         };
 
         let snapshot = next.as_ref()?;
-        let update = RunUpdate {
+        self.broadcast(RunUpdate::Snapshot {
             session_id: session_id.to_string(),
             snapshot: snapshot.clone(),
-        };
+        });
+        next
+    }
+
+    // ───────────────────────── 一次性通知（无状态变更） ─────────────────────────
+
+    /// 向某会话的订阅者广播一条**一次性通知**：**不改动状态表**。
+    ///
+    /// 这是「没有状态变更、也要告诉宿主一件事」的唯一出口（如启动被拒）。
+    /// 与 [`RunStore::update`] 的关键区别：**不动 `runs`** —— 因此既不污染
+    /// 「快照 = 某一次执行的状态」这一语义，也不会在订阅回放时冒出一条假快照。
+    pub fn notify(&self, session_id: &str, notice: RunNotice) {
+        self.broadcast(RunUpdate::Notice {
+            session_id: session_id.to_string(),
+            notice,
+        });
+    }
+
+    /// 把一条推送发给匹配的订阅者，顺手回收已丢弃接收端的登记。
+    ///
+    /// 调用方**不得持有 `runs` 锁**（本函数只取 `subs`）：锁顺序恒为 `runs → subs`。
+    fn broadcast(&self, update: RunUpdate) {
+        let session_id = update.session_id().to_owned();
 
         let mut stale: Vec<SubscriptionId> = Vec::new();
         {
             let subs = self.subs.read().expect("subs 锁");
             for (id, subscription) in subs.iter() {
-                if subscription.filter.matches(session_id)
+                if subscription.filter.matches(&session_id)
                     && subscription.sink.send(update.clone()).is_err()
                 {
                     // 接收端已被 drop（宿主不再关心）→ 稍后回收登记
@@ -104,7 +126,6 @@ impl RunStore {
                 subs.remove(&id);
             }
         }
-        next
     }
 
     // ───────────────────────────── 订阅 ─────────────────────────────
@@ -124,7 +145,7 @@ impl RunStore {
         let mut subs = self.subs.write().expect("subs 锁");
         for snapshot in runs.values() {
             if filter.matches(&snapshot.session_id) {
-                let _ = sink.send(RunUpdate {
+                let _ = sink.send(RunUpdate::Snapshot {
                     session_id: snapshot.session_id.clone(),
                     snapshot: snapshot.clone(),
                 });
@@ -183,6 +204,7 @@ impl RunStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::flexible::run_service::types::StartRejectReason;
     use crate::flexible::template::{FlexiblePlanTemplate, PlanStep};
     use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
@@ -245,8 +267,15 @@ mod tests {
         let (_id, mut rx) = watch(&store, SessionFilter::One("s1".to_string()));
 
         let replayed = rx.try_recv().expect("注册即应回放一条");
-        assert_eq!(replayed.session_id, "s1");
-        assert_eq!(replayed.snapshot.run_id, 3);
+        let RunUpdate::Snapshot {
+            session_id,
+            snapshot,
+        } = replayed
+        else {
+            panic!("回放的应是一条快照，而不是通知");
+        };
+        assert_eq!(session_id, "s1");
+        assert_eq!(snapshot.run_id, 3);
     }
 
     #[test]
@@ -269,8 +298,8 @@ mod tests {
         store.update("s1", |_| Some(snapshot("s1", 1)));
         store.update("s2", |_| Some(snapshot("s2", 1)));
 
-        assert_eq!(rx.try_recv().expect("s1").session_id, "s1");
-        assert_eq!(rx.try_recv().expect("s2").session_id, "s2");
+        assert_eq!(rx.try_recv().expect("s1").session_id(), "s1");
+        assert_eq!(rx.try_recv().expect("s2").session_id(), "s2");
     }
 
     #[test]
@@ -297,6 +326,55 @@ mod tests {
 
         assert_eq!(store.subscriber_count(), 0, "推送失败应顺手回收登记");
         assert!(store.unsubscribe(id) == false);
+    }
+
+    #[test]
+    fn notify_does_not_touch_snapshot() {
+        let store = RunStore::new();
+        store.update("s1", |_| Some(snapshot("s1", 1)));
+
+        let (_id, mut rx) = watch(&store, SessionFilter::One("s1".to_string()));
+        assert!(rx.try_recv().is_ok(), "订阅时应先回放一条快照");
+
+        store.notify(
+            "s1",
+            RunNotice::StartRejected {
+                reason: StartRejectReason::AlreadyRunning,
+            },
+        );
+
+        // 通知**不改状态**：快照还是原来那条。
+        assert_eq!(store.snapshot("s1").map(|s| s.run_id), Some(1));
+        // 且订阅者收到的是**通知**本身，而不是一条伪装成更新的假快照。
+        let RunUpdate::Notice {
+            session_id,
+            notice,
+        } = rx.try_recv().expect("应收到通知")
+        else {
+            panic!("通知不应伪装成快照");
+        };
+        assert_eq!(session_id, "s1");
+        assert_eq!(
+            notice,
+            RunNotice::StartRejected {
+                reason: StartRejectReason::AlreadyRunning
+            }
+        );
+    }
+
+    #[test]
+    fn notify_only_reaches_matching_subscribers() {
+        let store = RunStore::new();
+        let (_id, mut rx) = watch(&store, SessionFilter::One("s2".to_string()));
+
+        store.notify(
+            "s1",
+            RunNotice::StartRejected {
+                reason: StartRejectReason::ServiceNotRunning,
+            },
+        );
+
+        assert!(rx.try_recv().is_err(), "别的会话不应串台");
     }
 
     #[test]

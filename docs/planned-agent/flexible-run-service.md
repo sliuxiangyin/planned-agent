@@ -126,7 +126,14 @@ impl RunSnapshot {
     pub fn phase_of(&self, offset: usize) -> StepPhase;
 }
 
-pub struct RunUpdate { pub session_id: SessionId, pub snapshot: RunSnapshot }
+/// 订阅推送：两类**互斥**载荷。
+/// 2026-09-28 由结构体改为枚举 —— 见 `flexible-execution-hardening.md` §B3。
+pub enum RunUpdate {
+    /// 状态更新：该会话的最新快照（每次变更推一条；订阅时回放当前值）。
+    Snapshot { session_id: SessionId, snapshot: RunSnapshot },
+    /// 一次性通知：**不改变任何状态**（如「启动被拒」），不写进快照。
+    Notice { session_id: SessionId, notice: RunNotice },
+}
 
 pub enum SessionFilter { All, One(SessionId) }
 

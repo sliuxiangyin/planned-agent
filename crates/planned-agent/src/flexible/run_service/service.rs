@@ -8,7 +8,8 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use super::store::RunStore;
 use super::types::{
-    RunCommand, RunRequest, RunSnapshot, RunUpdate, SessionFilter, SubscriptionId,
+    RunCommand, RunNotice, RunRequest, RunSnapshot, RunUpdate, SessionFilter, StartRejectReason,
+    SubscriptionId,
 };
 
 /// 灵活计划执行服务句柄。
@@ -30,9 +31,25 @@ impl RunService {
     ///
     /// 没有返回值：受理成功就再无「启动期」状态可报，一切进度与结果都从
     /// [`Self::snapshot`] 或订阅流读，不存在第二条状态通道。
+    ///
+    /// 但**被拒**时要让宿主知道（此前只写一条日志，宿主点了没反应）：
+    /// 无论命令送不出去、还是会话已在跑，都向该会话的订阅者回一条
+    /// [`RunNotice::StartRejected`](super::RunNotice::StartRejected)。
+    /// 通知**不写进快照** —— 「被拒」意味着这次执行没发生，而快照描述的是
+    /// 「某一次执行的状态」（见 `flexible-execution-hardening.md` §B3）。
     pub fn start(&self, request: RunRequest) {
+        // 先留一份会话 id：命令送不出去时 `request` 会随 `SendError` 一起被退回。
+        let session_id = request.session_id.clone();
         if self.tx.send(RunCommand::Start { request }).is_err() {
-            tracing::warn!("灵活执行服务未在运行，启动请求被丢弃");
+            tracing::warn!(session = %session_id, "灵活执行服务未在运行，启动请求被丢弃");
+            // 服务循环已退出，命令队列没人收 —— 但状态表与订阅表还活在本进程里，
+            // 直接广播（不经命令队列）仍能把「没启动起来」告诉宿主。
+            self.store.notify(
+                &session_id,
+                RunNotice::StartRejected {
+                    reason: StartRejectReason::ServiceNotRunning,
+                },
+            );
         }
     }
 

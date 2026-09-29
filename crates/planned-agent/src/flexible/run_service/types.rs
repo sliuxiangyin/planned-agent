@@ -319,11 +319,65 @@ impl RunSnapshot {
     }
 }
 
-/// 订阅推送载荷：会话 id + 该会话的最新快照。
+/// 订阅推送载荷：两类东西，**互斥**。
+///
+/// - [`RunUpdate::Snapshot`]：该会话的**状态**变了（每次变更推一条；订阅时回放当前值）；
+/// - [`RunUpdate::Notice`]：**一次性通知** —— 没有任何状态变更，只是要告诉宿主一件事
+///   （如「启动被拒」）。**刻意不写进快照**：快照的语义是「某一次执行的状态」，
+///   而「启动被拒」意味着这次执行**根本没发生**（见 `flexible-execution-hardening.md` §B3）。
+///
+/// 做成枚举而非「结构体 + 可选字段」：两者是不同类别的东西，「有快照」与「有通知」
+/// 不可能同时成立，用枚举让宿主的 `match` 天然穷尽（漏处理编译不过，而非运行期静默）。
 #[derive(Debug, Clone, PartialEq)]
-pub struct RunUpdate {
-    pub session_id: SessionId,
-    pub snapshot: RunSnapshot,
+pub enum RunUpdate {
+    /// 状态更新：该会话的最新快照。
+    Snapshot {
+        session_id: SessionId,
+        snapshot: RunSnapshot,
+    },
+    /// 一次性通知：**不改变任何状态**。
+    Notice {
+        session_id: SessionId,
+        notice: RunNotice,
+    },
+}
+
+impl RunUpdate {
+    /// 这条推送属于哪个会话。
+    ///
+    /// 宿主**必须**用它过滤：`unsubscribe` 只保证「不再 push」，通道里已缓冲的消息
+    /// 仍会被读到（换会话后旧消费任务可能收到上一个会话的推送）。
+    pub fn session_id(&self) -> &str {
+        match self {
+            RunUpdate::Snapshot { session_id, .. } | RunUpdate::Notice { session_id, .. } => {
+                session_id
+            }
+        }
+    }
+}
+
+/// 一次性通知：**不改变任何状态**，只是要告知宿主一件事。
+///
+/// 走订阅通道而不是写进快照 —— 见 [`RunUpdate`] 的说明。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunNotice {
+    /// 启动请求**未被受理**：不会有任何执行发生，快照也不被改动。
+    ///
+    /// 宿主应据此提示用户。此前这种情况只写一条 `tracing::warn!`，宿主的点击
+    /// **毫无反应**，无法区分「服务挂了」与「会话已在跑」—— 这是本通知要填的洞。
+    StartRejected { reason: StartRejectReason },
+}
+
+/// [`RunNotice::StartRejected`] 的原因。
+///
+/// 只给**原因**、不给文案：内核不产出 UI 文本，提示语由宿主决定
+/// （与「内置工具 description 不含平台事实」同一原则）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartRejectReason {
+    /// 服务未在运行（命令循环已退出）—— 启动请求根本没送出去。
+    ServiceNotRunning,
+    /// 该会话已在执行中 —— 重复启动被忽略（进行中的进度不受影响）。
+    AlreadyRunning,
 }
 
 /// 订阅的会话范围。

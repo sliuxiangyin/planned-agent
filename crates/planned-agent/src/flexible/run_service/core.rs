@@ -26,7 +26,7 @@ use crate::flexible::executor::FlexibleExecutor;
 
 use super::state::apply_event;
 use super::store::RunStore;
-use super::types::{RunCommand, RunRequest, RunSnapshot, RunStatus, SessionId};
+use super::types::{RunCommand, RunNotice, RunRequest, RunSnapshot, RunStatus, SessionId, StartRejectReason};
 
 /// 执行任务的 future：由服务循环轮询。
 type RunTask = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -124,6 +124,14 @@ impl RunLoop {
             .is_some_and(|snapshot| snapshot.is_running())
         {
             tracing::warn!("会话 {} 正在执行，忽略重复启动", session_id);
+            // 宿主的点击不能「毫无反应」：走订阅通道回一条通知。
+            // **仍不动快照** —— 在跑的那次的进度不能被覆盖（见 §B3）。
+            self.store.notify(
+                &session_id,
+                RunNotice::StartRejected {
+                    reason: StartRejectReason::AlreadyRunning,
+                },
+            );
             return;
         }
 
@@ -287,7 +295,10 @@ mod tests {
     use crate::flexible::template::{FlexiblePlanTemplate, PlanStep};
     use crate::flexible::testing::{text_response, FakeAiClient};
 
-    use super::super::types::{RunUpdate, SessionFilter, StepPhase, StepTrackLine, SubscriptionId};
+    use super::super::types::{
+        RunNotice, RunUpdate, SessionFilter, StartRejectReason, StepPhase, StepTrackLine,
+        SubscriptionId,
+    };
     use super::super::RunService;
 
     // ───────────────────────────── 测试桩 ─────────────────────────────
@@ -391,13 +402,23 @@ mod tests {
                 .await
                 .expect("等待终态超时")
                 .expect("服务通道关闭");
-            if update.snapshot.status.is_finished() {
-                return update.snapshot;
+            // 通知（如「启动被拒」）不是快照，跳过 —— 只等终态快照。
+            if let RunUpdate::Snapshot { snapshot, .. } = update {
+                if snapshot.status.is_finished() {
+                    return snapshot;
+                }
             }
         }
     }
 
-    // ───────────────────────────── 用例 ─────────────────────────────
+    /// 从推送里取出快照；收到通知直接 panic（本模块用例只关心快照）。
+    fn snapshot_of(update: RunUpdate) -> RunSnapshot {
+        match update {
+            RunUpdate::Snapshot { snapshot, .. } => snapshot,
+            RunUpdate::Notice { notice, .. } => panic!("本用例不该收到通知：{notice:?}"),
+        }
+    }
+
 
     /// 正常跑完 → 终态成功 + 报告 + 可同步查询。
     #[tokio::test]
@@ -448,11 +469,12 @@ mod tests {
                 .await
                 .expect("超时")
                 .expect("关闭");
-            if let Some(index) = update.snapshot.current_step {
+            let current = snapshot_of(update);
+            if let Some(index) = current.current_step {
                 seen_steps.push(index);
             }
-            if update.snapshot.status.is_finished() {
-                break update.snapshot;
+            if current.status.is_finished() {
+                break current;
             }
         };
 
@@ -483,7 +505,7 @@ mod tests {
                 .await
                 .expect("超时")
                 .expect("关闭");
-            if update.snapshot.current_step == Some(1) {
+            if snapshot_of(update).current_step == Some(1) {
                 break;
             }
         }
@@ -513,7 +535,7 @@ mod tests {
             .await
             .expect("超时")
             .expect("关闭");
-        assert!(first.snapshot.is_running());
+        assert!(snapshot_of(first).is_running());
 
         // 第二次启动：应被忽略（不起第二个任务）
         service.start(request("s1", slow));
@@ -521,6 +543,54 @@ mod tests {
         let snapshot = wait_until_finished(&mut rx).await;
         assert_eq!(snapshot.status, RunStatus::Succeeded);
         assert_eq!(inner.requests().len(), 2, "只应跑一轮（2 次 LLM 调用）");
+    }
+
+    /// 启动被拒 → 宿主**必须**收到通知，而不是「点了没反应」（§B3）。
+    #[tokio::test]
+    async fn rejected_start_notifies_subscriber() {
+        let inner = FakeAiClient::new(vec![
+            text_response("第一步产出", 1, 1),
+            text_response("第二步产出", 1, 1),
+        ]);
+        let slow: Arc<dyn AiClient> = Arc::new(SlowAi {
+            inner: inner.clone(),
+            delay: Duration::from_millis(80),
+        });
+        let (service, store) = spawn_service();
+        let mut rx = subscribe(&store, "s1");
+
+        service.start(request("s1", slow.clone()));
+        // 等它真的跑起来 —— 否则第二次启动会被当成**新启动**受理，而不是拒绝。
+        loop {
+            let update = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("超时")
+                .expect("关闭");
+            if snapshot_of(update).is_running() {
+                break;
+            }
+        }
+
+        service.start(request("s1", slow));
+
+        // 拒绝必须**有声音**：订阅者收到一条通知（而不是静默丢弃）。
+        let notice = loop {
+            let update = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("超时")
+                .expect("关闭");
+            if let RunUpdate::Notice { notice, .. } = update {
+                break notice;
+            }
+        };
+        assert_eq!(
+            notice,
+            RunNotice::StartRejected {
+                reason: StartRejectReason::AlreadyRunning
+            }
+        );
+        // 但**不动状态**：快照仍是在跑的那次，不能被拒绝写成别的样子。
+        assert!(service.snapshot("s1").expect("应有快照").is_running());
     }
 
     /// 上一轮任务的迟到事件按 `run_id` 丢弃。
@@ -620,7 +690,8 @@ mod tests {
                 .await
                 .expect("超时")
                 .expect("关闭");
-            if update.snapshot.run_id == 2 && update.snapshot.current_step == Some(1) {
+            let current = snapshot_of(update);
+            if current.run_id == 2 && current.current_step == Some(1) {
                 break;
             }
         }
@@ -652,7 +723,8 @@ mod tests {
                 .await
                 .expect("超时")
                 .expect("关闭");
-            let has_marker = update.snapshot.steps.iter().any(|step| {
+            let current = snapshot_of(update);
+            let has_marker = current.steps.iter().any(|step| {
                 step.track.iter().any(|line| {
                     matches!(line, StepTrackLine::Thought { text } if text == "同步标记")
                 })

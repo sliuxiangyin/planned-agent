@@ -12,9 +12,10 @@ use std::sync::Arc;
 
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
+use dioxus_primitives::toast::{use_toast, ToastOptions};
 use planned_agent::flexible::run_service::{
-    new_run_service, RunRequest, RunService, RunSnapshot, RunStore, RunUpdate, SessionFilter,
-    SubscriptionId,
+    new_run_service, RunNotice, RunRequest, RunService, RunSnapshot, RunStore, RunUpdate,
+    SessionFilter, StartRejectReason, SubscriptionId,
 };
 use planned_agent::flexible::{ExecutorConfig, FlexiblePlanTemplate, PlanRunParams};
 
@@ -99,6 +100,24 @@ pub fn start_run_with_template(
     Ok(())
 }
 
+/// 一次性通知 → 提示文案。
+///
+/// **文案在宿主侧**：内核只给「原因」枚举，不产出 UI 文本（与「内置工具 description
+/// 不含平台事实」同一原则）。见 `docs/planned-agent/flexible-execution-hardening.md` §B3。
+fn notice_text(notice: RunNotice) -> (&'static str, &'static str) {
+    match notice {
+        RunNotice::StartRejected { reason } => (
+            "执行未启动",
+            match reason {
+                StartRejectReason::ServiceNotRunning => {
+                    "执行服务未在运行，本次没有开始执行；请重启应用后再试"
+                }
+                StartRejectReason::AlreadyRunning => "该计划正在执行中，已忽略本次启动",
+            },
+        ),
+    }
+}
+
 /// 取执行服务句柄（`ReadyShell` 已注入）。
 pub fn use_run_service() -> Arc<RunService> {
     require_resource::<RunService>()
@@ -116,6 +135,9 @@ pub fn use_run_subscription(
     session_id: Signal<Option<String>, SyncStorage>,
 ) -> Signal<Option<RunSnapshot>, SyncStorage> {
     let service = use_run_service();
+    // 「启动被拒」这类**一次性通知**要提示用户 —— 在此之前宿主点了没反应，
+    // 分不清是服务挂了还是已在跑（见 hardening 稿 §B3）。
+    let toast = use_toast();
     // 首帧兜底：用 peek 读会话 id（不建立依赖），同步查一次服务里的现有快照。
     let initial = session_id
         .peek()
@@ -163,10 +185,18 @@ pub fn use_run_subscription(
         // 否则切会话时两个会话的数据会相互覆盖。
         spawn(async move {
             while let Some(update) = rx.recv().await {
-                if update.session_id != session_id {
+                if update.session_id() != session_id {
                     continue;
                 }
-                snapshot.set(Some(update.snapshot));
+                match update {
+                    RunUpdate::Snapshot { snapshot: next, .. } => snapshot.set(Some(next)),
+                    // 通知**不动快照**：它描述的是一次没有发生的执行，写进快照
+                    // 等于把「没启动起来」画成一次真执行。
+                    RunUpdate::Notice { notice, .. } => {
+                        let (title, description) = notice_text(notice);
+                        toast.error(title.to_string(), ToastOptions::new().description(description));
+                    }
+                }
             }
         });
     });

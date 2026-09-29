@@ -41,12 +41,12 @@ A 组执行正确性、B 组执行状态机、C 组工具收窄（不落库部�
 | **P0** | C1（工具序列进报告）、A1、A2 | A1 ✅ · A2 ✅ · C1 未做 | C1 零风险且是后续一切观测的前提；A1/A2 是硬缺陷 |
 | **P1** | D1、D2、B1a（取消即时）、B1b（超时 + 超时重试） | B1a ✅ · B1b ✅ · D1/D2 未做 | 确定性守卫 + 一个真实卡死风险 |
 | **P2** | A3、A4、A5、B2、C2、C3 | A3 ✅ · A4 ✅ · A5 ✅ · 其余未做 | 语义/预算类，需先定参数 |
-| **P3** | B3、B4、D3、C4 | 未做 | 动 UI / 动其它 crate / 只是文档约定 |
+| **P3** | B3、B4、D3、C4 | B3 ✅ · 其余未做 | 动 UI / 动其它 crate / 只是文档约定 |
 
 > **A 组（A1–A5）已全部完成**（2026-09-28）。A1/A2/A3 按本节设计直接实施；
 > **A4/A5 不是按本节的原设计实现的** —— 原方案（硬截断 + 预算）被判定「不比截取」而放弃，
 > 改为**产出落文件 + 下游按需分页读取**，见 `flexible-step-output-spill.md`。
-> 回归基线（实测）：`cargo test -p planned-agent --lib flexible::` = **88 passed**；
+> 回归基线（实测）：`cargo test -p planned-agent --lib flexible::` = **94 passed**；
 > `cargo test -p planned-agent-gui --bins` = **63 passed**。
 
 > 每项完成后单独跑 `cargo test -p planned-agent --lib flexible::`；D3 跑 `cargo test -p planned-agent-tool-manager`。
@@ -132,19 +132,55 @@ A 组执行正确性、B 组执行状态机、C 组工具收窄（不落库部�
 - **配置**：GUI `[flexible]` 段 `llm_timeout_secs`（**0 = 不限制** ↔ 内核 `None`）与 `llm_timeout_retries`。
 - **验收（已完成）**：`cancel_interrupts_in_flight_llm_request`（`HangingAi` + 取消 → 5s 内结束且错误为「用户取消」）、`llm_timeout_retries_and_then_succeeds`（第一次挂 → 重试成功，恰好 2 次尝试）、`llm_timeout_exhausts_retries_then_fails`（一直挂 → 用尽重试后失败，错误含超时与次数）。
 
-#### B2（中）思考轨迹无上限，且随快照全量 clone 广播
+#### B2（中）思考轨迹无上限，且随快照全量 clone 广播  ⏸ 暂缓（2026-09-28）
 
-- **现状**：`step.rs:182-188` 把完整 `thought` 发进 `StepThought`；`state.rs:28-33` 原样 push 进 `track`；`RunStore::update` 每次都 `snapshot.clone()` 并广播（`store.rs:83-107`）。
-- **设计（本稿只做「限流」，不做「回收」）**：
-  - 新增 `THOUGHT_MAX_CHARS`（**建议 2 000**），在 `step.rs:182` **发事件前**截断并加「…（已截断）」—— 事件与快照自然一致，不产生第二个真值来源。
-- **不在本稿**：`RunStore.runs` 的淘汰/TTL、快照增量推送（`store.rs:28-31`）—— 涉及 UI 回看语义，列入 §7 待评估。
-- **验收**：构造超长 reasoning，断言 `RunSnapshot` 尺寸受控。
+> **决定（2026-09-28，用户）**：**先不处理**。后期若要做，方向是**持久化**（轨迹落库）——
+> **不是**本节原设计的「截断」，也**不是**「边显示边丢」。
+> 原因：轨迹只用于 UI 显示（生产消费点已核实只有 GUI；内核那两处是 `#[cfg(test)]` 断言），
+> 但它**被迫**留在内存 —— `RunSnapshot` 同时兼任「UI 推送源」与「回看源」
+> （`store.rs:112-115`：订阅注册后**立刻回放当前快照**），所以快照必须自包含。
+> 一旦轨迹持久化，这个自包含约束就解开了，内存只需保留窗口。
 
-#### B3（中）`start()` 被忽略时宿主无感
+- **现状**（2026-09-28 核实）：
+  - `step.rs:182-188` 把**完整** `thought` 发进 `StepThought`（有 reasoning 用 reasoning，否则用 content）；
+  - `state.rs:28-33` 原样 push 进 `track`，**不截断、不限条数**；`state.rs:45-47` 还**特意**保住轨迹
+    （否则 `StepFinished` 的 `from_record` 整体覆盖会把它清掉）；
+  - `RunStore::update` 每次做 **3 次**完整 clone：存回表（`store.rs:76`）+ 打包更新（`:86`）
+    + **每个订阅者再 clone 一份**（`:94`，在循环内）；
+  - 叠加效应：轨迹无限长 × 每次全量复制 ⇒ **平方级**（1+2+…+N ≈ N²/2）。
+  - 另有一半同源开销：`step.rs:136` 每轮 `messages.clone()` 也随轮数线性增长（**不发给 LLM**，见下）。
+- **两个已核实、将来必踩的事实**：
+  1. **reasoning 会变成步骤产出** —— `step.rs:193` 的 `let answer = if !content.is_empty() { content } else { reasoning };`。
+     所以将来**若**截断，只能截发给 `StepThought` 的那一份，**不能**连带截断产出。
+  2. **reasoning 不进上下文** —— 内存里 `messages.push(message)`（`step.rs:232`）确实带着 `reasoning_content`，
+     但 `ai-openai` 转换时 Assistant 分支只取 `content` / `tool_calls` / `name`
+     （`client.rs:280-287`，其余被 `..Default::default()` 吃掉）—— **不回传给 LLM**。
+- **设计（原方案，暂缓）**：新增 `THOUGHT_MAX_CHARS`（建议 2 000），在 `step.rs:182` 发事件前截断并加「…（已截断）」。
+- **后期方向（持久化）**：轨迹落库后 `RunSnapshot` 不必再自包含，内存只留窗口 + 从库回看。
+  与 §1.2「需要新增持久化」那一类同级 —— 要**建表 / 定保留策略 / 定回看语义**（例如：轨迹只对本次执行有效，
+  还是结束后仍可读回；跨执行是否保留）。
 
-- **现状**：`service.rs:33-37` 无返回值；`core.rs:121-128` 重复启动只 `tracing::warn!`，服务未运行只 `warn!`。
-- **设计（最小实现）**：`core.rs` 拒绝时，向该 `session_id` 的订阅者投一条「启动被拒」的 `RunUpdate`（或新事件 `RunRejected { session_id, reason }`），宿主据此 toast。**不**把拒绝写进 `RunSnapshot`（那会污染「快照 = 一次执行的状态」这一语义）。
-- **验收**：同会话连续 `start()` 两次，第二次宿主能收到可区分的提示。
+#### B3（中）`start()` 被忽略时宿主无感  ✅ 已完成（2026-09-28）
+
+- **现状（改造前）**：`service.rs` 无返回值；`core.rs:121-128` 重复启动只 `tracing::warn!`，服务未运行也只 `warn!`。
+  两条路径都**只写日志**：宿主点了没反应，分不清「服务挂了」与「已在跑」。
+- **设计（已实现）**：
+  - `RunUpdate` 由**结构体改为枚举**：`Snapshot { session_id, snapshot }` / `Notice { session_id, notice }`。
+    两者互斥，用枚举让宿主的 `match` 天然穷尽（漏处理**编译不过**，而非运行期静默）。
+  - 新增 `RunNotice::StartRejected { reason: StartRejectReason }`，`reason` = `ServiceNotRunning` | `AlreadyRunning`。
+    **只给原因、不给文案**：内核不产出 UI 文本，提示语由宿主决定。
+  - `RunStore::notify()`：只广播、**不动 `runs`**（与 `update()` 共用私有 `broadcast()`，
+    锁顺序 `runs → subs` 不变）。订阅回放时因此不会冒出一条假快照。
+  - 两处拒绝点各发一条：`core.rs` 重入检查（`AlreadyRunning`）、`service.rs` 命令送不出去（`ServiceNotRunning`）。
+    ⚠️ `service.rs` 那处必须**先 clone `session_id`** —— 命令送不出去时 `request` 会随 `SendError` 一起被退回。
+  - **不**把拒绝写进 `RunSnapshot`：快照的语义是「某一次执行的状态」，而拒绝意味着这次根本没发生。
+- **宿主侧**：`use_run_subscription` 内 `use_toast()`，收到 `Notice` → `toast.error(...)`；
+  文案在 GUI 的 `notice_text()`（「执行服务未在运行…」/「该计划正在执行中…」）。
+- **验收（已通过）**：
+  - `rejected_start_notifies_subscriber` —— 重复 `start()` → 订阅者收到 `StartRejected{AlreadyRunning}`，
+    且快照**仍是在跑的那次**（拒绝不改状态）；
+  - `notify_does_not_touch_snapshot` —— 通知不改快照，且不以假快照形式出现；
+  - `notify_only_reaches_matching_subscribers` —— 不串台。
 
 #### B4（低）`PlanRunReport` 无终态字段（建议**不加字段**）
 
