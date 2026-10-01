@@ -2,7 +2,6 @@
 
 > 设计稿 · 状态：**已实施**（2026-09 阶段 0–6 全部落地；见下方「实施记录」）
 > 参考实现：`github.com/rust-mcp-stack/rust-mcp-filesystem`（v0.4.5，MIT，纯参考不引依赖）
-> 取代：`docs/planned-agent/file-tools-redesign.md`（旧 4 工具契约，已作废）
 
 ---
 
@@ -356,7 +355,7 @@ registry.register_builtin_provider(&FilesystemProvider::new(workspace_roots));
 | `crates/planned-agent/src/flexible/exec/executor/tests.rs:804` | `assert!(resolve_req.contains("builtin_read_file"))` |
 
 **文档**（非阻塞，顺手更新）
-`docs/tool-manager.md:355-358`、`docs/planned-agent/file-tools-redesign.md`、`docs/planned-agent/flexible-step-output-spill.md:220`、`docs/planned-agent/system-tools-redesign.md:195`、`crates/agent-gui/src/components/chat/RENDER_FLOW.md:306,322,324`。
+`docs/tool-manager.md:355-358`、`docs/planned-agent/flexible-step-output-spill.md:220`、`docs/planned-agent/system-tools-redesign.md:195`、`crates/agent-gui/src/components/chat/RENDER_FLOW.md:306,322,324`。
 
 ---
 
@@ -455,7 +454,7 @@ registry.register_builtin_provider(&FilesystemProvider::new(workspace_roots));
 `FsError` 从 14 个变体收到**实际构造**的 6 个；同理删掉未被调用的 `FilesystemService::allowed_directories`。
 
 **文档同步**：`docs/tool-manager.md`、`crates/tool-manager/ANALYSIS.md` 工具表已更新；
-`file-tools-redesign.md`（加作废标注）、`flexible-step-output-spill.md`、`flexible-execution-hardening.md`、
+`flexible-step-output-spill.md`、`flexible-execution-hardening.md`、
 `system-tools-redesign.md` 已加勘误块（都因引用旧名/旧参数基而失效）。
 
 **遗留（已知，未做）**：

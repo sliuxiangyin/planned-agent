@@ -13,7 +13,7 @@
 
 公开类型已收口：`McpManager` + 数据模型（`McpServerView` / `McpServerEntry` / `McpConfigFile` / `ServerStatus` / `Tool` …）+ `storage` traits/实现 + `McpClientImpl`。`McpConfigManager` / `McpBundle` 已降为 crate 内部实现（`pub(crate)`），**不再导出**。
 
-### 门面方法分组（见 `docs/mcp-unify-refactor.md` A.0）
+### 门面方法分组
 
 | 组 | 方法 |
 |---|---|

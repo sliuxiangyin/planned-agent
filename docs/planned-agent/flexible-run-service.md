@@ -4,7 +4,7 @@
 > **55 passed / 0 failed**；GUI `cargo test -p planned-agent-gui --bins` → **55 passed / 0 failed**；
 > `cargo check -p planned-agent-gui --all-targets` 通过。实现记录见 §11，v1 → v2 重构说明见 §12。
 > 上游契约：[`flexible-executor.md`](./flexible-executor.md)（执行器本体，已完成阶段 0–4）
-> 本文件取代：[`flexible-run-spawn-forever-ui-channel.md`](./flexible-run-spawn-forever-ui-channel.md)（旧宿主通道设计）与
+> 本文件取代旧宿主通道设计（原 `flexible-run-spawn-forever-ui-channel.md`，已删除）与
 > `crates/agent-gui/src/services/flexible_run_manager.rs`（旧实现，**已删除**）
 >
 > **本设计不继承旧宿主实现的内部设计**，只承接两条来自仓库现状的硬约束：
