@@ -238,17 +238,34 @@ flexible_revise（唯一新增；输入=现状全量产物 + 本轮 user_message
 **系统侧兜底**：`validate_inputs_patch`（`revise_callback.rs`）校验新参数表的 `name` 序列与旧值**一字不差**
 （含顺序），不一致即拒绝本次修订并如实上报。与 `apply_step_patches` 同一路子 —— 提示词是要求，回调是保证。
 
-**`saved` 之后的模板同步（系统侧自动完成）**：左侧面板 `PARAMS`、以及执行时用的模板，读的都是**落库模板**
-`plans_flexible_sessions.parameterized_task`（见 `left_panel/params.rs` 的注释），**不是** `flexible_state`
-—— 所以 `saved` 状态下改了产物，必须**同步落库**才会生效。
+**`saved` 之后的模板同步（必须用户授权）**：左侧面板 `PARAMS`、以及执行时用的模板，读的都是**落库模板**
+`plans_flexible_sessions.parameterized_task`（见 `left_panel/params.rs` 的注释；执行侧见 `run_service.rs:50-55`
+——「调用方给的是已在手上的定稿模板」，左面板那条路径就来自 `load_template`），**不是** `flexible_state`
+—— 所以 `saved` 状态下改了产物，必须**同步落库**才会生效。但**落库必须由用户点头**：
 
-这个同步放在 **`flexible_revise` 回调里自动做**（`revise_callback.rs` 的第 3 步）：`commit_state` 返回合并后的
-`(current_step, products)`，若 `current_step == "saved"` 就调 `commit::persist_template`
-（`build_payload` + `save_snapshot` + `TemplateNotifier::notify`）把模板整段刷新，并通知左侧面板重读。
+1. revise 拿到注入的 `current_step`（`StateInjectCallback::with_step_field` —— 它是 state 的**列**，不在 `products` 里）；
+2. `current_step == "saved"` 时，它**先用 `request_user_action`** 问一次，**只有两个按钮**：`保存` / `取消`；
+3. 用户点**保存** → 输出 `revised` + `save_template: true`；点**取消** → 输出 `status: "cancelled"`；
+4. `cancelled` 不是定稿 status ⇒ 被 prelude 的守门拦下 ⇒ **链不跑**：产物、`flexible_state`、模板**一个都不写**，
+   本次修改整个作废（语义干净：没授权 = 什么都没发生，不会留下「界面没变、内部已改」的分叉）；
+5. 只有 `should_persist_template(step, save_template)` 为真才调 `persist_template`
+   （`build_payload` + `save_snapshot` + `TemplateNotifier::notify`），并通知左侧面板重读。
 
-**不靠协调器 LLM 再调一次 `flexible_save`** —— 早先的写法是「提示词里让协调器问『要不要重新保存』，用户答完
-再调 `flexible_save`」，两个问题：① 依赖 LLM 跨轮记住「上一条消息其实是在确认重存」，记错就退化成整链重做；
-② 用户答「暂不」或 LLM 漏调，系统就停在「`state` 有新值、模板是旧值」的不一致态，而且没人知道。
+**`save_template` 缺失 = 不落库**（防御）：它为 `true` 的唯一合法来源是「刚问过用户且用户点了保存」——
+LLM 若漏问 / 漏填，宁可这次不保存（记一条 warn），也不替用户覆盖模板。**不要默认保存**。
+
+> 曾写成「只改本次会话，暂不更新」的第三选项，**已废弃**：那会让 `flexible_state` 改了、模板没改，
+> 用户在界面上看不见任何变化（面板与执行都读模板），却在下一次修订时拿到已变的基线 —— 一个静默的分叉。
+
+**为什么修订也要写 `flexible_state`（不只是模板）**：`flexible_state.products` 不是「流程痕迹」，它是
+`StateInjectCallback` 注入 `current_*` 的**取数来源**，也是协调器入口判定的依据。而且 `current_step` 在
+`saved` **之前**时（`planned` / `parameterized` / `output_defined`）**落库模板根本不存在**，
+`flexible_state` 是唯一能存改动的地方。若 `saved` 之后只更新模板、不更新它，下次修订注入到的就是旧快照，
+会基于旧基线改、静默覆盖上一次的改动。
+
+**为什么不靠协调器 LLM 代问、代调 `flexible_save`**：① 依赖 LLM 跨轮记住「上一条消息其实是在确认重存」，
+记错就退化成整链重做；② 用户答「暂不」或 LLM 漏调，系统会停在「`state` 新、模板旧」的不一致态且没人知道。
+让**发起改动的那个 step 自己问**，授权标志与落库判断就在同一次回调里闭环（与 Q5「交互归各步自己」一致）。
 
 落库前 `build_payload` 照样把关（输出契约形态 + 占位符一致性）；**组装 / 校验失败时不写库**。另外占位符校验
 被**提前**到写状态之前（`revise_callback` 里先跑 `placeholder::validate`）—— LLM 可能在改 `intent` 文本时顺手
@@ -257,6 +274,10 @@ flexible_revise（唯一新增；输入=现状全量产物 + 本轮 user_message
 **落库设施的归属**：`build_payload` / `persist_template` 放在 `step_callback/commit.rs`（**不**在 `save/` 里）——
 `flexible_save` 用它首次落库、`flexible_revise` 用它同步模板，**两个 step 共用**（符合 `step_callback/mod.rs`
 的分层规则）。
+
+**「模板是否已更新」怎么让用户看见**：回调**改不了对外文本**（它由 `prelude` 的
+`PreludeOutcome::Proceed { outer }` 定稿），所以靠提示词要求 revise 把结论写进 `summary`（用户选「暂不」时
+必须写明「改动已生效，但已保存的模板未更新」），协调器照它转述。
 
 **一个已知的架构约束（为什么「新增参数」不能只重跑参数化）**：`flexible_parameterize` 的入参契约要求
 `steps` 是**未占位**骨架，而 state 里的 `steps` 已被它自己覆盖成占位后版本（`parameterize/mod.rs` 注入
@@ -313,7 +334,7 @@ flexible_revise（唯一新增；输入=现状全量产物 + 本轮 user_message
 | # | 问题 | 结论 |
 |---|---|---|
 | Q1 | 落地形态 | **已定**：新增第六个 step `flexible_revise` |
-| Q2 | `saved` 状态下修订完 | **已定（改）**：**系统侧自动同步** —— revise 回调在 `current_step == "saved"` 时直接把改动落库（`commit::persist_template`）并通知左侧面板。不再问用户、也不靠协调器再调一次 `flexible_save`（理由见 §6.1） |
+| Q2 | `saved` 状态下修订完 | **已定（改 3）**：**先问用户、再落库**，且确认只有**两个按钮** —— `保存` → 输出 `revised` + `save_template: true`；`取消` → 输出 `cancelled`（被 prelude 拦下，**什么都不写**，本次修改作废）。`save_template` 缺失 ⇒ 不落库（防御）。**不要默认保存** |
 | Q3 | 越界（改了 `changed` 之外的步骤） | **已消解**：改为「只返回被调整的步骤对象」后，结构上不可能越界，无需事后检测与还原 |
 | Q4 | 修订允许增删步骤吗 | **已定**：不允许；增删一律 `needs_restart` 走全量重做 |
 | Q5 | 用户指代不清（「改一下排序那步」对应不上唯一步骤）时 | **已定**：**由 revise 自己问** —— 放行 `request_user_action`。revise 手里有全量 `steps`，提问能带候选措辞；用户答完在同一轮 resume 继续；与 `clarify` / `output` 同构。协调器保持「只做路由」，不参与交互 |
@@ -329,20 +350,82 @@ flexible_revise（唯一新增；输入=现状全量产物 + 本轮 user_message
 
 | # | 文件 | 状态 |
 |---|---|---|
-| 1 | `prompts/flexible/flexible_revise.toml` | ✅ 新增（角色 / 输入 / 输出契约 / 硬规则） |
+| 1 | `prompts/flexible/flexible_revise.toml` | ✅ 新增（角色 / 输入 / 输出契约 / 硬规则；`saved` 时先问「保存 / 取消」） |
 | 2 | `.../step_callback/revise/mod.rs` | ✅ 新增（组装点 + `INJECT_MAPPING` + 映射单测） |
-| 3 | `.../step_callback/revise/revise_callback.rs` | ✅ 新增（`apply_step_patches` / `validate_inputs_patch` + 定稿登记 + `saved` 时同步落库 + 19 个单测） |
+| 3 | `.../step_callback/revise/revise_callback.rs` | ✅ 新增（`apply_step_patches` / `validate_inputs_patch` / `should_persist_template` + 定稿登记 + **授权后**落库 + 20 个单测） |
 | 4 | `.../step_callback/commit.rs` | ✅ `build_payload` / `persist_template` 提到公共层（**save 与 revise 共用**）+ 6 个 payload 单测 |
 | 5 | `.../step_callback/save/save_callback.rs` | ✅ 改用 `commit::persist_template`（组装与落库设施移出） |
 | 6 | `.../step_callback/mod.rs` | ✅ 模块声明 + 重导出；prompt 份数断言收紧为 `>= 7` |
 | 7 | `.../flexible/page.rs` | ✅ `register_sub_agent("flexible_revise", …)`（`allowed_tools = [request_user_action]`）+ 注销列表 + 传 `template_notifier()` |
 | 8 | `.../flexible/chat_service_factory.rs` | ✅ 协调器白名单加 `flexible_revise` |
-| 9 | `prompts/flexible/flexible_global_system.toml` | ✅ 重排为「入口判定 + 三入口 + 通用规则」 |
+| 9 | `prompts/flexible/flexible_global_system.toml` | ✅ 重排为「入口判定 + 三入口 + 通用规则」；入口 C 含 `cancelled` 分支、说明「保存授权由 revise 自己问」 |
+| 10 | `.../step_callback/before_inject.rs` | ✅ `StateInjectCallback::with_step_field` —— 让 revise 拿到 `current_step`（它不在 `products` 里）+ 2 个单测 |
 
-**验证**：`cargo test -p planned-agent-gui --bins` → **85 passed / 0 failed**
-（含 19 个 revise 单测 + 6 个 `build_payload` 单测 + `flexible_prompts_load_through_file_manager`：7 份 prompt 均可被运行期加载器解析）。
+**验证**：`cargo test -p planned-agent-gui --bins` → **89 passed / 0 failed**
+（含 20 个 `revise_callback` 单测 + 2 个注入单测 + 6 个 `build_payload` 单测 + 2 个 revise 组装契约单测 + `flexible_prompts_load_through_file_manager`：7 份 prompt 均可被运行期加载器解析）。
 
 **未做**：没有跑过真实 LLM 的端到端 —— §8 的 7 个手工场景仍需人工过一遍。
 
 - **二期（按需）**：`steps` 占位符与 `inputs` 的一致性校验（在合并视图上做，违反时报 `error` 不落库）；
   修订历史（把每次 `summary` 记进会话供用户回看）。
+
+---
+
+## 12. 追加：防止「步数漂移」（重做不得重造骨架）
+
+> 触发这件事的是一句用户反馈：**同一个需求在已保存后再次修改，重新生成会把原来的 3 步变成 2 步。**
+> 这是 §5「最小改动」之外的另一条边界 —— §5 管的是「C 内部不许动无关产物」，本节管的是「**别让本该走 C 的事走到 A**」。
+
+### 12.1 三条通路（都通着，都通向「整份 `steps` 被重新生成」）
+
+| # | 通路 | 机制 |
+|---|---|---|
+| 1 | 路由判成「其它」→ **入口 A** | 判定表只写了「修改某一处 → C」，**没覆盖**「不点名具体步骤、直接对需求本身提新要求」（如「需求改一下：日志分析也要包含 WARN」）→ 落进「其它」→ A → `flexible_clarify` 定稿，**清掉 `steps`** → `flexible_plan` 从零展开 |
+| 2 | `needs_restart` 过度触发 → **入口 A** | revise 的判据里有两条过宽：「改动会让其它步骤的 `intent`/`expected_output` 失真」（改上游天然命中）、「影响面说不清就回退」。协调器又把它写成「要增删步骤、增删参数，**或会牵连其它步骤**」→ **「牵连多处」被等同于「必须重做」** |
+| 3 | **机制根因**：`flexible_plan` 没有旧骨架基线 | `flexible_plan.toml` 原文写着「`task_definition`……它是唯一的**数据来源**」→ 只要重做，就是**同一个 task 从零重新展开**，步数与上一版完全无关 |
+
+**但走入口 C 时步数在结构上不可能变**：`apply_step_patches` 只做「按 `result_reference` 定位 → 整块替换」，
+**没有插入 / 删除能力**，LLM 想增删也会被拒（`unknown_reference_is_rejected`）。所以问题不在 C 里，
+而在**该走 C 却走了 A**。
+
+### 12.2 修法（三层，对应三条通路）
+
+**第 1 层｜路由收口**（`flexible_global_system.toml`）
+
+- 判定表「C」行放宽：明确**包括**「没有点名具体步骤、直接对需求本身提新要求」。
+- 判定表「其它 → A」行收窄为「**纯**闲聊 / 取消 / 只是提问（**不含任何**对现有任务的新要求）」。
+- 新增硬规则：**已有 `steps` 时绝不用 A 接** —— `flexible_clarify` 一旦定稿（`task_defined`）就会清掉下游全部产物
+  （含 `steps`），随后 `flexible_plan` 从零重新展开，上一版确认好的骨架会凭空变形。只有**不含任何新要求**时
+  才走 A —— 那种情况 `flexible_clarify` 返回 `ignored` / `cancelled`，**不定稿、不清任何产物**。
+
+**第 2 层｜`needs_restart` 收紧**（`flexible_revise.toml` + 协调器）
+
+- `needs_restart` **只留给「`steps` 条数或参数集合必须变」**：增删步骤、增删参数 / 改参数名、用户要求整体重来。
+- **删掉**「改动会让其它步骤失真 → `needs_restart`」与「影响面说不清就回退」两条判据。
+- 改为两条：
+  - **「牵连不只一处」不是重做的理由** —— `steps` 本来就是数组，**一次改多个步骤对象**
+    （如 `#E1` / `#E2` / `#E3` 一起进补丁）。重做会把用户上一版确认好的整份骨架丢掉，代价远大于多改两处。
+  - **「拿不准」改为问用户** —— 用 `request_user_action` 问一次，候选可以是**两种改法**（「只改 `#E2`」vs
+    「`#E2` 与 `#E3` 一起改」）。**「拿不准」不是重做的理由。**
+- 协调器 `:101` 同步（去掉「或会牵连其它步骤」）。
+
+**第 3 层｜重做也保住骨架**（系统侧保证，改代码）
+
+- `flexible_plan` 新增输入 `previous_steps`：`step_callback/plan/mod.rs` 的 `INJECT_MAPPING` 加
+  `("steps", "previous_steps")`。
+  - **必须改名**：本步自己的输出也叫 `steps`，同名会让 LLM 把「现状」与「待产出」抄混（同 revise 的 `current_*` 思路）。
+  - 首次创建时 state 里还没有 `steps`，注入器自动跳过该项（`missing_source_is_skipped_not_nulled` 已覆盖该行为）。
+  - 单测 `inject_mapping_matches_plan_input_contract` 锁住这两条 —— 有人「顺手」把它改回 `steps` 会当场红灯。
+- `flexible_plan.toml` 新增「**沿用上一版骨架**」硬规则（`previous_steps` 存在时必须遵守）：
+  **默认逐字沿用**四个字段、**不得改变步骤条数与顺序**（除非 `task_definition` 里有明确要求增删 / 合并 / 拆分的依据）、
+  **同样语义不得换个说法重写一遍**。
+- **`needs_restart` 的落点从「入口 A 全量」改为「从 `flexible_plan` 起重跑」** —— 这类场景里**需求描述本身没变**
+  （变的是计划结构），没必要重跑澄清；而且从计划步起跑时 `steps` 还没被清，`previous_steps` 正好注入得到。
+  若用户确实要改**需求描述本身**，仍走入口 A（此时清 `steps` 是对的）。
+- 从 plan 重跑后**不需要新机制**：`PlanCallback` 照旧清下游（`inputs` / `output_schema`），档位回落到 `planned`，
+  再按入口 A 的 3～6 步继续。
+
+### 12.3 一句话
+
+**「重做」不等于「重造」** —— 只有结构必须变（增删步骤 / 增删参数）才重做；而重做要**在旧骨架上改**，
+不是从零展开。两条都靠系统保证（`previous_steps` 注入 + 补丁式定位替换），不靠 LLM 自觉。

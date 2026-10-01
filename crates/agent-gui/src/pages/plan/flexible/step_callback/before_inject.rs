@@ -29,6 +29,12 @@ pub(crate) struct StateInjectCallback {
     plan_id: String,
     service: Arc<PlansFlexibleService>,
     mapping: Vec<(&'static str, &'static str)>,
+    /// 需要把 `flexible_state.current_step` 一并注入时的目标字段名（默认不注入）。
+    ///
+    /// `current_step` 是 state 的**列**、不在 `products` 里，所以走不了 `mapping`：
+    /// 只有明确需要它的 step（`flexible_revise` —— 据档位判断「改完要不要问用户
+    /// 更新已保存的模板」）才用 [`Self::with_step_field`] 打开。
+    step_field: Option<&'static str>,
 }
 
 impl StateInjectCallback {
@@ -41,7 +47,14 @@ impl StateInjectCallback {
             plan_id,
             service,
             mapping,
+            step_field: None,
         }
+    }
+
+    /// 追加注入 `flexible_state.current_step`（值如 `planned` / `saved`）。
+    pub(crate) fn with_step_field(mut self, field: &'static str) -> Self {
+        self.step_field = Some(field);
+        self
     }
 }
 
@@ -57,8 +70,8 @@ impl SubAgentBeforeCallback for StateInjectCallback {
             return BeforeDecision::Continue;
         };
 
-        let raw = match self.service.load_state(&self.plan_id, &session_id).await {
-            Ok(Some((_, products))) => products,
+        let (current_step, raw) = match self.service.load_state(&self.plan_id, &session_id).await {
+            Ok(Some((step, products))) => (step, products),
             Ok(None) => {
                 tracing::warn!(
                     "[flexible] {} 注入跳过：flexible_state 无该会话记录",
@@ -87,7 +100,12 @@ impl SubAgentBeforeCallback for StateInjectCallback {
             }
         }
 
-        let inject = pick_injections(products.as_ref(), &self.mapping);
+        let inject = build_injection(
+            products.as_ref(),
+            &self.mapping,
+            &current_step,
+            self.step_field,
+        );
         if inject.is_empty() {
             return BeforeDecision::Continue;
         }
@@ -128,6 +146,26 @@ fn pick_injections(
         if let Some(v) = products.get(*src) {
             out.insert((*dst).to_string(), v.clone());
         }
+    }
+    out
+}
+
+/// 组装最终注入对象：先按 `mapping` 从 `products` 挑，再（如要求）补上 `current_step`。
+///
+/// `current_step` 拿的是 state 的列而不是 `products` 字段，所以不能并入 `mapping`；
+/// 它**总是存在**（不像产物字段可能缺），故不看 `products` 是否为空。
+fn build_injection(
+    products: Option<&serde_json::Map<String, Value>>,
+    mapping: &[(&str, &str)],
+    current_step: &str,
+    step_field: Option<&str>,
+) -> serde_json::Map<String, Value> {
+    let mut out = pick_injections(products, mapping);
+    if let Some(field) = step_field {
+        out.insert(
+            field.to_string(),
+            Value::String(current_step.to_string()),
+        );
     }
     out
 }
@@ -183,5 +221,36 @@ mod tests {
         assert!(parse_products("not json").is_none());
         assert!(parse_products("[1,2]").is_none());
         assert!(parse_products("{}").is_some());
+    }
+
+    /// `current_step` 与产物字段并排注入，且**即使 products 为空也会带上**
+    /// （它来自 state 的列，不依赖产物）。
+    #[test]
+    fn step_field_rides_alongside_products() {
+        let p = products(json!({ "steps": [{ "result_reference": "#E1" }] }));
+        let out = build_injection(
+            Some(&p),
+            &[("steps", "current_steps")],
+            "saved",
+            Some("current_step"),
+        );
+        assert_eq!(
+            Value::Object(out),
+            json!({
+                "current_steps": [{ "result_reference": "#E1" }],
+                "current_step": "saved",
+            })
+        );
+
+        let empty = build_injection(None, &[], "planned", Some("current_step"));
+        assert_eq!(Value::Object(empty), json!({ "current_step": "planned" }));
+    }
+
+    /// 不开开关的 step 注入结果里**不含** `current_step`（避免它们无谓地看见档位）。
+    #[test]
+    fn step_field_absent_by_default() {
+        let p = products(json!({ "steps": [] }));
+        let out = build_injection(Some(&p), &[("steps", "steps")], "saved", None);
+        assert_eq!(Value::Object(out), json!({ "steps": [] }));
     }
 }

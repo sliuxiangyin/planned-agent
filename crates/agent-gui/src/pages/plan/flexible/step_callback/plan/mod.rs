@@ -36,8 +36,14 @@ pub fn create_plan_callback(
 
 /// 启动前注入映射：`(state 产物字段名, 注入到子 agent 参数的字段名)`。
 ///
-/// 计划步只吃上游的 `task_definition`（任务描述）——`task` 是它唯一的数据来源。
-const INJECT_MAPPING: &[(&str, &str)] = &[("task_definition", "task_definition")];
+/// `task_definition` 是展开步骤的依据；`steps` → `previous_steps` 是**上一版骨架**，
+/// 用于「重做计划步」时尽量沿用（避免同一个需求被重新展开成不同步数）。
+/// 首次创建时 state 里还没有 `steps`，注入器会自动跳过这一项。
+/// **改名是必需的**：本步自己的输出也叫 `steps`，同名会让 LLM 把「现状」与「待产出」抄混。
+const INJECT_MAPPING: &[(&str, &str)] = &[
+    ("task_definition", "task_definition"),
+    ("steps", "previous_steps"),
+];
 
 /// 创建 `flexible_plan` 的启动前注入回调（映射留在本 step）。
 pub fn create_plan_inject(
@@ -56,8 +62,17 @@ mod tests {
     use super::*;
 
     /// 映射就是本 step 的入参契约：写错会静默传错数据，故锁住取值。
+    ///
+    /// `steps → previous_steps` 这条尤其要锁：它靠**改名**避免与输出同名，
+    /// 若有人「顺手」把它改成 `steps`，重做计划时就会丢掉旧骨架（步数漂移）。
     #[test]
     fn inject_mapping_matches_plan_input_contract() {
-        assert_eq!(INJECT_MAPPING, &[("task_definition", "task_definition")]);
+        assert_eq!(
+            INJECT_MAPPING,
+            &[
+                ("task_definition", "task_definition"),
+                ("steps", "previous_steps"),
+            ]
+        );
     }
 }

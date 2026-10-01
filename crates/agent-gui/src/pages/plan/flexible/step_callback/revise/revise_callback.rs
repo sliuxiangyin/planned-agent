@@ -47,9 +47,24 @@ const STEPS_KEY: &str = "steps";
 /// `inputs` 的产物 key —— 走「校验后写入」，不是直接写 LLM 给的数组。
 const INPUTS_KEY: &str = "inputs";
 
-/// 「模板已落库」的档位：修订时若已在此档位，改完必须把改动**同步回** `plans_flexible_sessions`
-/// （否则模板停在旧值 —— 左侧面板的参数默认值、以及执行时用的模板，都还是改动前的）。
+/// 「模板已落库」的档位：只有在这个档位上，修订才需要问用户「要不要更新已保存的模板」。
 const SAVED_STEP: &str = "saved";
+
+/// 修订输出里的「用户授权更新已保存模板」标志。
+///
+/// **它是落库的唯一开关**：`true` 的唯一合法来源是 revise 已经用 `request_user_action`
+/// 问过用户、用户选了「更新」。缺失 / `false` ⇒ **不落库**（「不要默认保存」——
+/// 没问过就没授权）。
+const SAVE_TEMPLATE_KEY: &str = "save_template";
+
+/// 本次修订是否要落库到已保存的模板。
+///
+/// 两个条件**同时**满足才写：档位是 `saved`（模板确实存在），且用户授权了（`save_template`
+/// 为 `true`）。抽成纯函数是为了让「授权与否」这条安全判断有回归测试 —— 它的失败模式是
+/// **静默覆盖用户没同意改的模板**。
+fn should_persist_template(current_step: &str, save_template: bool) -> bool {
+    current_step == SAVED_STEP && save_template
+}
 
 /// 修订**可能**改动的其它产物（既不在 `steps` 也不在 `inputs` 之列）。
 ///
@@ -234,10 +249,28 @@ impl SubAgentResultCallback for ReviseCallback {
             Err(reason) => return ResultDecision::Abort(reason),
         };
 
-        // ── 3. 已落库过 ⇒ 把修订同步回模板 ──
+        // ── 3. 已保存过 **且用户刚授权** ⇒ 把修订同步回模板 ──
         // 不做这一步，`plans_flexible_sessions.parameterized_task` 会停在旧值：
         // 左侧面板显示的参数默认值、执行时用的模板，都还是改动前的。
-        if step == SAVED_STEP {
+        //
+        // **落库必须由用户授权**：`save_template: true` 的唯一合法来源是 revise 在
+        // `request_user_action` 里问过、用户选了「更新模板」。缺失 = 没问过 = 没授权 → 不落库。
+        let save_template = analysis
+            .parsed
+            .get(SAVE_TEMPLATE_KEY)
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        if step == SAVED_STEP && !save_template {
+            // 改动本身已落在会话状态里（不回滚），只是不写模板 —— 用户下次仍可再说一次。
+            tracing::warn!(
+                "[{}] 未获保存授权（{} 非 true），改动只保留在会话状态，模板未更新",
+                AGENT,
+                SAVE_TEMPLATE_KEY
+            );
+        }
+
+        if should_persist_template(&step, save_template) {
             let products = match self
                 .service
                 .load_state(&self.plan_id, analysis.session_id)
@@ -503,6 +536,19 @@ fn preview(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 「落库必须有用户授权」是安全判断：错在「多写」会静默覆盖用户没同意改的模板。
+    #[test]
+    fn template_is_persisted_only_with_step_and_consent() {
+        assert!(should_persist_template("saved", true));
+        // 没授权（字段缺失 / false）⇒ 不落库 —— 「不要默认保存」的落点
+        assert!(!should_persist_template("saved", false));
+        // 还没保存过（模板不存在）⇒ 无可落库
+        assert!(!should_persist_template("planned", true));
+        assert!(!should_persist_template("parameterized", true));
+        assert!(!should_persist_template("output_defined", true));
+        assert!(!should_persist_template("none", true));
+    }
     use serde_json::json;
 
     /// 造一个四字段齐全的步骤对象。

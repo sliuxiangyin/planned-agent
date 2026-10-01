@@ -32,8 +32,9 @@ use revise_callback::{ReviseCallback, AGENT, OK_STATUS};
 /// 注意：非 `revised` 的输出（`needs_restart` / `error`）由前置分析拦下 —— 链不跑，
 /// 一个产物都不会写，协调器按 `status` 自己路由。
 ///
-/// `notifier` 用于**已保存**（`current_step == saved`）状态下把修订同步落库后通知左侧面板
-/// 重读模板 —— 否则改动只进 `flexible_state`，`plans_flexible_sessions` 会停在旧值。
+/// `notifier` 用于**已保存且用户授权更新时**（`current_step == saved` 且 `save_template`
+/// 为 `true`）把修订落库后通知左侧面板重读模板 —— 否则改动只进 `flexible_state`，
+/// `plans_flexible_sessions` 会停在旧值。
 pub fn create_revise_callback(
     plan_id: String,
     service: Arc<PlansFlexibleService>,
@@ -50,6 +51,9 @@ pub fn create_revise_callback(
 /// 四个产物**全部注入且全部改名**（`current_` 前缀）：修订必须看到完整的现状才能判断
 /// 「这次改动牵不牵连别处」。缺失的字段由 [`StateInjectCallback`] 跳过（不写 `null`），
 /// 与「上游还没产出该产物」的语义一致。
+///
+/// 另外还注入档位 [`INJECTED_STEP_FIELD`]（走 [`StateInjectCallback::with_step_field`]）——
+/// 它不在 `products` 里，故不在本映射内。
 pub(super) const INJECT_MAPPING: &[(&str, &str)] = &[
     ("task_definition", "current_task_definition"),
     ("steps", "current_steps"),
@@ -57,17 +61,21 @@ pub(super) const INJECT_MAPPING: &[(&str, &str)] = &[
     ("output_schema", "current_output_schema"),
 ];
 
+/// 额外注入的档位字段名（`current_step` 是 state 的**列**，不在 `products` 里）。
+///
+/// revise 靠它判断「该会话是否已保存」—— 只有已保存才需要先问用户「要不要更新模板」。
+const INJECTED_STEP_FIELD: &str = "current_step";
+
 /// 创建 `flexible_revise` 的启动前注入回调（`StateInjectCallback` 的薄包装：
 /// 映射留在本 step，改映射不必翻注册点）。
 pub fn create_revise_inject(
     plan_id: String,
     service: Arc<PlansFlexibleService>,
 ) -> Arc<dyn SubAgentBeforeCallback> {
-    Arc::new(StateInjectCallback::new(
-        plan_id,
-        service,
-        INJECT_MAPPING.to_vec(),
-    ))
+    Arc::new(
+        StateInjectCallback::new(plan_id, service, INJECT_MAPPING.to_vec())
+            .with_step_field(INJECTED_STEP_FIELD),
+    )
 }
 
 #[cfg(test)]
@@ -90,6 +98,16 @@ mod tests {
         assert!(
             INJECT_MAPPING.iter().all(|(_, dst)| dst.starts_with("current_")),
             "注入侧必须统一带 current_ 前缀，避免与输出侧同名字段互抄"
+        );
+    }
+
+    /// 档位注入字段名是 revise 与回调之间的契约（回调靠 `saved` 判断要不要落库）。
+    #[test]
+    fn injected_step_field_is_locked() {
+        assert_eq!(INJECTED_STEP_FIELD, "current_step");
+        assert!(
+            !INJECT_MAPPING.iter().any(|(_, dst)| *dst == INJECTED_STEP_FIELD),
+            "档位不走 mapping（它不是 products 字段），两处都写会重复注入"
         );
     }
 }
