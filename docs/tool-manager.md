@@ -29,8 +29,8 @@ crates/tool-manager/
     ├── validator.rs     # 参数验证器
     └── builtin/
         ├── mod.rs       # 内置工具模块
-        ├── file_tools.rs # 文件工具
-        └── text_tools.rs # 文本工具
+        ├── filesystem/  # 文件 / 目录工具族（23 个，cap-std 沙箱）
+        └── ...          # text / system / data / ai / web / doc
 ```
 
 ## 核心类型
@@ -302,7 +302,7 @@ registry.register_builtin_provider(&text_provider);
 
 ```rust
 // 获取所有文件相关工具
-let file_tools = registry.get_tools_by_category(&ToolCategory::FileRead);
+let file_tools = registry.get_tools_by_category(&ToolCategory::File);
 
 // 根据分类列表获取工具（去重）
 let categories = vec![ToolCategory::FileRead, ToolCategory::Directory];
@@ -348,18 +348,62 @@ registry.update_tool_categories("tool_name", vec![
 
 ## 内置工具
 
-### 文件工具 (FileToolsProvider)
+### 文件 / 目录工具 (FilesystemProvider)
+
+> **2026-09 重写**：语义对齐 `rust-mcp-filesystem`（MIT），内核换成 cap-std 能力沙箱。
+> 设计稿、①②③ 拍板与实测偏离见 `docs/planned-agent/filesystem-tools-rewrite.md`。
+> 旧的 `FileToolsProvider`（`builtin_read_file` / `builtin_write_file` / `builtin_edit_file` / `builtin_list_dir`）
+> 及其 `fs_support.rs` 已**删除**，`fs_support.rs` 搬为 `filesystem/support.rs`。
+
+**读取**（`filesystem/io/read.rs`）
 
 | 工具名 | 描述 |
 |--------|------|
-| `builtin_read_file` | 读取文本文件，带行号前缀；支持 `offset`/`limit` 分页、`encoding`（auto/BOM）、二进制拒绝、`max_bytes` 截断 |
-| `builtin_write_file` | 写入文本文件；`mode` 三态（overwrite / append / create_new），overwrite 走原子写；支持 `ensure_newline`、`create_parents` |
-| `builtin_edit_file` | 精确替换文件中的一个片段（`old_string` 默认必须唯一，否则返回 `no_match` / `ambiguous_match`；`replace_all` 可全替换） |
-| `builtin_list_dir` | 列出目录条目（不递归） |
+| `builtin_read_text_file` | 读取整个文本文件（**裸文本**；`with_line_numbers=true` 时行号格式 `{:>6} | `） |
+| `builtin_read_file_lines` | 按行范围读取（`offset` **0-based**、`limit` 默认 2000） |
+| `builtin_read_multiple_text_files` | 批量读取，以 `=== <路径> ===` 分隔；单项失败内联标注 |
+| `builtin_head_file` / `builtin_tail_file` | 预览文件头 / 尾 N 行 |
+| `builtin_read_media_file` / `builtin_read_multiple_media_files` | 读媒体文件，返回 `{mime_type, size_bytes, data_base64}` |
 
-四个工具的可预期失败**统一返回错误码**（`Ok` + `is_error: true` 的 `{ error, message }`），不返回 `Err`。
-完整的 schema / 返回结构 / 错误码表见 `docs/planned-agent/file-tools-redesign.md` §3；
-共享实现（编码与 BOM、二进制探测、换行风格、原子写、行号渲染）在 `src/builtin/fs_support.rs`。
+**写入与编辑**（`filesystem/io/write.rs` / `io/edit.rs`）
+
+| 工具名 | 描述 |
+|--------|------|
+| `builtin_write_file` | **纯覆盖**（`{path, content}`）；原子写（同目录临时文件 + rename）；不自动建父目录 |
+| `builtin_edit_file` | `{path, edits:[{oldText,newText}], dryRun?, replaceAll?}`；先精确匹配、再行级匹配（空白容忍 + 缩进保留）；返回 diff 围栏的 unified diff |
+| `builtin_create_directory` | 创建多级目录（已存在视为成功） |
+| `builtin_move_file` | 移动 / 重命名；**目标已存在则失败** |
+
+**目录与元信息**（`filesystem/list.rs` / `search/tree.rs` / `info.rs`）
+
+| 工具名 | 描述 |
+|--------|------|
+| `builtin_list_directory` | 列目录，`[FILE]` / `[DIR]` 前缀 + 尾部合计 |
+| `builtin_list_directory_with_sizes` | 同上 + 每个文件大小与总大小 |
+| `builtin_directory_tree` | 递归目录树（JSON，`max_depth` 限深） |
+| `builtin_get_file_info` | 大小 / 时间 / 权限 / 类型 |
+| `builtin_calculate_directory_size` | 目录总大小与文件数（`output_format`：text / json） |
+
+**搜索与统计**（`filesystem/search/` / `info.rs`）
+
+| 工具名 | 描述 |
+|--------|------|
+| `builtin_search_files` | glob 搜文件名（大小写不敏感，`excludePatterns` / `min_bytes` / `max_bytes`） |
+| `builtin_search_files_content` | 搜内容（字面量或正则），返回 `路径:行号:列号: 行内容` |
+| `builtin_find_duplicate_files` | 按内容找重复文件（size 分组 + 逐字节比对，零哈希依赖） |
+| `builtin_find_empty_directories` | 找空目录 |
+
+**归档**（`filesystem/archive/`）
+
+| 工具名 | 描述 |
+|--------|------|
+| `builtin_zip_files` / `builtin_zip_directory` | 打包文件 / 目录（内存中打包 + 原子落盘） |
+| `builtin_unzip_file` | 解压（`enclosed_name` 防 zip-slip） |
+
+共 **23 个**工具，全部归 `ToolCategory::File`。路径一律经 cap-std 沙箱解析，越界返回 `path_outside_allowed`。
+
+可预期失败**统一返回错误码**（`Ok` + `is_error: true` 的 `{ error, message }`），不返回 `Err`（只有未知工具名才 `Err`）。
+共享实现（沙箱与路径解析、错误码、原子写、编码探测、审计）在 `src/builtin/filesystem/core.rs` 与 `support.rs`。
 
 ### 文本工具 (TextToolsProvider)
 

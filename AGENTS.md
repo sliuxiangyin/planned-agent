@@ -74,7 +74,8 @@
 ```powershell
 cargo build                          # 全仓
 cargo test  -p planned-agent-core    # 单个 crate（推荐）
-cargo test  --workspace              # 全仓（注意下面的既有失败）
+cargo test  -p <crate> --lib         # 单个 crate：优先带 --lib（见 §5 的 hang 警告）
+cargo test  --workspace              # ⚠️ 目前会挂住，勿直接用（原因见 §5）
 
 # 桌面 GUI
 cd crates\agent-gui; cargo run
@@ -84,6 +85,7 @@ cargo test -p planned-agent-gui --bins   # GUI 侧测试
 ## 5. 已知的坑（别踩 / 别误判）
 
 - ⚠️ **既有失败，不是你弄坏的**：`cargo test -p planned-agent` 有 3 个 `planner::coarse::llm_planner` 用例失败，原因是运行时找不到 prompt `planning/coarse_plan`（prompt 目录漂移）。除非任务就是修它，否则**不要**顺手改。
+- ⚠️ **另一个既有 baseline 问题（会挂住，不是失败）**：`cargo test -p planned-agent-tool-manager`（**不带** `--lib`，以及因此 `cargo test --workspace`）会**卡住不返回** —— 停在集成测试 `tests/sub_agent_stream.rs`（纯 mock 用例、无网络，嫌疑在 `sub_agent_awaiting_user_action_then_resume` 的 resume 握手）。要跑该 crate 请用 `cargo test -p planned-agent-tool-manager --lib`（89 例）或指名目标（`--test cap_std_contract`，4 例）。**不要**为此顺手改 `sub_agent/`。
 - ⚠️ **根 `README.md` 的 CLI 用法已过时**：它写的 `cargo run -- "..."` 不成立 —— `planned-agent` 现在是纯 lib，全仓**唯一**的 `fn main` 在 `crates/agent-gui/src/main.rs`。
 - ⚠️ **根 `examples/` 不被 cargo 构建**：`examples/`（`mcp_tools.rs` / `prompt_manager.rs` / `stream_chat.rs`）不在任何 crate 目录下，根目录又不是 package，`cargo build` 不会碰它们 —— 但它们 `use` 真实 crate API，改动 API 时仍要注意。
 - ℹ️ `planned-agent-util` 目前**没有任何 crate 依赖它**（孤儿 crate）。往里加东西前先确认真的有人要用。

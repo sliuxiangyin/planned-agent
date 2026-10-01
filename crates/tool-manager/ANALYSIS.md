@@ -63,8 +63,13 @@ src/
 │   ├── ai_tools.rs
 │   ├── data_tools.rs
 │   ├── doc_tools.rs
-│   ├── file_tools.rs
-│   ├── fs_support.rs  # 文件工具共享件（错误码/编码+BOM/二进制探测/换行/原子写/行号渲染）
+│   ├── filesystem/    # 文件 / 目录工具族（23 个；cap-std 沙箱）
+│   │   ├── core.rs    # cap-std 服务：路径解析 + 沙箱
+│   │   ├── support.rs # 共享件（错误码/编码+BOM/二进制探测/原子写/行号渲染/审计）
+│   │   ├── contract.rs / list.rs / info.rs
+│   │   ├── io/        # read / write / edit
+│   │   ├── search/    # files / content / tree
+│   │   └── archive/   # zip / unzip
 │   ├── system_tools.rs
 │   ├── text_tools.rs
 │   └── web_tools.rs
@@ -182,7 +187,7 @@ pub struct ToolRegistry {
 
 提供 7 类内置工具：
 
-1. **`file_tools`**: 文件操作（读取、写入、精确替换、列举目录；**不提供删除**）
+1. **`filesystem`**: 文件 / 目录操作族（23 个工具：读取、写入、编辑、移动、列举、搜索、统计、zip；**不提供删除文件**）
 2. **`text_tools`**: 文本处理（格式化、转换）
 3. **`system_tools`**: 系统信息（CPU、内存、进程）
 4. **`data_tools`**: 数据处理（JSON、CSV、统计）

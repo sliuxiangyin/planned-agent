@@ -303,7 +303,7 @@ store.load → StoreMessage.is_agent_tool = true
 ```
 bridge.send → active: [user, assistant#1(streaming)]
 TextDelta:  "目录下共发现 3 个文件：…"   → assistant#1.text += chunk
-ToolCallStart(id="call_x", name="builtin_read_file")
+ToolCallStart(id="call_x", name="builtin_read_text_file")
   → assistant#1.tool_calls += ToolViewData{Pending}
 ToolCallArgsDelta → ToolViewData.arguments += delta
 ToolCallComplete → arguments 覆写 pretty JSON；phase=Running
@@ -319,9 +319,9 @@ Done             → finish_turn()：bubbles += [user, assistant#1, assistant#2]
 
 ```
 [User]  获取目录文件列表…
-[Assistant]  builtin_list_dir 面板（ToolView，含结果）
+[Assistant]  builtin_list_directory 面板（ToolView，含结果）
 [Assistant]  "目录下共发现 3 个文件：…" 文本
-             builtin_read_file 面板（ToolView，含结果）
+             builtin_read_text_file 面板（ToolView，含结果）
 [Assistant]  ".env 内容如下：…"
 ```
 

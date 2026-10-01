@@ -10,6 +10,17 @@
 > `flexible/prompt.rs`（`STEP_SYSTEM_PROMPT` 加读文件规则）、`flexible/report.rs` 与 `run_service/types.rs`（`output_file`）、
 > GUI `config.rs`（`[flexible]` 段）+ `services/run_service.rs`（拼会话段）。
 > 验收：`cargo test -p planned-agent --lib flexible::` = 88 passed；`cargo test -p planned-agent-gui --bins` = 63 passed。
+>
+> ⚠️ **勘误（2026-09-30）**：本文写于 `file_tools` 时代，文件工具此后已被 `filesystem` 工具族取代
+> （见 `filesystem-tools-rewrite.md`）。以下内容**已失效**：
+> - 文中的 `builtin_read_file`（`offset` 从 **1** 开始、返回 JSON + `next_offset`/`has_more`）
+>   → 现为 `builtin_read_file_lines`（`offset` 从 **0** 开始、返回**裸文本**）；
+> - 「`builtin_read_file` / `builtin_write_file` **不改**」的结论**作废** —— `builtin_write_file`
+>   名字保留但语义按上游重写（返回成功消息、写入走 cap-std 原子替换）；
+> - `file_tools.rs:55` / `:181-218` 等**行号引用**已失效（该文件已删除，共享件搬入 `filesystem/support.rs`）。
+>
+> **落盘机制本身未变**：`ExecutorConfig` 三字段、`prior` 渲染、整理步（`#RESULT`）都还在，
+> 变的只是它引用的工具名与参数基。下游读回契约同步见 `filesystem-tools-rewrite.md` §3。
 
 ---
 

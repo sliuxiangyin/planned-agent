@@ -205,7 +205,7 @@ mod tests {
     fn pairs_call_with_result_and_keeps_order() {
         let history = vec![
             assistant(&[
-                ("c1", "builtin_read_file", r#"{"path":"a.txt"}"#),
+                ("c1", "builtin_read_text_file", r#"{"path":"a.txt"}"#),
                 ("c2", "builtin_write_file", r#"{"path":"b.txt"}"#),
             ]),
             tool_result("c1", r#""line1""#, ErrorType::None),
@@ -214,7 +214,7 @@ mod tests {
         let trace = export_tool_trace(&history);
         assert_eq!(trace.len(), 2);
         assert_eq!(trace[0].id, "c1");
-        assert_eq!(trace[0].name, "builtin_read_file");
+        assert_eq!(trace[0].name, "builtin_read_text_file");
         assert_eq!(trace[0].arguments, serde_json::json!({ "path": "a.txt" }));
         assert_eq!(trace[0].output, Some(serde_json::json!("line1")));
         assert_eq!(trace[0].outcome, ToolOutcome::Ok);
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn serializes_to_stable_json_shape() {
         let history = vec![
-            assistant(&[("c1", "builtin_read_file", r#"{"path":"a.txt"}"#)]),
+            assistant(&[("c1", "builtin_read_text_file", r#"{"path":"a.txt"}"#)]),
             tool_result("c1", r#""line1""#, ErrorType::None),
             assistant(&[("c2", "builtin_write_file", r#"{"path":"b.txt"}"#)]),
         ];
@@ -324,7 +324,7 @@ mod tests {
             serde_json::json!([
                 {
                     "id": "c1",
-                    "name": "builtin_read_file",
+                    "name": "builtin_read_text_file",
                     "arguments": { "path": "a.txt" },
                     "output": "line1",
                     "outcome": "ok"

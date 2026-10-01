@@ -21,7 +21,7 @@ pub(super) fn new_run_dir_name() -> String {
 /// 一条前序产出的存放形态。
 ///
 /// 全文**始终**留在内存里 —— 本方案的目的不是省内存，而是不把全文塞进下游 `prompt`；
-/// 超阈值时另存一份文件，下游以「文件说明 + 预览」引用、用 `builtin_read_file` 按需读取。
+/// 超阈值时另存一份文件，下游以「文件说明 + 预览」引用、用 `builtin_read_file_lines` 按需读取。
 #[derive(Debug, Clone)]
 pub(super) struct StoredOutput {
     pub(super) content: String,
@@ -86,12 +86,13 @@ pub(super) fn render_prior_output(stored: &StoredOutput, preview_chars: usize) -
     format!(
         "⚠️ 产出较大（{} 行 / {} 字节），已存为临时文件，未全文注入。\n\
          文件：{}\n\
-         读取方式：`builtin_read_file`（offset 从 1 开始，limit 默认 2000；\
-         返回含 `next_offset` / `has_more`，可续读）。\n\
+         读取方式：`builtin_read_file_lines`（`offset` 从 0 开始，`limit` 默认 2000；\
+         本文件共 {} 行，续读时把 `offset` 加上上一次的 `limit`）。\n\
          ———— 开头预览（前 {} 字符）————\n{}",
         spilled.lines,
         spilled.bytes,
         spilled.path_string(),
+        spilled.lines,
         preview_chars,
         preview
     )

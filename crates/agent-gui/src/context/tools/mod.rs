@@ -18,10 +18,38 @@ use planned_agent_core::tool_registry::{ToolCategory, ToolExecutor};
 use planned_agent_mcp_rmcp::McpManager;
 use planned_agent_tool_manager::builtin::{
     ai_tools::AiToolsProvider, data_tools::DataToolsProvider, doc_tools::DocToolsProvider,
-    file_tools::FileToolsProvider, system_tools::SystemToolsProvider,
+    filesystem::FilesystemProvider, system_tools::SystemToolsProvider,
     text_tools::TextToolsProvider, web_tools::WebToolsProvider,
 };
 use planned_agent_tool_manager::ToolRegistry;
+
+/// 文件工具的 cap-std 沙箱根：**cwd + 用户主目录 + 系统临时目录**。
+///
+/// 用户 2026-09-30 拍板放宽（原为仅 cwd）。各项理由：
+/// - `cwd`：保住「相对路径基于 cwd」的既有语义，也是默认 `output_cache_dir`（`./data/cache`）的落点；
+/// - **用户主目录**：旧 `builtin_read_file` 能读任意绝对路径（桌面 / 下载 / 文档是常见用法），
+///   收窄到沙箱后必须显式放行主目录，否则模型读不到用户文件；
+/// - 系统临时目录：spill / 中间产物可能落在 `%TEMP%` 之下。
+///
+/// 零新依赖：Windows 用 `USERPROFILE`，其余平台用 `HOME`；两者都取不到就跳过该项。
+fn filesystem_sandbox_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+
+    if let Some(home) = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+    {
+        roots.push(home);
+    }
+
+    roots.push(std::env::temp_dir());
+
+    roots
+}
 
 /// GUI 层 Tools 上下文
 ///
@@ -45,8 +73,11 @@ impl ToolsContext {
     pub fn init(docs_dir: PathBuf) -> anyhow::Result<Self> {
         let registry = ToolRegistry::new();
 
-        // 按 CLI 既有顺序注册内置 provider（顺序无功能影响，仅日志可读性）
-        registry.register_builtin_provider(&FileToolsProvider);
+        // 内置 provider（顺序无功能影响，仅日志可读性）。
+        // 文件/目录操作统一由 filesystem 工具族提供（cap-std 沙箱），
+        // 设计稿 docs/planned-agent/filesystem-tools-rewrite.md。
+        // 沙箱根见 `filesystem_sandbox_roots()`（cwd + 用户主目录 + 临时目录）。
+        registry.register_builtin_provider(&FilesystemProvider::new(&filesystem_sandbox_roots())?);
         registry.register_builtin_provider(&TextToolsProvider);
         registry.register_builtin_provider(&SystemToolsProvider);
         registry.register_builtin_provider(&DataToolsProvider);

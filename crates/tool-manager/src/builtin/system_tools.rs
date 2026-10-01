@@ -503,7 +503,7 @@ async fn execute_command(arguments: &Value) -> ToolResult {
     };
     if let Some(dir) = &working_dir {
         if !Path::new(dir).is_dir() {
-            // 回显路径：`os error 3` 这类错误码没有任何定位价值（file_tools 有同类实测教训）。
+            // 回显路径：`os error 3` 这类错误码没有任何定位价值（`filesystem/support.rs::path_error` 同款做法）。
             return failure(
                 "working_dir_invalid",
                 format!("工作目录「{dir}」不存在或不是目录（请核对拼写）"),

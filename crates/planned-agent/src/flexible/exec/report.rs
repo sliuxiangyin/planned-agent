@@ -89,7 +89,7 @@ pub struct StepRunRecord {
     /// 该步产出**落盘**时的文件路径（产出超过落盘阈值才有值）。
     ///
     /// 落盘后全文不进下游 prompt，下游以「文件说明 + 预览」引用、按需用
-    /// `builtin_read_file` 分批读取。见 `docs/planned-agent/flexible-step-output-spill.md`。
+    /// `builtin_read_file_lines` 分批读取。见 `docs/planned-agent/flexible-step-output-spill.md`。
     #[serde(default)]
     pub output_file: Option<String>,
     /// 失败原因。

@@ -393,7 +393,7 @@ impl FlexibleExecutor {
             });
 
         // 交付步的产出必须给：未落盘时是全文，落盘后是「文件说明 + 预览」
-        // （整理步因此需要 `builtin_read_file`，见下方 tools）。
+        // （整理步因此需要 `builtin_read_file_lines`，见下方 tools）。
         let preview_chars = self.cfg.spill_preview_chars;
         let mut prior = Vec::with_capacity(template.steps.len() + 1);
         prior.push((
@@ -426,7 +426,7 @@ impl FlexibleExecutor {
         });
         // 交付产出可能已落盘 —— 整理步必须能读回来（「不带工具」在落盘机制下不再成立）。
         // 只给这一个只读工具：整理仍是分析，不需要别的外部数据。
-        let resolve_tools = tool_definitions_for_names(&self.tools, &["builtin_read_file"]);
+        let resolve_tools = tool_definitions_for_names(&self.tools, &["builtin_read_file_lines"]);
         let outcome = run_output_resolve(
             StepInput {
                 step: &resolve_step,

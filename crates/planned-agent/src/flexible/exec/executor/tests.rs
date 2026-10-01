@@ -801,7 +801,7 @@
             "整理步应收到文件说明: {resolve_req}"
         );
         assert!(
-            resolve_req.contains("builtin_read_file"),
+            resolve_req.contains("builtin_read_file_lines"),
             "文件说明应给出读取方式: {resolve_req}"
         );
         assert!(!resolve_req.contains(&long), "整理步不该收到全文");

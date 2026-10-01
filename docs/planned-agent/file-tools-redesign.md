@@ -1,5 +1,10 @@
 # `file_tools.rs` 重新设计（评审稿）
 
+> ⚠️ **已作废（2026-09）**：`file_tools.rs` 及其 4 个工具已被 `crates/tool-manager/src/builtin/filesystem/`
+> 的 23 个工具取代（cap-std 沙箱），见 `docs/planned-agent/filesystem-tools-rewrite.md`。
+> 本稿保留作为历史，以及「为什么当初这么做」的推理记录。文中提到的 `file_tools.rs` / `fs_support.rs`
+> 均已不存在（后者搬为 `filesystem/support.rs`）。
+
 > **缘起**：一份外部粘贴的《文件工具设计优化指南》（通用 LLM Agent 最佳实践清单）。
 > 本稿不做「指南的抄录」，只做**指南 vs 本仓库既有硬约定**的对齐：能采纳的采纳、冲突的说明为什么不采纳、
 > 指南自身矛盾处修正。形态对齐 `docs/planned-agent/system-tools-redesign.md`（同一套约定：错误码表 /

@@ -4,6 +4,10 @@
 > **范围边界**：只收录「进程内可完成」或「复用现有模板落库」的优化 —— 凡需要**新增持久化路径 / 新建表**的，一律不进本稿（见 §1.2），单独排期。
 > **上游依据**：`docs/planned-agent/flexible-execution-audit.md`（现状检查）、`flexible-execution-improvements.md`（下称 **imp**，待做清单）、`flexible-run-service.md`。
 > 检查日期：2026-09-28。
+>
+> ⚠️ **勘误（2026-09-30）**：文中引用的 `builtin_read_file`（含与 §A4 / §A5 有关的 `:104` / `:111` / `:116`）
+> 已随 `file_tools.rs` 退役改名 —— 现为 `builtin_read_file_lines`（`offset` **0-based**、返回**裸文本**）。
+> 契约见 `filesystem-tools-rewrite.md`。
 
 ---
 
