@@ -11,9 +11,13 @@
 //! 那一版**掌管编排**（谁调、按什么顺序、填什么常量），这一版只是被各 step 调用的函数。
 
 use planned_agent::chat::{ResultDecision, SubAgentCall};
-use serde_json::{Map, Value};
+use planned_agent::flexible::OutputSchema;
+use serde_json::{json, Map, Value};
 
+use crate::pages::plan::shared::session::TemplateNotifier;
 use crate::services::plans_flexible_service::PlansFlexibleService;
+
+use super::super::placeholder;
 
 /// 由定稿输出构造产物补丁。
 ///
@@ -45,7 +49,7 @@ pub(crate) fn build_patch(
 
 /// 写流程状态 + 统一错误处理。
 ///
-/// - `Ok`：记一条 `info!` 日志（含推进后的 `current_step`），返回 `Ok(())`；
+/// - `Ok`：记一条 `info!` 日志（含推进后的 `current_step`），返回合并后的 `(current_step, products)`；
 /// - `Err`：把存储错误包成**可直接交给 `Abort` 的理由**返回（含 agent / plan / 会话）。
 ///
 /// 写库失败属**不可重试**的硬错误：重试同样会失败，而静默 `Accept` 会让协调器误以为该步
@@ -57,12 +61,12 @@ pub(crate) async fn commit_state(
     session_id: &str,
     next_step: Option<&str>,
     patch: &Map<String, Value>,
-) -> Result<(), String> {
+) -> Result<(String, String), String> {
     match service
         .merge_state(plan_id, session_id, next_step, patch)
         .await
     {
-        Ok((step, _)) => {
+        Ok((step, products)) => {
             tracing::info!(
                 "[{}] 状态已登记: plan_id={}, host_session_id={}, current_step={}",
                 agent,
@@ -70,7 +74,9 @@ pub(crate) async fn commit_state(
                 session_id,
                 step,
             );
-            Ok(())
+            // 合并后的 `products` 一并返回：需要紧接着落库的调用方（如 `flexible_revise`
+            // 在已保存状态下的模板同步）要它，否则得再读一次库。
+            Ok((step, products))
         }
         Err(e) => {
             let reason = format!(
@@ -94,9 +100,213 @@ pub(crate) fn hand_off(call: &SubAgentCall<'_>) -> ResultDecision {
     }
 }
 
+/// 从 `flexible_state.products`（JSON 文本）组装落库 payload：`{ task, inputs, steps, output_schema }`。
+///
+/// - `task` ← `task_definition.task`（需求澄清定稿产物）
+/// - `inputs` ← `inputs`（参数化产出的参数表；缺失视为空表）
+/// - `steps` ← `steps`（参数化后的步骤骨架，可变值已写成 `${name}`）
+/// - `output_schema` ← `output_schema`（输出定义定稿的输出契约）。**缺失或 `null` 一律落 `null`** ——
+///   用户跳过输出定义、或选了「现在还定不了」，都是合法情况，不得报错；非 `null` 时必须是对象。
+///
+/// 落库前校验 `steps` 里的 `${name}` 都能在 `inputs` 中找到同名定义：未定义即报错，
+/// 不静默留空 —— 否则「参数漏定义」会被伪装成「本来就没有参数」。
+///
+/// 放在本层的理由：**多个 step 共用** —— `flexible_save` 用它首次落库，
+/// `flexible_revise` 用它把修订同步回已保存的模板（见 [`persist_template`]）。
+pub(crate) fn build_payload(products: &str) -> Result<String, String> {
+    let parsed: Value =
+        serde_json::from_str(products).map_err(|e| format!("products 非法 JSON: {e}"))?;
+    let obj = parsed
+        .as_object()
+        .ok_or_else(|| "products 不是对象".to_string())?;
+
+    let task = obj
+        .get("task_definition")
+        .and_then(|definition| definition.get("task"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|task| !task.is_empty())
+        .ok_or_else(|| "state 缺 task_definition.task（step1 尚未定稿）".to_string())?;
+
+    let steps = match obj.get("steps") {
+        Some(steps) if !steps.is_null() => steps,
+        _ => return Err("state 缺 steps（计划步尚未定稿）".to_string()),
+    };
+    if steps.as_array().is_none_or(|items| items.is_empty()) {
+        return Err("steps 必须是非空数组".to_string());
+    }
+
+    let inputs = match obj.get("inputs") {
+        Some(inputs) if !inputs.is_null() => inputs.clone(),
+        _ => Value::Array(Vec::new()),
+    };
+    if inputs.as_array().is_none() {
+        return Err("inputs 必须是数组".to_string());
+    }
+
+    // 输出契约可选：跳过输出定义 / 用户选「定不了」都落 null（两者语义等同，见
+    // `docs/planned-agent/flexible-output-step.md` §5）。
+    // 非 null 时走契约的**唯一定义处**校验（`kind` 合法 + 按 kind 的必填项）。
+    let (output_schema, schema_for_placeholders) = match obj.get("output_schema") {
+        Some(schema) if !schema.is_null() => {
+            OutputSchema::parse(schema)?;
+            (schema.clone(), Some(schema))
+        }
+        _ => (Value::Null, None),
+    };
+
+    // 占位符校验同时覆盖 `steps` 与 `output_schema` 的文本字段
+    placeholder::validate(steps, schema_for_placeholders, &inputs)?;
+
+    Ok(json!({
+        "task": task,
+        "inputs": inputs,
+        "steps": steps,
+        "output_schema": output_schema,
+    })
+    .to_string())
+}
+
+/// 把 `flexible_state` 的完整产物组装成模板 payload 并落库，成功后通知左侧面板重读模板。
+///
+/// 落库前由 [`build_payload`] 把关（输出契约形态 + 占位符一致性）；**组装 / 校验失败时不会写库**。
+///
+/// 调用方负责「什么时候该落库」：
+/// - `flexible_save`：首次创建流程定稿时；
+/// - `flexible_revise`：`current_step` 已是 `saved` 时 —— 修订改了 `flexible_state.products`
+///   就必须同步回 `plans_flexible_sessions`，否则模板停在旧值、左侧面板也看不到新参数。
+pub(crate) async fn persist_template(
+    service: &PlansFlexibleService,
+    notifier: &TemplateNotifier,
+    plan_id: &str,
+    session_id: &str,
+    products: &str,
+) -> Result<(), String> {
+    let payload = build_payload(products)?;
+
+    service
+        .save_snapshot(plan_id, session_id, &payload)
+        .await
+        .map_err(|e| format!("落库失败: {e}"))?;
+
+    // 落库成功 → 立即通知左侧面板重读模板（左侧面板按模板版本号自动重读 `parameterized_task`）。
+    notifier.notify();
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ──────────────────── `build_payload`：state 产物 → 落库 payload ────────────────────
+
+    /// `task` 取 `task_definition.task`；`inputs` / `steps` 原样落；缺 `output_schema` 落 `null`
+    /// （跳过输出定义、或用户选「现在还定不了」，两者语义等同）。
+    #[test]
+    fn payload_takes_task_from_definition_and_nulls_missing_schema() {
+        let products = json!({
+            "task_definition": { "task": "读取日志并汇总错误" },
+            "inputs": [{
+                "name": "file_path",
+                "default": "/var/log/app.log",
+                "description": "日志文件路径",
+            }],
+            "steps": [{
+                "result_reference": "#E1",
+                "intent": "读取 ${file_path}",
+                "expected_output": "日志内容",
+                "dependencies": [],
+            }],
+        })
+        .to_string();
+
+        let payload = build_payload(&products).expect("齐全的三件套应可组装");
+        let v: Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(v["task"], "读取日志并汇总错误");
+        assert_eq!(v["inputs"][0]["name"], "file_path");
+        assert_eq!(v["steps"][0]["intent"], "读取 ${file_path}");
+        assert!(v["output_schema"].is_null(), "无输出定义 → null");
+    }
+
+    /// `inputs` 缺失 ⇒ 空表（「本来就没有参数」，不是错误）。
+    #[test]
+    fn payload_falls_back_to_empty_inputs() {
+        let products = json!({
+            "task_definition": { "task": "t" },
+            "steps": [{
+                "result_reference": "#E1",
+                "intent": "做事",
+                "expected_output": "结果",
+                "dependencies": [],
+            }],
+        })
+        .to_string();
+
+        let payload = build_payload(&products).unwrap();
+        let v: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["inputs"], json!([]));
+    }
+
+    /// 缺 `task` ⇒ 报错（不落一个没有任务描述的模板）。
+    #[test]
+    fn payload_rejects_missing_task() {
+        let products = json!({
+            "steps": [{
+                "result_reference": "#E1",
+                "intent": "做事",
+                "expected_output": "结果",
+                "dependencies": [],
+            }],
+        })
+        .to_string();
+
+        let err = build_payload(&products).unwrap_err();
+        assert!(err.contains("task_definition"), "实际：{err}");
+    }
+
+    /// 空 `steps` ⇒ 报错（没有步骤的计划没有意义）。
+    #[test]
+    fn payload_rejects_empty_steps() {
+        let products = json!({
+            "task_definition": { "task": "t" },
+            "steps": [],
+        })
+        .to_string();
+
+        let err = build_payload(&products).unwrap_err();
+        assert!(err.contains("steps"), "实际：{err}");
+    }
+
+    /// `steps` 里的 `${name}` 没有同名 `inputs` 定义 ⇒ 报错。
+    /// **这正是挡「模型自创占位符」的那道闸** —— 修订时改了 `intent` 文本也可能触发它。
+    #[test]
+    fn payload_rejects_undefined_placeholder() {
+        let products = json!({
+            "task_definition": { "task": "t" },
+            "inputs": [],
+            "steps": [{
+                "result_reference": "#E1",
+                "intent": "读取 ${nope}",
+                "expected_output": "结果",
+                "dependencies": [],
+            }],
+        })
+        .to_string();
+
+        assert!(
+            build_payload(&products).is_err(),
+            "未定义的占位符必须被拒，否则「参数漏定义」会被伪装成「本来就没有参数」"
+        );
+    }
+
+    /// 非法 JSON ⇒ 报错。
+    #[test]
+    fn payload_rejects_broken_json() {
+        assert!(build_payload("{ not json").unwrap_err().contains("JSON"));
+    }
+
+    // ───────────────────────────── 产物补丁 ─────────────────────────────
 
     #[test]
     fn products_take_matching_fields_and_skip_null_or_missing() {

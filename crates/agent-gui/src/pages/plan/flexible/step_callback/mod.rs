@@ -9,7 +9,7 @@
 //! ├── commit.rs           通用：零策略纯工具（build_patch / commit_state / hand_off）
 //! ├── prelude.rs          通用：FlexibleStepPrelude（默认前置分析 + 守门）
 //! ├── before_inject.rs    通用：StateInjectCallback
-//! └── <step>/             各 step 自己的东西（clarify / plan / parameterize / output / save）
+//! └── <step>/             各 step 自己的东西（clarify / plan / parameterize / output / save / revise）
 //!     ├── mod.rs                 组装点：只写 create_<step>_callback
 //!     └── <step>_callback.rs     定稿登记回调 + 本 step 的常量 + 单测
 //! ```
@@ -27,7 +27,7 @@
 //! ```
 //!
 //! **「保存状态」不共用实现**：每个 `<step>/<step>_callback.rs` 自己写 `on_result` 全流程（取分析结论、
-//! 组产物补丁、`merge_state`、错误处理、决策）。五个 step 的产物 / 清理 / 推进规则只会越来越
+//! 组产物补丁、`merge_state`、错误处理、决策）。各 step 的产物 / 清理 / 推进规则只会越来越
 //! 不一样，共享一份实现只会被特例字段撑变形；冗余换来的是各 step 能自由演化。
 //! 本层只保留两种「跨 step 的约定」，它们不是保存状态、而是接口与把关：
 //! - [`prelude`]：把前置分析做进框架槽位（`planned_agent::chat::SubAgentChainPrelude`），
@@ -47,7 +47,7 @@
 //! 4. **决策只看 `call.is_last`**：非末位 `Next(call.text())`、末位 `Accept` → [`commit::hand_off`]
 //! 5. **解析 / 定稿判定 / 会话定位一律用 prelude 的结论**（[`analysis::StepAnalysis`]），不重复实现。
 //!
-//! 各 step 的 `<step>/mod.rs` 只剩「挂哪几环」（[`clarify`]、[`plan`]、[`parameterize`]、[`output`]、[`save`]），回调与常量在
+//! 各 step 的 `<step>/mod.rs` 只剩「挂哪几环」（[`clarify`]、[`plan`]、[`parameterize`]、[`output`]、[`save`]、[`revise`]），回调与常量在
 //! `<step>/<step>_callback.rs`。
 //!
 //! 启动前注入见 [`before_inject`]：把 state 里已定稿的产物直接塞给子 agent，
@@ -68,12 +68,14 @@ pub(crate) mod clarify;
 pub(crate) mod output;
 pub(crate) mod parameterize;
 pub(crate) mod plan;
+pub(crate) mod revise;
 pub(crate) mod save;
 
 pub(crate) use clarify::{create_clarify_callback, create_clarify_inject};
 pub(crate) use output::{create_output_callback, create_output_inject};
 pub(crate) use parameterize::{create_parameterize_callback, create_parameterize_inject};
 pub(crate) use plan::{create_plan_callback, create_plan_inject};
+pub(crate) use revise::{create_revise_callback, create_revise_inject};
 pub(crate) use save::{create_save_callback, create_save_inject};
 
 /// 子 agent 调用参数中承载「宿主会话 id」的字段名。
@@ -100,7 +102,7 @@ mod tests {
     use planned_agent_core::prompt::PromptManager;
     use planned_agent_prompt_manager::{FilePromptManager, PromptManagerConfig};
 
-    /// 5 份 step prompt（clarify / plan / parameterize / output / save）+ 协调器 system prompt 必须能被**运行期的加载器**解析出来。
+    /// 6 份 step prompt（clarify / plan / parameterize / output / save / revise）+ 协调器 system prompt 必须能被**运行期的加载器**解析出来。
     ///
     /// 这些文件只在运行期加载：字符串转义写错不会让编译失败，只会在用户点进流程时才炸
     /// （历史坑：TOML 的 `"""` 里 `\` 是转义符，示例里写 Windows 路径 `C:\data\in.txt`
@@ -124,8 +126,8 @@ mod tests {
 
         let loaded = manager.list_prompts().await.expect("应能列出已加载 prompt");
         assert!(
-            loaded.len() >= 5,
-            "flexible 目录应至少加载 6 份 prompt（clarify / plan / parameterize / output / save + 协调器 system），实际 {}",
+            loaded.len() >= 7,
+            "flexible 目录应至少加载 7 份 prompt（clarify / plan / parameterize / output / save / revise + 协调器 system），实际 {}",
             loaded.len()
         );
     }

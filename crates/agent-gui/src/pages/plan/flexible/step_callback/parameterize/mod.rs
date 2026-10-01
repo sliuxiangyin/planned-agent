@@ -4,7 +4,9 @@
 //!
 //! 1. **默认前置分析**（[`FlexibleStepPrelude`]）：解析输出、定位会话、判定定稿，并定稿对外文本；
 //!    解析失败 → 要求重新输出，非定稿 → 直接终止链（定稿登记不执行）。
-//! 2. **定稿登记**（[`ParameterizeCallback`]）：写 `parameterized_task`、推进 `parameterized`。
+//! 2. **定稿登记**（[`ParameterizeCallback`]）：把 `inputs` 与占位后的 `steps` 写进
+//!    `flexible_state`（**不是** `plans_flexible_sessions.parameterized_task` —— 那个列只在保存步
+//!    定稿、或修订同步时由 [`super::commit::persist_template`] 写），并推进 `parameterized`。
 //!
 //! 实现在同目录 `parameterize_callback.rs`（定稿登记）；解析、守门与对外定稿在 [`super::prelude`]。
 //!

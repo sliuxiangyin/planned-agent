@@ -24,8 +24,8 @@ use crate::services::plans_flexible_service::PlansFlexibleService;
 
 use super::session_host::FlexibleSessionHost;
 use super::step_callback::{
-    create_plan_callback, create_plan_inject, create_save_callback, create_save_inject,
-    create_clarify_callback, create_clarify_inject,
+    create_plan_callback, create_plan_inject, create_revise_callback, create_revise_inject,
+    create_save_callback, create_save_inject, create_clarify_callback, create_clarify_inject,
     create_output_callback, create_output_inject, create_parameterize_callback,
     create_parameterize_inject, HOST_SESSION_ID_FIELD,
 };
@@ -342,6 +342,63 @@ fn use_plan_agent_registrations(plan_id: String) {
                 plans_flexible_service.clone(),
             )],
         );
+        register_sub_agent(
+            &ai_ctx,
+            &tools_ctx,
+            &prompt_ctx,
+            "flexible_revise",
+            "修订子 Agent：在既有定稿产物上做最小改动（只改本次涉及的那一处，其余产物逐字保留）；改不动时回 needs_restart 走全量重做。",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "user_message": {
+                        "type": "string",
+                        "description": "用户本次输入内容（对现有任务的修改 / 调整 / 补充要求）"
+                    },
+                    "current_task_definition": {
+                        "type": "object",
+                        "description": "当前已定稿的任务定义（含 task）。**由系统自动注入**（取自本会话 flexible_state 的已定稿产物），你无需传"
+                    },
+                    "current_steps": {
+                        "type": "array",
+                        "description": "当前已定稿的步骤骨架（每项含 result_reference / intent / expected_output / dependencies）。**由系统自动注入**，你无需传"
+                    },
+                    "current_inputs": {
+                        "type": "array",
+                        "description": "当前已定稿的参数表（每项含 name / default / description）。**由系统自动注入**，你无需传"
+                    },
+                    "current_output_schema": {
+                        "type": "object",
+                        "description": "当前已定稿的输出契约。**由系统自动注入**，你无需传"
+                    },
+                    "host_session_id": {
+                        "type": "string",
+                        "description": "本会话 ID，原样照抄 system prompt「会话上下文」中给出的值，不得改写"
+                    }
+                },
+                "required": ["user_message", "host_session_id"]
+            }),
+            ChatConfig {
+                system_prompt: Some(SystemPrompt::Template("flexible/flexible_revise".into())),
+                // 指代不清（「改一下排序那步」对应不上唯一步骤）时由它自己问用户一次，故放行 request_user_action。
+                allowed_tools: Some(vec!["request_user_action".to_string()]),
+                // host_session_id 是宿主注入的控制字段（供回调定位会话），不进子 agent 的 task 文本。
+                hidden_args: vec![HOST_SESSION_ID_FIELD.to_string()],
+                ..Default::default()
+            },
+            1, // depth
+            2, // max_depth
+            create_revise_callback(
+                plan_id.clone(),
+                plans_flexible_service.clone(),
+                session_mgr.template_notifier(),
+            ),
+            // 现状全量产物由系统注入（见 revise/mod.rs 的 INJECT_MAPPING，统一带 current_ 前缀）。
+            vec![create_revise_inject(
+                plan_id.clone(),
+                plans_flexible_service.clone(),
+            )],
+        );
     });
 
     use_drop(move || {
@@ -351,6 +408,7 @@ fn use_plan_agent_registrations(plan_id: String) {
             "flexible_parameterize",
             "flexible_output",
             "flexible_save",
+            "flexible_revise",
             "flexible_state",
         ] {
             let _ = registry.unregister_tool(name);
