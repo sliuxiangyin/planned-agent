@@ -26,7 +26,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use planned_agent::chat::storage::StoreMessage;
 use planned_agent::chat::{ResultDecision, SubAgentCall, SubAgentResultCallback};
+use planned_agent_core::ai::types::{MessageContent, MessageRole};
 use serde_json::{Map, Value};
 
 use crate::pages::plan::shared::session::TemplateNotifier;
@@ -56,6 +58,103 @@ const SAVED_STEP: &str = "saved";
 /// 问过用户、用户选了「更新」。缺失 / `false` ⇒ **不落库**（「不要默认保存」——
 /// 没问过就没授权）。
 const SAVE_TEMPLATE_KEY: &str = "save_template";
+
+/// 确认交互的工具名（提示词里给 revise 的 `allowed_tools` 只有它）。
+const UX_TOOL_NAME: &str = "request_user_action";
+
+/// 「更新已保存模板」在确认交互里的选项值（见 `flexible_revise.toml` 的 `options`）。
+///
+/// 用户作答会以 `"{header} => {value}"` 的形式打包进 tool 结果，按这个值判断他选了什么。
+const SAVE_CONSENT_VALUE: &str = "save";
+
+/// 用户**真的**点了「取消」（而子 agent 仍声称要落库）时，把它打回去按契约重做。
+const RETRY_SAVE_DENIED: &str = "你的确认交互里用户选的是「取消」，但输出却带着 save_template=true。\
+本次修改必须整个作废：请只输出 {\"status\":\"cancelled\"}，不要带任何其它字段。";
+
+/// 子 agent **自称**已获授权、但本次执行里根本没有那次确认交互时，用它打回去重做。
+///
+/// 背景（实测）：LLM 会把历史里**别处**的一句「是」当成授权，跳过 `request_user_action`
+/// 直接输出 `save_template: true`，甚至在 `summary` 里写成「已按用户确认」。所以
+/// [`SAVE_TEMPLATE_KEY`] 不能直接采信 —— 必须与**本次执行**的真实交互核对
+/// （见 [`save_consent_from_history`]）。
+const RETRY_SAVE_CONSENT: &str = "你输出里的 save_template=true 需要用户授权，但本次执行中你**没有**调用过 \
+request_user_action 向用户确认。请先调用它问一次：「要按这次改动更新已保存的模板吗？」\
+options 用 [{label:\"保存\",value:\"save\",recommended:true},{label:\"取消\",value:\"cancel\"}]；\
+拿到用户答复后再输出最终 JSON —— 用户选保存 → status=revised 且 save_template=true；\
+用户选取消 → 只输出 {\"status\":\"cancelled\"}。";
+
+/// 用户对「更新已保存模板」的真实态度 —— 只认**本次执行历史**里的那次确认交互。
+#[derive(Debug, PartialEq, Eq)]
+enum SaveConsent {
+    /// 真的问过，用户选了「保存」。
+    Granted,
+    /// 真的问过，但用户点了「取消」。
+    Denied,
+    /// 本次执行里没有任何确认交互 —— 没问过就没授权。
+    Missing,
+}
+
+/// 从子 agent 的**本次执行历史**里判断用户对「更新模板」的真实作答。
+///
+/// 依据：确认交互在历史里是一对消息 —— `assistant(tool_calls=[request_user_action])` +
+/// `tool(content = {"choice": "… => save", "action_id": "submit"|"cancel"})`。
+/// 两者都只可能在**本次**执行里出现，所以「拿别处的『是』当授权」不可能蒙混过关。
+fn save_consent_from_history(history: &[StoreMessage]) -> SaveConsent {
+    // 1. 本次执行里发起过的确认交互（`request_user_action`）的 tool_call id。
+    let asked: Vec<&str> = history
+        .iter()
+        .filter_map(|sm| sm.message.tool_calls.as_deref())
+        .flatten()
+        .filter(|tc| tc.function.name == UX_TOOL_NAME)
+        .map(|tc| tc.id.as_str())
+        .collect();
+    if asked.is_empty() {
+        return SaveConsent::Missing;
+    }
+
+    // 2. 看这些调用的作答。
+    for sm in history {
+        if !matches!(sm.message.role, MessageRole::Tool) {
+            continue;
+        }
+        let Some(id) = sm.message.tool_call_id.as_deref() else {
+            continue;
+        };
+        if !asked.contains(&id) {
+            continue;
+        }
+        let Some(text) = tool_result_text(&sm.message.content) else {
+            continue;
+        };
+        let Ok(answer) = serde_json::from_str::<Value>(text) else {
+            continue;
+        };
+        // 底部「取消」按钮 ⇒ action_id = "cancel"（choice 会置空）。
+        if answer.get("action_id").and_then(Value::as_str) == Some("cancel") {
+            return SaveConsent::Denied;
+        }
+        // 选项的 `value` 会被打包进 `choice` 文本（形如 `"要按这次改动更新模板吗？ => save"`）。
+        if answer
+            .get("choice")
+            .and_then(Value::as_str)
+            .is_some_and(|choice| choice.contains(SAVE_CONSENT_VALUE))
+        {
+            return SaveConsent::Granted;
+        }
+    }
+
+    // 问过但没等到作答（用户直接关掉）⇒ 视为未授权。
+    SaveConsent::Missing
+}
+
+/// 取 tool 消息里的文本（子 agent 侧的作答落在 `ToolResult.content`，兼容 `Text`）。
+fn tool_result_text(content: &Option<MessageContent>) -> Option<&str> {
+    match content {
+        Some(MessageContent::ToolResult { content, .. }) => Some(content.as_str()),
+        Some(MessageContent::Text { text }) => Some(text.as_str()),
+        _ => None,
+    }
+}
 
 /// 本次修订是否要落库到已保存的模板。
 ///
@@ -233,6 +332,50 @@ impl SubAgentResultCallback for ReviseCallback {
             }
         }
 
+        // ── 1.5 授权核对：必须在写任何东西**之前** ──
+        // `save_template` 是子 agent **自报**的，不可信 —— 实测它会在完全没问过用户的情况下写
+        // `true`（把历史里别处的一句「是」当成授权，还在 `summary` 里声称「已按用户确认」）。
+        // 所以凡是自称要落库的，都要与**本次执行**里真实的确认交互对上才认。
+        let mut save_template = false;
+        if analysis
+            .parsed
+            .get(SAVE_TEMPLATE_KEY)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            // 只有「已保存」档位才有模板可覆盖（其它档位下这个标志本就无意义，提示词也禁止输出）。
+            let current_step = match self
+                .service
+                .load_state(&self.plan_id, analysis.session_id)
+                .await
+            {
+                Ok(Some((step, _))) => step,
+                Ok(None) => String::new(),
+                Err(e) => {
+                    return abort(&format!("[{}] 读取流程档位失败：{}", AGENT, e));
+                }
+            };
+            if current_step == SAVED_STEP {
+                match save_consent_from_history(call.history) {
+                    SaveConsent::Granted => save_template = true,
+                    SaveConsent::Denied => {
+                        tracing::warn!(
+                            "[{}] 子 agent 声称要落库，但本次确认交互里用户选的是取消 —— 打回重做",
+                            AGENT
+                        );
+                        return ResultDecision::Retry(RETRY_SAVE_DENIED.to_string());
+                    }
+                    SaveConsent::Missing => {
+                        tracing::warn!(
+                            "[{}] 子 agent 声称已获保存授权，但本次执行里没有确认交互 —— 打回重做",
+                            AGENT
+                        );
+                        return ResultDecision::Retry(RETRY_SAVE_CONSENT.to_string());
+                    }
+                }
+            }
+        }
+
         // ── 2. 写回：`next_step = None` ⇒ 保留原档位（修订不推进 `current_step`）──
         let (step, _) = match commit_state(
             AGENT,
@@ -249,22 +392,14 @@ impl SubAgentResultCallback for ReviseCallback {
             Err(reason) => return ResultDecision::Abort(reason),
         };
 
-        // ── 3. 已保存过 **且用户刚授权** ⇒ 把修订同步回模板 ──
+        // ── 3. 已保存过 **且用户已授权**（第 1.5 步核对过）⇒ 把修订同步回模板 ──
         // 不做这一步，`plans_flexible_sessions.parameterized_task` 会停在旧值：
         // 左侧面板显示的参数默认值、执行时用的模板，都还是改动前的。
-        //
-        // **落库必须由用户授权**：`save_template: true` 的唯一合法来源是 revise 在
-        // `request_user_action` 里问过、用户选了「更新模板」。缺失 = 没问过 = 没授权 → 不落库。
-        let save_template = analysis
-            .parsed
-            .get(SAVE_TEMPLATE_KEY)
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-
         if step == SAVED_STEP && !save_template {
-            // 改动本身已落在会话状态里（不回滚），只是不写模板 —— 用户下次仍可再说一次。
-            tracing::warn!(
-                "[{}] 未获保存授权（{} 非 true），改动只保留在会话状态，模板未更新",
+            // 本次没有牵连模板落库（没声明，或按第 1.5 步的核对没通过、已被打回）——
+            // 改动只留在会话状态，模板不动。
+            tracing::info!(
+                "[{}] 本次修订未涉及模板落库（{} 未声明），改动只保留在会话状态",
                 AGENT,
                 SAVE_TEMPLATE_KEY
             );
@@ -549,6 +684,120 @@ mod tests {
         assert!(!should_persist_template("output_defined", true));
         assert!(!should_persist_template("none", true));
     }
+
+    // ── 授权核对：只认**本次执行**里真实发生过的确认交互 ──
+    //
+    // 这组是安全判断的核心。失败模式是「LLM 幻觉出一个授权，系统照单全收，静默覆盖
+    // 用户没同意改的已保存模板」—— 线上实际发生过：它把历史里**别处**的一句「是」
+    // 当成了授权，跳过 `request_user_action` 直接写 `save_template: true`。
+    use planned_agent_core::ai::types::{FunctionCall, Message, ToolCall, ToolType};
+
+    /// 构造一条 assistant 消息。
+    fn assistant(tool_calls: Option<Vec<ToolCall>>) -> StoreMessage {
+        StoreMessage::normal(Message {
+            role: MessageRole::Assistant,
+            tool_calls,
+            ..Default::default()
+        })
+    }
+
+    /// 构造一次 `request_user_action` 调用（`id` 即它的 `tool_call_id`）。
+    fn ux_call(id: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            r#type: ToolType::Function,
+            function: FunctionCall {
+                name: UX_TOOL_NAME.to_string(),
+                arguments: "{}".to_string(),
+            },
+        }
+    }
+
+    /// 构造一条 tool 结果消息；`answer` 就是确认交互的作答 JSON。
+    fn tool_msg(id: &str, answer: &str) -> StoreMessage {
+        StoreMessage::normal(Message {
+            role: MessageRole::Tool,
+            content: Some(MessageContent::ToolResult {
+                tool_call_id: id.to_string(),
+                content: answer.to_string(),
+            }),
+            tool_call_id: Some(id.to_string()),
+            ..Default::default()
+        })
+    }
+
+    /// 用户选「保存」的作答（选项的 `value` 会被打包进 `choice` 文本）。
+    fn answered_save(id: &str) -> StoreMessage {
+        tool_msg(
+            id,
+            r#"{"choice":"要按这次改动更新已保存的模板吗？ => save","action_id":"submit"}"#,
+        )
+    }
+
+    /// 用户点「取消」的作答（底部取消按钮 ⇒ `action_id=cancel`，`choice` 置空）。
+    fn answered_cancel(id: &str) -> StoreMessage {
+        tool_msg(id, r#"{"choice":"","action_id":"cancel"}"#)
+    }
+
+    #[test]
+    fn save_consent_requires_a_real_interaction_in_this_run() {
+        // ① 本次执行里没有任何确认交互 ⇒ Missing：自称 save_template=true 也不作数。
+        assert_eq!(save_consent_from_history(&[]), SaveConsent::Missing);
+        assert_eq!(
+            save_consent_from_history(&[assistant(None)]),
+            SaveConsent::Missing
+        );
+
+        // ② 真的问了、用户选「保存」⇒ Granted。
+        assert_eq!(
+            save_consent_from_history(&[
+                assistant(Some(vec![ux_call("ux1")])),
+                answered_save("ux1"),
+            ]),
+            SaveConsent::Granted
+        );
+
+        // ③ 真的问了、但用户点了「取消」⇒ Denied（绝不能落库）。
+        assert_eq!(
+            save_consent_from_history(&[
+                assistant(Some(vec![ux_call("ux1")])),
+                answered_cancel("ux1"),
+            ]),
+            SaveConsent::Denied
+        );
+
+        // ④ 问了但没等到作答（用户直接把面板关掉）⇒ Missing。
+        assert_eq!(
+            save_consent_from_history(&[assistant(Some(vec![ux_call("ux1")]))]),
+            SaveConsent::Missing
+        );
+
+        // ⑤ 拿**别的 id** 的作答冒充授权 ⇒ 不算（对不上 tool_call_id）。
+        assert_eq!(
+            save_consent_from_history(&[
+                assistant(Some(vec![ux_call("ux1")])),
+                tool_msg("other", r#"{"choice":"x => save","action_id":"submit"}"#),
+            ]),
+            SaveConsent::Missing
+        );
+
+        // ⑥ 只有非 UI 工具的调用 / 作答 ⇒ Missing（普通工具的结果不能当授权）。
+        assert_eq!(
+            save_consent_from_history(&[
+                assistant(Some(vec![ToolCall {
+                    id: "t1".to_string(),
+                    r#type: ToolType::Function,
+                    function: FunctionCall {
+                        name: "builtin_read_text_file".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }])),
+                tool_msg("t1", r#"{"choice":"x => save"}"#),
+            ]),
+            SaveConsent::Missing
+        );
+    }
+
     use serde_json::json;
 
     /// 造一个四字段齐全的步骤对象。

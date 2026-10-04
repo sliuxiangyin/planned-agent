@@ -353,7 +353,7 @@ fn use_plan_agent_registrations(plan_id: String) {
                 "properties": {
                     "user_message": {
                         "type": "string",
-                        "description": "用户本次输入内容（对现有任务的修改 / 调整 / 补充要求）"
+                        "description": "用户本次输入内容（对现有任务的修改 / 调整 / 补充要求）。要自带上下文：本子 Agent 看不到对话历史，用户这句话若依赖上文才能理解（回指、省略、引用你之前给过的选项），请先补全成可直接执行的描述再传，不要只给一个代号。"
                     },
                     "current_task_definition": {
                         "type": "object",

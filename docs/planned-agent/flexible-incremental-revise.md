@@ -429,3 +429,71 @@ LLM 若漏问 / 漏填，宁可这次不保存（记一条 warn），也不替�
 
 **「重做」不等于「重造」** —— 只有结构必须变（增删步骤 / 增删参数）才重做；而重做要**在旧骨架上改**，
 不是从零展开。两条都靠系统保证（`previous_steps` 注入 + 补丁式定位替换），不靠 LLM 自觉。
+
+---
+
+## 13. 追加：落库授权必须由系统核对（不采信子 agent 自报）
+
+> 触发这件事的是一次线上实测：**用户在 `saved` 会话里做修订，那次「保存 / 取消」确认根本没弹出来，改动却直接落库了**
+> —— 而「用户不点头就不覆盖模板」正是 Q2 要守的底线。
+
+### 13.1 现象与证据
+
+日志里 `flexible_revise` 的输出：
+
+```json
+{"status":"revised",
+ "summary":"把 #E2 中的时间格式固定为 Y-m-d H:i:s，已按用户确认更新已保存的模板",
+ "save_template":true, "steps":[…]}
+```
+
+而**整份日志里 `request_user_action` 只被调用过一次**，且那次是协调器在首次澄清流程里问任务摘要 —— revise **一次都没问过**。
+
+它为什么会「自称已确认」？因为历史里**别处**有一句用户答的「是」（在协调器那个摘要提问上），
+LLM 把它当成了「用户已同意更新模板」，于是跳过确认、直接输出 `save_template: true`，
+并在 `summary` 里写成了既成事实。**这是幻觉绕过提示词，不是提示词没写清楚。**
+
+### 13.2 根因：`save_template` 是**子 agent 自报**的字段
+
+```rust
+fn should_persist_template(current_step: &str, save_template: bool) -> bool {
+    current_step == SAVED_STEP && save_template      // ← save_template 无任何系统侧凭据
+}
+```
+
+原来的防御只有「**缺失** `save_template` = 不落库」，**没防住谎报 `true`**。提示词里那条「落库前必须先问」
+是**纪律**，不是**结构**。
+
+### 13.3 修法：拿**本次执行历史**核对真实交互
+
+`SubAgentCall` 里本来就有 `pub history: &'a [StoreMessage]`（`sub_agent/result.rs:90`），
+而且它是**本次执行**的历史 —— 所以「LLM 拿别处的『是』当授权」在结构上就能被识破。
+
+新增 `save_consent_from_history(history) -> SaveConsent`（三态）：
+
+| 历史里的形态 | 结论 | 处理 |
+|---|---|---|
+| `assistant(tool_calls=[request_user_action])` + `tool(choice = "… => save")` | `Granted` | 允许落库 |
+| 同上，但 `action_id == "cancel"` | `Denied` | `Retry(RETRY_SAVE_DENIED)` —— 要求它按契约改输出 `cancelled` |
+| 没有任何 `request_user_action`（**或问了没等到作答**） | `Missing` | `Retry(RETRY_SAVE_CONSENT)` —— 逼它先真的去问一次 |
+
+**核对放在「写任何东西之前」**（`on_result` 的第 1.5 步），所以被拒绝时 **`flexible_state` 也不会被写**
+——「没授权 = 什么都没发生」。这与 Q2 的最终语义一致，不再出现「state 改了、模板没改、界面上看不出来」的静默分叉。
+
+判定细节：用户作答落在 tool 消息的 `MessageContent::ToolResult.content`（JSON：`{"choice": …, "action_id": …}`），
+选项的 `value` 被打包进 `choice` 文本（形如 `"要按这次改动更新已保存的模板吗？ => save"`），
+所以按 `action_id == "cancel"` 与 `choice.contains("save")` 判定。
+
+### 13.4 改了什么
+
+| 文件 | 改动 |
+|---|---|
+| `.../step_callback/revise/revise_callback.rs` | `SaveConsent` 三态 + `save_consent_from_history` + `tool_result_text`；`RETRY_SAVE_CONSENT` / `RETRY_SAVE_DENIED`；`on_result` 加第 1.5 步（**写之前**核对，无凭据即 `Retry`）；原「缺失就不落库」的 warn 降级为 info |
+| 同上（测试） | 新增 `save_consent_requires_a_real_interaction_in_this_run`：六种形态 —— 没问过 / 问+保存 / 问+取消 / 问了没作答 / **别的 id 冒充** / **非 UI 工具冒充** |
+
+**验证**：`cargo test -p planned-agent-gui --bins` → **90 passed / 0 failed**。
+
+### 13.5 一句话
+
+**授权是「用户点过那个按钮」这个事实，不是 LLM 的一句话。** 事实就在执行历史里，系统自己能看 ——
+所以核对放系统侧：`save_template` 只当线索，不当凭据。
