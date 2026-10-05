@@ -6067,6 +6067,7 @@ dependencies = [
  "async-trait",
  "mlua",
  "planned-agent-core",
+ "serde",
  "serde_json",
  "tokio",
 ]
