@@ -18,7 +18,8 @@ use crate::config::GuiStorageConfig;
 use crate::storage::{
     migrations::Migrator,
     repository::{
-        ChatMessageRepo, FlexibleStateRepo, PlanRepo, PlansFlexibleSessionsRepo, TestRepo,
+        ChatMessageRepo, FlexibleRunHistoryRepo, FlexibleStateRepo, PlanRepo,
+        PlansFlexibleSessionsRepo, TestRepo,
     },
 };
 
@@ -39,6 +40,8 @@ pub struct StorageContext {
     flexible_state_repo: Arc<FlexibleStateRepo>,
     /// plans_flexible_sessions 表仓库（「会话即版本」：会话/版本列表）
     plans_flexible_sessions_repo: Arc<PlansFlexibleSessionsRepo>,
+    /// flexible_run_history 表仓库（每步「上次成功用过的工具链」记忆）
+    flexible_run_history_repo: Arc<FlexibleRunHistoryRepo>,
 }
 
 impl StorageContext {
@@ -48,6 +51,11 @@ impl StorageContext {
     pub fn flexible_state_repo(&self) -> Arc<FlexibleStateRepo> { self.flexible_state_repo.clone() }
     pub fn plans_flexible_sessions_repo(&self) -> Arc<PlansFlexibleSessionsRepo> {
         self.plans_flexible_sessions_repo.clone()
+    }
+    /// flexible_run_history 表仓库（阶段 1 已建表；注入侧接线前先不读）
+    #[allow(dead_code)]
+    pub fn flexible_run_history_repo(&self) -> Arc<FlexibleRunHistoryRepo> {
+        self.flexible_run_history_repo.clone()
     }
 
     /// 从配置异步初始化 SQLite + 迁移 + Repos
@@ -75,6 +83,7 @@ impl StorageContext {
             chat_message_repo: Arc::new(ChatMessageRepo::new(db.clone())),
             flexible_state_repo: Arc::new(FlexibleStateRepo::new(db.clone())),
             plans_flexible_sessions_repo: Arc::new(PlansFlexibleSessionsRepo::new(db.clone())),
+            flexible_run_history_repo: Arc::new(FlexibleRunHistoryRepo::new(db.clone())),
         })
     }
 }

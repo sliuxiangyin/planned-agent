@@ -16,6 +16,10 @@ pub struct Model {
     pub title: String,
     /// 语义化版本号 vX.Y.Z；plan 内唯一、单调递增
     pub version: String,
+    /// 会话内计划修订号：`produce` 检测到 `steps` 内容变化时 +1（只改 inputs/output_schema 不算）。
+    /// 用于隔离 `flexible_run_history` 的工具链记忆 —— 内容换过一代，旧记忆即失配
+    #[sea_orm(default_value = 0)]
+    pub revision: i32,
     /// 会话状态：active / produced / abandoned
     #[sea_orm(default_value = "active")]
     pub status: String,

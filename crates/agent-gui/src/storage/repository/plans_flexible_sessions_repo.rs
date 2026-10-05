@@ -45,6 +45,8 @@ impl PlansFlexibleSessionsRepo {
             plan_id: Set(plan_id.to_string()),
             title: Set(title.to_string()),
             version: Set(version),
+            // 新会话的修订号从 0 起；首次 produce 后变 1
+            revision: Set(0),
             status: Set(status::ACTIVE.to_string()),
             is_default: Set(false),
             parameterized_task: Set(None),
