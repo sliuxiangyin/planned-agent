@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// 消息内容类型（符合 OpenAI 标准）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10,9 +11,13 @@ pub enum MessageContent {
     Text {
         text: String,
     },
-    /// 图片内容
+    /// 图片内容（单图、无文字）
     Image {
-        image_url: ImageUrl,
+        image: ImageSource,
+    },
+    /// 图文混排：多段内容，与 OpenAI 的 content part 数组一一对应
+    Parts {
+        parts: Vec<ContentPart>,
     },
     /// 工具调用结果
     ToolResult {
@@ -30,11 +35,34 @@ impl Default for MessageContent {
     }
 }
 
-/// 图片 URL
+/// 一条用户消息里的一段内容（与 OpenAI 的 content part 一一对应）
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImageUrl {
-    pub url: String,
-    pub detail: Option<ImageDetail>,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    /// 文本段
+    Text {
+        text: String,
+    },
+    /// 图片段
+    Image {
+        image: ImageSource,
+    },
+}
+
+/// 图片来源：要么是可直接使用的地址，要么是本地文件（发请求前由适配层读盘）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ImageSource {
+    /// `http(s)://` 或已是 `data:` 的 URL —— 原样透传给 API
+    Url {
+        url: String,
+        detail: Option<ImageDetail>,
+    },
+    /// 本地文件路径 —— 适配层读盘 + base64 后转成 `data:` URL
+    File {
+        path: PathBuf,
+        detail: Option<ImageDetail>,
+    },
 }
 
 /// 图片细节级别
@@ -267,4 +295,86 @@ pub struct DeltaFunctionCall {
     pub name: Option<String>,
     /// 参数
     pub arguments: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 图文混排：`{"type":"parts","parts":[{"type":"text",..},{"type":"image","image":{"kind":"file",..}}]}`
+    /// —— 锁住 JSON 形状与 serde 往返。
+    #[test]
+    fn parts_json_shape_and_round_trip() {
+        let content = MessageContent::Parts {
+            parts: vec![
+                ContentPart::Text {
+                    text: "看图".into(),
+                },
+                ContentPart::Image {
+                    image: ImageSource::File {
+                        path: PathBuf::from(r"D:\pics\a.png"),
+                        detail: Some(ImageDetail::Auto),
+                    },
+                },
+            ],
+        };
+
+        let json = serde_json::to_value(&content).unwrap();
+        assert_eq!(json["type"], "parts");
+        assert_eq!(json["parts"][0]["type"], "text");
+        assert_eq!(json["parts"][0]["text"], "看图");
+        assert_eq!(json["parts"][1]["type"], "image");
+        assert_eq!(json["parts"][1]["image"]["kind"], "file");
+        assert_eq!(json["parts"][1]["image"]["detail"], "auto");
+
+        let back: MessageContent = serde_json::from_value(json).unwrap();
+        match back {
+            MessageContent::Parts { parts } => {
+                assert_eq!(parts.len(), 2);
+                match &parts[1] {
+                    ContentPart::Image {
+                        image: ImageSource::File { path, detail },
+                    } => {
+                        assert_eq!(path, &PathBuf::from(r"D:\pics\a.png"));
+                        assert!(matches!(detail, Some(ImageDetail::Auto)));
+                    }
+                    other => panic!("unexpected part: {other:?}"),
+                }
+            }
+            other => panic!("unexpected content: {other:?}"),
+        }
+    }
+
+    /// 单图消息字段名是 `image`（不再叫 `image_url`），`ImageSource::Url` 往返。
+    #[test]
+    fn image_source_url_round_trip() {
+        let content = MessageContent::Image {
+            image: ImageSource::Url {
+                url: "data:image/png;base64,AAAA".into(),
+                detail: None,
+            },
+        };
+
+        let json = serde_json::to_value(&content).unwrap();
+        assert_eq!(json["type"], "image");
+        assert_eq!(json["image"]["kind"], "url");
+        assert!(json["image"]["detail"].is_null());
+
+        let back: MessageContent = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            back,
+            MessageContent::Image {
+                image: ImageSource::Url { .. }
+            }
+        ));
+    }
+
+    /// 默认仍是空文本（GUI 构造占位消息依赖）。
+    #[test]
+    fn default_is_empty_text() {
+        match MessageContent::default() {
+            MessageContent::Text { text } => assert!(text.is_empty()),
+            other => panic!("unexpected default: {other:?}"),
+        }
+    }
 }

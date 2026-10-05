@@ -7,7 +7,8 @@ use planned_agent_core::{
         config::ThinkingConfig,
         types::{
             ChatCompletionRequest, ChatCompletionResponse, ChatCompletionChunk,
-            Message, MessageRole, MessageContent, ToolCall, ToolType, FunctionCall,
+            Message, MessageRole, MessageContent, ContentPart, ImageSource,
+            ToolCall, ToolType, FunctionCall,
             Choice, FinishReason, Usage, ChunkChoice, DeltaMessage, DeltaToolCall, DeltaFunctionCall,
             ToolDefinition, Conversation,
         },
@@ -180,6 +181,156 @@ pub struct OpenAiClientConfig {
     pub thinking_config: Option<ThinkingConfig>,
 }
 
+/// 单张本地图片大小上限（与 OpenAI 单图上限一致：20 MB）。
+/// 超限直接失败，避免把请求送到 API 才拿到 400。
+const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+
+/// 本地图片扩展名 → MIME。白名单与 OpenAI vision 支持面一致（png / jpeg / webp / gif）。
+fn image_mime_of(path: &std::path::Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        _ => None,
+    }
+}
+
+/// 大小校验（抽成纯函数，单测不必真造 20 MB 文件）。
+fn check_image_size(len_bytes: u64, path: &std::path::Path) -> Result<()> {
+    if len_bytes > MAX_IMAGE_BYTES {
+        anyhow::bail!(
+            "local image too large: {} is {} bytes (limit {} bytes / {} MB)",
+            path.display(),
+            len_bytes,
+            MAX_IMAGE_BYTES,
+            MAX_IMAGE_BYTES / 1024 / 1024
+        );
+    }
+    Ok(())
+}
+
+/// 本地图片文件 → `data:{mime};base64,{...}`。
+///
+/// 失败一律返回 `Err`（不静默降级）：读不到图时静默丢图，只会让模型答得莫名其妙。
+async fn local_image_to_data_url(path: &std::path::Path) -> Result<String> {
+    let mime = image_mime_of(path).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unsupported local image extension: {} (supported: png, jpg, jpeg, webp, gif)",
+            path.display()
+        )
+    })?;
+    let meta = tokio::fs::metadata(path)
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot read local image {}: {}", path.display(), e))?;
+    check_image_size(meta.len(), path)?;
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot read local image {}: {}", path.display(), e))?;
+    // 以**实际读到的**长度再校一次：元数据与正文之间文件可能被改写（TOCTOU）
+    check_image_size(bytes.len() as u64, path)?;
+
+    use base64::Engine as _;
+    Ok(format!(
+        "data:{};base64,{}",
+        mime,
+        base64::engine::general_purpose::STANDARD.encode(&bytes)
+    ))
+}
+
+/// 把 `ImageSource::File` 就地解析成 `ImageSource::Url { url: data:… }`。
+async fn resolve_image_source(source: &mut ImageSource) -> Result<()> {
+    if let ImageSource::File { path, detail } = source {
+        let url = local_image_to_data_url(path).await?;
+        *source = ImageSource::Url {
+            url,
+            detail: detail.clone(),
+        };
+    }
+    Ok(())
+}
+
+/// 发请求前把请求里的**本地图片**读盘 + base64 成 `data:` URL。
+///
+/// 只扫 User 消息 —— 底层（async-openai 0.41）只有 user content part 支持图片。
+/// 在重试循环之外调用，因此一次请求只读盘一次。
+async fn resolve_local_images(request: &mut ChatCompletionRequest) -> Result<()> {
+    for (index, message) in request.messages.iter_mut().enumerate() {
+        if !matches!(message.role, MessageRole::User) {
+            continue;
+        }
+        match &mut message.content {
+            Some(MessageContent::Image { image }) => {
+                resolve_image_source(image)
+                    .await
+                    .map_err(|e| e.context(format!("message[{index}] (role=user)")))?;
+            }
+            Some(MessageContent::Parts { parts }) => {
+                for (part_index, part) in parts.iter_mut().enumerate() {
+                    if let ContentPart::Image { image } = part {
+                        resolve_image_source(image).await.map_err(|e| {
+                            e.context(format!("message[{index}].parts[{part_index}]"))
+                        })?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// core 的图片消息段 → OpenAI 的 user content part。
+fn convert_content_part(
+    part: &ContentPart,
+) -> Result<async_openai::types::chat::ChatCompletionRequestUserMessageContentPart> {
+    use async_openai::types::chat::{
+        ChatCompletionRequestMessageContentPartText,
+        ChatCompletionRequestUserMessageContentPart,
+    };
+    match part {
+        ContentPart::Text { text } => Ok(ChatCompletionRequestUserMessageContentPart::Text(
+            ChatCompletionRequestMessageContentPartText { text: text.clone() },
+        )),
+        ContentPart::Image { image } => Ok(
+            ChatCompletionRequestUserMessageContentPart::ImageUrl(convert_image_source(image)?),
+        ),
+    }
+}
+
+/// `ImageSource` → `{"type":"image_url","image_url":{"url":..,"detail":..}}`。
+///
+/// `File` 走到这里说明 `resolve_local_images` 没被调用（内部错误）—— 显式报错，
+/// 而不是退回旧的 `"Image: {url}"` 文本降级。
+fn convert_image_source(
+    source: &ImageSource,
+) -> Result<async_openai::types::chat::ChatCompletionRequestMessageContentPartImage> {
+    use async_openai::types::chat::{
+        ChatCompletionRequestMessageContentPartImage, ImageDetail as OaImageDetail, ImageUrl,
+    };
+    use planned_agent_core::ai::types::ImageDetail as CoreImageDetail;
+
+    let (url, detail) = match source {
+        ImageSource::Url { url, detail } => (url.clone(), detail.as_ref()),
+        ImageSource::File { path, .. } => anyhow::bail!(
+            "internal: local image {} was not resolved before conversion",
+            path.display()
+        ),
+    };
+
+    Ok(ChatCompletionRequestMessageContentPartImage {
+        image_url: ImageUrl {
+            url,
+            detail: detail.map(|d| match d {
+                CoreImageDetail::Low => OaImageDetail::Low,
+                CoreImageDetail::High => OaImageDetail::High,
+                CoreImageDetail::Auto => OaImageDetail::Auto,
+            }),
+        },
+    })
+}
+
 /// OpenAI 客户端实现
 pub struct OpenAiClient {
     client: Client<OpenAIConfig>,
@@ -230,7 +381,12 @@ impl OpenAiClient {
             MessageRole::System => {
                 let content = match &message.content {
                     Some(MessageContent::Text { text }) => text.clone(),
-                    _ => return Err(anyhow::anyhow!("System message must have text content")),
+                    // 图片只支持 user 角色（库的 system content part 只有 text）
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "System message must have text content (images are only supported on user messages)"
+                        ))
+                    }
                 };
                 Ok(async_openai::types::chat::ChatCompletionRequestMessage::System(
                     async_openai::types::chat::ChatCompletionRequestSystemMessage {
@@ -244,12 +400,24 @@ impl OpenAiClient {
                     Some(MessageContent::Text { text }) => {
                         async_openai::types::chat::ChatCompletionRequestUserMessageContent::Text(text.clone())
                     }
-                    Some(MessageContent::Image { image_url }) => {
-                        // 图片内容暂时作为文本处理
-                        let image_text = format!("Image: {}", image_url.url);
-                        async_openai::types::chat::ChatCompletionRequestUserMessageContent::Text(image_text)
+                    Some(MessageContent::Image { image }) => {
+                        async_openai::types::chat::ChatCompletionRequestUserMessageContent::Array(vec![
+                            async_openai::types::chat::ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                                convert_image_source(image)?,
+                            ),
+                        ])
                     }
-                    _ => return Err(anyhow::anyhow!("User message must have text or image content")),
+                    Some(MessageContent::Parts { parts }) => {
+                        if parts.is_empty() {
+                            return Err(anyhow::anyhow!(
+                                "User message has empty content parts (nothing to send)"
+                            ));
+                        }
+                        async_openai::types::chat::ChatCompletionRequestUserMessageContent::Array(
+                            parts.iter().map(convert_content_part).collect::<Result<Vec<_>>>()?,
+                        )
+                    }
+                    _ => return Err(anyhow::anyhow!("User message must have text, image or parts content")),
                 };
                 Ok(async_openai::types::chat::ChatCompletionRequestMessage::User(
                     async_openai::types::chat::ChatCompletionRequestUserMessage {
@@ -262,7 +430,7 @@ impl OpenAiClient {
                 let content = match &message.content {
                     Some(MessageContent::Text { text }) => Some(async_openai::types::chat::ChatCompletionRequestAssistantMessageContent::Text(text.clone())),
                     None => None,
-                    _ => return Err(anyhow::anyhow!("Assistant message must have text content or no content")),
+                    _ => return Err(anyhow::anyhow!("Assistant message must have text content or no content (images are only supported on user messages)")),
                 };
                 let tool_calls = message.tool_calls.as_ref().map(|calls| {
                     calls.iter().map(|call| {
@@ -292,7 +460,7 @@ impl OpenAiClient {
                 let content = match &message.content {
                     Some(MessageContent::ToolResult { content, .. }) => async_openai::types::chat::ChatCompletionRequestToolMessageContent::Text(content.clone()),
                     Some(MessageContent::Text { text }) => async_openai::types::chat::ChatCompletionRequestToolMessageContent::Text(text.clone()),
-                    _ => return Err(anyhow::anyhow!("Tool message must have text or tool_result content")),
+                    _ => return Err(anyhow::anyhow!("Tool message must have text or tool_result content (images are only supported on user messages)")),
                 };
                 Ok(async_openai::types::chat::ChatCompletionRequestMessage::Tool(
                     async_openai::types::chat::ChatCompletionRequestToolMessage {
@@ -589,8 +757,11 @@ impl OpenAiClient {
 
 #[async_trait]
 impl AiClient for OpenAiClient {
-    async fn chat_completion(&self, request: ChatCompletionRequest) -> Result<ChatCompletionResponse> {
+    async fn chat_completion(&self, mut request: ChatCompletionRequest) -> Result<ChatCompletionResponse> {
         info!("Sending request to OpenAI API");
+
+        // 本地图片读盘 + base64（在重试循环之外，只做一次）
+        resolve_local_images(&mut request).await?;
         
         let chat_request = self.convert_request(&request)?;
         let req_json = serde_json::to_value(&chat_request)?;
@@ -623,6 +794,9 @@ impl AiClient for OpenAiClient {
         
         let mut stream_request = request;
         stream_request.stream = true;
+
+        // 本地图片读盘 + base64（在重试循环之外，只做一次）
+        resolve_local_images(&mut stream_request).await?;
         
         let chat_request = self.convert_request(&stream_request)?;
         let req_json = serde_json::to_value(&chat_request)?;
@@ -1028,6 +1202,312 @@ mod tests {
             other => panic!("unexpected content: {:?}", other),
         }
         assert_eq!(msg.reasoning_content.as_deref(), Some("分析中"));
+    }
+
+    // ─── 多模态：图片 → content array ──────────────────────────────
+
+    use async_openai::types::chat::{
+        ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
+        ChatCompletionRequestUserMessageContentPart,
+    };
+    use planned_agent_core::ai::types::ImageDetail;
+
+    fn test_client() -> OpenAiClient {
+        OpenAiClient::new(OpenAiClientConfig {
+            api_key: "test-key".into(),
+            model: "test-model".into(),
+            base_url: None,
+            default_temperature: None,
+            default_max_tokens: None,
+            organization: None,
+            thinking_config: None,
+        })
+    }
+
+    /// 临时图片路径（进程 id + 时间戳，避免并发测试互踩）。
+    fn temp_image_path(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "pa_ai_openai_{}_{}_{}.png",
+            tag,
+            std::process::id(),
+            nanos
+        ))
+    }
+
+    fn user_request(content: MessageContent) -> ChatCompletionRequest {
+        ChatCompletionRequest {
+            model: "test-model".into(),
+            messages: vec![Message {
+                role: MessageRole::User,
+                content: Some(content),
+                ..Default::default()
+            }],
+            tools: None,
+            temperature: None,
+            max_tokens: None,
+            stream: false,
+            extra: HashMap::new(),
+        }
+    }
+
+    /// 取转换后 User 消息的 `Array` 内容（并在形态不符时 panic）。
+    fn expect_user_parts(
+        converted: ChatCompletionRequestMessage,
+    ) -> Vec<ChatCompletionRequestUserMessageContentPart> {
+        match converted {
+            ChatCompletionRequestMessage::User(u) => match u.content {
+                ChatCompletionRequestUserMessageContent::Array(parts) => parts,
+                other => panic!("expected Array content, got {other:?}"),
+            },
+            other => panic!("expected User message, got {other:?}"),
+        }
+    }
+
+    /// 纯文本不回归：仍是 `content: "..."`，不变成 array。
+    #[test]
+    fn user_text_message_still_plain_string() {
+        let client = test_client();
+        let req = user_request(MessageContent::Text { text: "你好".into() });
+        match client.convert_message(&req.messages[0]).unwrap() {
+            ChatCompletionRequestMessage::User(u) => match u.content {
+                ChatCompletionRequestUserMessageContent::Text(t) => assert_eq!(t, "你好"),
+                other => panic!("expected plain text, got {other:?}"),
+            },
+            other => panic!("expected User message, got {other:?}"),
+        }
+    }
+
+    /// 图文混排 + 本地文件：读盘 → base64 `data:` URL，与文本拼成 content array。
+    #[tokio::test]
+    async fn user_parts_text_plus_local_image_becomes_content_array() {
+        let client = test_client();
+        let path = temp_image_path("parts");
+        let png_bytes: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
+        std::fs::write(&path, png_bytes).unwrap();
+
+        let mut req = user_request(MessageContent::Parts {
+            parts: vec![
+                ContentPart::Text {
+                    text: "这张图里有什么？".into(),
+                },
+                ContentPart::Image {
+                    image: ImageSource::File {
+                        path: path.clone(),
+                        detail: Some(ImageDetail::Auto),
+                    },
+                },
+            ],
+        });
+
+        resolve_local_images(&mut req).await.unwrap();
+        let converted = client.convert_message(&req.messages[0]).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        let parts = expect_user_parts(converted);
+        assert_eq!(parts.len(), 2);
+        match &parts[0] {
+            ChatCompletionRequestUserMessageContentPart::Text(t) => {
+                assert_eq!(t.text, "这张图里有什么？")
+            }
+            other => panic!("expected text part, got {other:?}"),
+        }
+        match &parts[1] {
+            ChatCompletionRequestUserMessageContentPart::ImageUrl(img) => {
+                assert!(
+                    img.image_url.url.starts_with("data:image/png;base64,"),
+                    "url={}",
+                    img.image_url.url
+                );
+                use base64::Engine as _;
+                let b64 = img
+                    .image_url
+                    .url
+                    .trim_start_matches("data:image/png;base64,");
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .unwrap();
+                assert_eq!(decoded, png_bytes);
+                assert!(matches!(
+                    img.image_url.detail,
+                    Some(async_openai::types::chat::ImageDetail::Auto)
+                ));
+            }
+            other => panic!("expected image part, got {other:?}"),
+        }
+    }
+
+    /// `http(s)` URL 变成 image part，**不再**降级成 `"Image: {url}"` 文本。
+    #[test]
+    fn http_image_url_becomes_image_part_not_text() {
+        let client = test_client();
+        let req = user_request(MessageContent::Image {
+            image: ImageSource::Url {
+                url: "https://example.com/a.png".into(),
+                detail: None,
+            },
+        });
+        let parts = expect_user_parts(client.convert_message(&req.messages[0]).unwrap());
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            ChatCompletionRequestUserMessageContentPart::ImageUrl(img) => {
+                assert_eq!(img.image_url.url, "https://example.com/a.png");
+                assert!(img.image_url.detail.is_none());
+            }
+            other => panic!("image 不得降级为文本，got {other:?}"),
+        }
+    }
+
+    /// 已经是 `data:` 的 URL 原样透传（不读盘、不改写）。
+    #[test]
+    fn existing_data_url_passes_through() {
+        let client = test_client();
+        let url = "data:image/jpeg;base64,AAAA";
+        let req = user_request(MessageContent::Image {
+            image: ImageSource::Url {
+                url: url.into(),
+                detail: None,
+            },
+        });
+        let parts = expect_user_parts(client.convert_message(&req.messages[0]).unwrap());
+        match &parts[0] {
+            ChatCompletionRequestUserMessageContentPart::ImageUrl(img) => {
+                assert_eq!(img.image_url.url, url)
+            }
+            other => panic!("expected image part, got {other:?}"),
+        }
+    }
+
+    /// detail 映射：core `Low/High/Auto` → 库同名变体。
+    #[test]
+    fn image_detail_is_mapped() {
+        let client = test_client();
+        let req = user_request(MessageContent::Image {
+            image: ImageSource::Url {
+                url: "https://example.com/a.png".into(),
+                detail: Some(ImageDetail::High),
+            },
+        });
+        let parts = expect_user_parts(client.convert_message(&req.messages[0]).unwrap());
+        match &parts[0] {
+            ChatCompletionRequestUserMessageContentPart::ImageUrl(img) => assert!(matches!(
+                img.image_url.detail,
+                Some(async_openai::types::chat::ImageDetail::High)
+            )),
+            other => panic!("expected image part, got {other:?}"),
+        }
+    }
+
+    /// 未解析的 `File` 走到转换 → 内部错误（防预处理被绕过，防静默降级）。
+    #[test]
+    fn unresolved_file_source_is_internal_error() {
+        let client = test_client();
+        let req = user_request(MessageContent::Image {
+            image: ImageSource::File {
+                path: std::path::PathBuf::from(r"D:\nope\a.png"),
+                detail: None,
+            },
+        });
+        let err = client
+            .convert_message(&req.messages[0])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("was not resolved"), "unexpected error: {err}");
+    }
+
+    /// 文件不存在 → Err，不静默丢图；错误链里带消息定位。
+    #[tokio::test]
+    async fn missing_local_image_errors() {
+        let path = temp_image_path("missing");
+        let mut req = user_request(MessageContent::Image {
+            image: ImageSource::File {
+                path: path.clone(),
+                detail: None,
+            },
+        });
+        let err = resolve_local_images(&mut req).await.unwrap_err();
+        // `{:#}` 打印完整 cause 链（`to_string()` 只给最外层 context）
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("cannot read local image"),
+            "unexpected error: {chain}"
+        );
+        assert!(chain.contains("message[0]"), "缺少消息定位: {chain}");
+    }
+
+    /// 扩展名不在白名单 → Err；白名单映射正确（含大小写）。
+    #[tokio::test]
+    async fn unsupported_image_extension_errors() {
+        let path = temp_image_path("bad").with_extension("txt");
+        std::fs::write(&path, b"not an image").unwrap();
+        let err = local_image_to_data_url(&path).await.unwrap_err().to_string();
+        std::fs::remove_file(&path).ok();
+        assert!(
+            err.contains("unsupported local image extension"),
+            "unexpected error: {err}"
+        );
+
+        assert_eq!(image_mime_of(std::path::Path::new("a.PNG")), Some("image/png"));
+        assert_eq!(
+            image_mime_of(std::path::Path::new("a.jpeg")),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            image_mime_of(std::path::Path::new("a.webp")),
+            Some("image/webp")
+        );
+        assert_eq!(image_mime_of(std::path::Path::new("a.gif")), Some("image/gif"));
+        assert_eq!(image_mime_of(std::path::Path::new("a.bmp")), None);
+    }
+
+    /// 超过 20 MB 上限 → Err（纯函数，避免真造 20 MB 文件）。
+    #[test]
+    fn oversized_image_errors() {
+        let path = std::path::Path::new("big.png");
+        assert!(check_image_size(MAX_IMAGE_BYTES, path).is_ok());
+        let err = check_image_size(MAX_IMAGE_BYTES + 1, path)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("too large"), "unexpected error: {err}");
+    }
+
+    /// 空 `Parts` 会被拒（`Array([])` 发出去只会吃 400）。
+    #[test]
+    fn empty_parts_is_rejected() {
+        let client = test_client();
+        let req = user_request(MessageContent::Parts { parts: vec![] });
+        let err = client
+            .convert_message(&req.messages[0])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("empty content parts"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// 图片只支持 user 角色：System 携带图片 → 明确报错（而不是含混的 "must have text"）。
+    #[test]
+    fn image_on_system_role_is_rejected() {
+        let client = test_client();
+        let msg = Message {
+            role: MessageRole::System,
+            content: Some(MessageContent::Image {
+                image: ImageSource::Url {
+                    url: "https://example.com/a.png".into(),
+                    detail: None,
+                },
+            }),
+            ..Default::default()
+        };
+        let err = client.convert_message(&msg).unwrap_err().to_string();
+        assert!(
+            err.contains("only supported on user messages"),
+            "unexpected error: {err}"
+        );
     }
 }
 

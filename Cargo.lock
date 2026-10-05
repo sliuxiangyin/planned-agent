@@ -5955,6 +5955,7 @@ dependencies = [
  "anyhow",
  "async-openai 0.41.3",
  "async-trait",
+ "base64 0.22.1",
  "futures",
  "planned-agent-core",
  "serde",
