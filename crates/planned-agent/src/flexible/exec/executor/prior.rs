@@ -81,6 +81,7 @@ pub(super) fn placeholder_record(
         tool_calls: 0,
         tool_sequence: vec![],
         rounds: 0,
+        llm_retries: 0,
         call_usages: vec![],
         output_summary: None,
         output: None,

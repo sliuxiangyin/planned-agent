@@ -259,11 +259,33 @@ session_id = `{{ session_id }}`。参数含 `session_id` / `host_session_id` 时
    能抓出 TOML 转义这类**只在运行期才炸**的错误（见
    `crates/agent-gui/src/pages/plan/flexible/step_callback/mod.rs` 的测试）。
    它**只验语法，验不了路由**。
-3. ⚠️ **人工过场景**（路由是模型行为，测试覆盖不到）：
-   - 有 `steps` + 纯闲聊 / 提问 → 不得进 C、不得进 clarify；
-   - 有 `steps` + 「改成…」 → 进 C；
-   - 「重做第 2 步」 → 进 B，且步骤序号解析正确（验证 §5.4 步骤名词表的取舍，见 §7-Q1）；
-   - 无 `steps` + 任意 → 进 A。
+3. ⚠️ **人工过场景**（路由是模型行为，`flexible_prompts_load_through_file_manager` 只验 TOML 语法，验不了路由）。
+
+   **判定方式**：看日志里的 `Routing sub agent (streamed): <name>`（**只对 6 个 step 子 agent 打**；`flexible_state` 不是子 agent，没有这条），再配合 `[round] [N] Assistant:` 的回复文案交叉确认。
+
+   > ⚠️ **别用 `ToolCallStart` 判定**：2026-10-05 实测该事件**严重漏记**（整场只落了 6 条，实际工具调用远多于此）。
+   > 更硬的旁证是**轮数**：一次对话若调了 k 个工具，就会有 k+1 次 `RoundStart`。
+
+   **准备**：先造一份可复现的测试数据（`$env:USERPROFILE\Downloads\flex-test`，放 3 个 `.log` + `notes.txt` + `report.csv` + 一个空目录），再发下面的建场文案走完入口 A，得到一个 3 步计划的会话。**别拿真实工作流当测试床**（S4 会真的改 `steps`）。
+
+   | # | 状态 | 测试文案 | 期望工具 | 失败信号 |
+   |---|---|---|---|---|
+   | S1 | 新会话（无 steps） | 「帮我整理 `C:\Users\<你>\Downloads\flex-test` 目录：找出里面所有 `.log` 文件，把每个文件里的 `ERROR` 行汇总；然后建一个 `logs` 子目录，把所有 `.log` 移动进去；最后把汇总写成 `error-summary.md` 放在该目录下」 | `flexible_state` → `flexible_clarify` | 直接调 plan / parameterize |
+   | **S2** | 有 steps | 「这个计划如果改成先备份再移动，会不会更稳？」 | `flexible_state` → **无 step 工具**（只自然语言回应 + 末尾问「要不要我按这个改？」） | 调了 `flexible_revise`（**入口 D 被误判成 C** ← 头号回归点） |
+   | S3 | 有 steps | 「今天天气不错啊」 | **无 step 工具**（归 §五 入口 D，自然回应） | 调了 `flexible_revise` / 产物被改 |
+   | S4 | 有 steps | 「把第 1 步改成只统计 ERROR 的条数，不用把每行都抄出来」 | `flexible_state` → `flexible_revise` | 调了 `flexible_clarify`（**危险**，会清掉 `steps`）或 `flexible_plan` |
+   | S5-a | 有 steps | 「重新做参数化」 | `flexible_state` → `flexible_parameterize` | 调了 `flexible_revise` / `flexible_clarify` |
+   | S5-b | 有 steps | 「重做第 2 步」 | **先问一句要动哪一步**（本轮不调 step 工具） | 直接调 `flexible_plan` / 猜错档位 |
+
+   选 S1 这个需求的原因：能自然展开成 **3 步**，且每步都落在真实内置工具上（`search_files` → `read_text_file` / `text_search` → `create_directory` + `move_file` → `write_file`）；文件个数不固定，参数化也有料可抽。S4 会改 `steps`，故排在 S2 / S3 之后。
+
+   **通过判据**：只看工具名对不对；S2 / S3 额外确认产物未被改（`flexible_state` 回来的 `current_step` 不变）。
+   每条消息**等它跑完**再做下一条 —— 用户插话是排队的，否则日志会串。
+
+   > **2026-10-05 实测修正**：S3 原期望「走 A → `flexible_clarify` 判 `ignored`」**已作废**。
+   > 实测模型把它归到了 **D**（闲聊自然回应 + 主动接回模板话题），体验明显更好 ——
+   > 根因是 §一（闲聊归 A）与 §五 D（没提改动就不调 step 工具）互相冲突。
+   > 已修 §一：闲聊改归 **D**，A 行只保留「取消」。
 
 ---
 
@@ -276,5 +298,30 @@ session_id = `{{ session_id }}`。参数含 `session_id` / `host_session_id` 时
 | Q3 | 第一阶段落地方式 | **整篇重写** |
 | Q4 | 第二阶段是否立项 | **暂不**，先做第一阶段 |
 
-**回归待办**：§6 第 3 条列出的 4 个人工场景尚未执行 ——
-路由是模型行为，`flexible_prompts_load_through_file_manager` 只验语法（已过）。
+**回归结果（2026-10-05 实测，S2–S5）**：
+
+| # | 期望 | 实测 | 结论 |
+|---|---|---|---|
+| S2 | 无 step 工具 | 无任何工具（仅 1 轮） | ✅ 通过（头号回归点） |
+| S3 | `flexible_clarify` | 无 step 工具（归 D） | ⚠️ 不符，但**更优** → 见下 |
+| S4 | `flexible_revise` | `flexible_revise` | ✅ 通过 |
+| S5-a | `flexible_parameterize` | `flexible_parameterize` | ✅ 通过 |
+| S5-b | `flexible_plan` | `flexible_parameterize` | ❌ 不符 |
+
+**实测逼出两处 prompt 缺陷（已修）**：
+
+1. **§一 ↔ §五 冲突**（闲聊归属）：模型选 D（更自然）而非 §一 的 A。
+   → 修 §一 表格：闲聊并入 D，A 行只留「取消」；判据行同步改为
+   「提新要求 → C；没有新要求（评价 / 讨论 / 闲聊）→ D；只有明确取消才走 A」。
+2. **§三「第 N 步 = `steps` 数组第 N 项」是错规则**：
+   - S4 用户说「第 **1** 步」但描述的是汇总那步，模型**按语义**改了 `#E2`（**改对了**，却违背字面规则）；
+   - S5-b「重做第 2 步」**纯序号、无语义线索** → 模型猜成 `flexible_parameterize`（**猜错**）。
+   → 修 §三 第 1 条：说明「第 N 步」有两套所指（总表**流程档** vs `steps` **业务步骤**），
+   以描述匹配为准、序号只作参考；**只有序号且判断不出时先确认再调用**。
+
+**安全性总结**：三条危险路径均未踩 —— S2 没落改、S4 没误触 `flexible_clarify`（会清 `steps`）、
+S5-b 没误触 `flexible_plan`（会重造骨架）。
+
+**测试场提醒**：本次用的是**复用场**（`02:28:18` 加载了 16 条历史，`02:29` 执行时 `.log` 已在
+`logs/` 下、根目录已空并残留上一轮的 `move_logs.ps1`），故 **S1 建场未在这份日志里发生**；
+下次重跑 S1 前需先还原测试数据。

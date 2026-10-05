@@ -313,13 +313,17 @@ graph TB
 
 messages = [ system(prompt.rs), user(步骤描述) ]
 loop {
-    rounds += 1
-    resp = ai.chat_completion(messages, tools)   // 非流式
-    记一条 CallUsage(round = rounds) → 累加为本步 tokens
+    rounds += 1                                  // 空回答重发**不占**轮数
+    resp = request_llm(messages, tools)          // 非流式；超时 / 超时重试 / 取消即时都在这里面
+    记一条 CallUsage(round = rounds, retry = 本轮第几次请求) → 累加为本步 tokens
     emit StepThought(思考文本，非空时)
 
     if resp 无 tool_calls {
-        本步输出 = resp 正文
+        if 正文与思考均为空白 {                    // 「空回答」= 无效响应，不是终态失败
+            未达 llm_empty_retries → 重发**同一条请求**（messages 未变、不占轮数）并 continue
+            已用尽 → 本步失败（错误文本带「已重发 N 次」与 finish_reason）
+        }
+        本步输出 = resp 正文（无正文才退回思考）
         break
     }
     if rounds >= cfg.max_rounds_per_step { 本步失败 }   // 末轮仍要调工具 → 判失败
@@ -453,7 +457,7 @@ loop {
 - [x] ✅ **3.2 测试桩 `FakeAiClient`**（`#[cfg(test)]`）：按脚本返回预设响应（含 `tool_calls`）
   - 验收：能驱动「无工具直接收敛」与「两轮工具调用」两种脚本
 - [x] ✅ **3.3 `flexible/step.rs`**：`run_step()` —— 工具循环 + 耗时 + token
-  - 覆盖用例：① 无 `tool_calls` 直接收敛；② 一轮工具调用后收敛；③ 超 `max_rounds_per_step` 判定失败；④ 工具 `is_error` 结果仍回灌；⑤ `call_usages.len() == rounds`；⑥ 步骤级 token 等于各轮之和
+  - 覆盖用例：① 无 `tool_calls` 直接收敛；② 一轮工具调用后收敛；③ 超 `max_rounds_per_step` 判定失败；④ 工具 `is_error` 结果仍回灌；⑤ `call_usages.len() == rounds + llm_retries`（空回答重发各记一条、**不占**轮数，见 hardening 稿 A6）；⑥ 步骤级 token 等于各轮之和
   - 验收：上述 6 个用例全绿
 
 ### 阶段 4 — 总编排与挂载 ✅

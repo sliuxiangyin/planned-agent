@@ -173,8 +173,11 @@
         assert_eq!(result.output.as_deref(), Some("完成"));
         assert_eq!(result.record.rounds, 1);
         assert_eq!(result.record.tool_calls, 0);
-        // ⑤ 单次明细条数 == 轮数
-        assert_eq!(result.record.call_usages.len(), result.record.rounds);
+        // ⑤ 单次明细条数 == 轮数 + 空回答重发次数（本例无重发）
+        assert_eq!(
+            result.record.call_usages.len(),
+            result.record.rounds + result.record.llm_retries
+        );
         // ⑥ 步骤级 token == 各轮之和
         assert_eq!(result.record.prompt_tokens, 10);
         assert_eq!(result.record.completion_tokens, 5);
@@ -350,9 +353,12 @@
     }
 
     /// 空产出（既无正文也无思考）不能被当成功 —— 否则空串会进 store 传给下游。
+    ///
+    /// A6：空回答先按**同一条请求**重发 `llm_empty_retries` 次（默认 1），仍空才判失败。
     #[tokio::test]
     async fn empty_answer_marks_step_failed() {
-        let ai = FakeAiClient::new(vec![text_response("", 10, 5)]);
+        // 首发 + 1 次重发都用尽，仍然空
+        let ai = FakeAiClient::new(vec![text_response("", 10, 5), text_response("", 10, 5)]);
         let (registry, _tool) = registry_with("noop", json!("x"), false);
         let step_def = step("#E1");
         let sink = RecordingSink::default();
@@ -380,12 +386,104 @@
             result.output.is_none(),
             "空产出不该进 store（否则会传给下游 prior）"
         );
-        assert!(result
-            .record
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("未产出内容"));
+        // 重发**不占**轮数：仍然是第 1 轮，只是多发了 1 次请求
+        assert_eq!(result.record.rounds, 1);
+        assert_eq!(result.record.llm_retries, 1);
+        assert_eq!(result.record.call_usages.len(), 2);
+        let error = result.record.error.as_deref().unwrap_or_default();
+        assert!(error.contains("未产出内容"), "错误应说明空产出：{error}");
+        assert!(error.contains("已重发 1 次"), "错误应体现重发次数：{error}");
+    }
+
+    /// A6：provider 偶发空响应不该让整步失败 —— 同一轮重发**同一条请求**即可自愈。
+    #[tokio::test]
+    async fn empty_answer_retried_then_succeeds() {
+        let ai = FakeAiClient::new(vec![
+            text_response("", 10, 5),
+            text_response("重发后的产出", 60, 7),
+        ]);
+        let (registry, _tool) = registry_with("noop", json!("x"), false);
+        let step_def = step("#E1");
+        let sink = RecordingSink::default();
+
+        let result = run_step(
+            prompt::STEP_SYSTEM_PROMPT,
+            StepInput {
+                step: &step_def,
+                intent: "做事",
+                expected_output: "做完",
+                prior: &[],
+                tools: &[],
+                index: 1,
+            },
+            &(ai.clone() as Arc<dyn AiClient>),
+            &registry,
+            &cfg(MAX_ROUNDS),
+            &sink,
+            None,
+        )
+        .await;
+
+        assert_eq!(result.record.status, StepStatus::Done);
+        assert_eq!(result.output.as_deref(), Some("重发后的产出"));
+        assert_eq!(result.record.rounds, 1, "重发不占轮数");
+        assert_eq!(result.record.llm_retries, 1);
+        // 每次请求各记一条：1 次首发 + 1 次重发
+        assert_eq!(
+            result.record.call_usages.len(),
+            result.record.rounds + result.record.llm_retries
+        );
+        assert_eq!(result.record.prompt_tokens, 70);
+        assert_eq!(result.record.completion_tokens, 12);
+        // 关键：重发的确实是**同一条请求**（`messages` 一字未动）—— 否则工具可能被重复触发。
+        // `Message` 未必实现 `PartialEq`，所以比对 Debug 渲染。
+        let requests = ai.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            format!("{:?}", requests[0].messages),
+            format!("{:?}", requests[1].messages),
+            "重发必须复用同一份上下文"
+        );
+    }
+
+    /// A6：关闭重发（`llm_empty_retries = 0`）时与改造前逐字等价。
+    #[tokio::test]
+    async fn empty_retries_disabled_fails_immediately() {
+        let ai = FakeAiClient::new(vec![text_response("", 10, 5)]);
+        let (registry, _tool) = registry_with("noop", json!("x"), false);
+        let step_def = step("#E1");
+        let sink = RecordingSink::default();
+        let config = ExecutorConfig {
+            llm_empty_retries: 0,
+            ..cfg(MAX_ROUNDS)
+        };
+
+        let result = run_step(
+            prompt::STEP_SYSTEM_PROMPT,
+            StepInput {
+                step: &step_def,
+                intent: "做事",
+                expected_output: "做完",
+                prior: &[],
+                tools: &[],
+                index: 1,
+            },
+            &(ai as Arc<dyn AiClient>),
+            &registry,
+            &config,
+            &sink,
+            None,
+        )
+        .await;
+
+        assert_eq!(result.record.status, StepStatus::Failed);
+        assert_eq!(result.record.llm_retries, 0);
+        assert_eq!(result.record.call_usages.len(), 1);
+        // 文案保持改造前的原文（不带「已重发」）
+        assert_eq!(
+            result.record.error.as_deref(),
+            Some("模型未产出内容（空回答）")
+        );
     }
 
     /// 取消应在下一次检查点终止本步。

@@ -39,6 +39,7 @@ pub(super) fn resolve_failed_record(index: usize, error: String) -> StepRunRecor
         tool_calls: 0,
         tool_sequence: vec![],
         rounds: 0,
+        llm_retries: 0,
         call_usages: vec![],
         output_summary: None,
         output: None,

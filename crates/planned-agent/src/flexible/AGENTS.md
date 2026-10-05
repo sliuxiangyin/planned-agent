@@ -226,6 +226,12 @@ cargo test -p planned-agent-gui --bins            # 宿主侧（消费方）
 11. **超时语义**：`llm_timeout` 是「**一次 `chat_completion` 调用**」的墙钟上限（含 ai-openai 内层重试），
     **不是**整步 / 整次超时；`llm_timeout_retries` **只重试超时**（其它失败在下层已重试，再叠加会倍数放大）
     —— `exec/executor/config.rs:47-57`。
+    **空回答重发**（`llm_empty_retries`，默认 1）是**另一条独立的线**：管「**拿到了响应但没有内容**」
+    （provider 空响应 / 推理预算耗尽；空回答是 HTTP 200，内层重试覆盖不到）。重发的是**同一条请求**
+    （messages 未变 ⇒ 不重复执行工具，对比「整步重跑」会），**不占** `rounds`，故
+    `call_usages.len() == rounds + llm_retries`；用尽后该步 `Failed`，理由带「已重发 N 次」
+    （hardening 稿 A6，`exec/step/mod.rs`）。诊断：空回答的 WARN 带 `finish_reason`，用于区分
+    「provider 空响应」与「被 `max_tokens` 截断」。
 12. **GUI 有 `placeholder` 的镜像实现**：`crates/agent-gui/src/pages/plan/flexible/placeholder.rs`。
     两份 `validate` **签名不同**（本目录版 `(steps, inputs)` 只校验 `steps`；GUI 版
     `(steps, schema, inputs)` 还覆盖 `output_schema` 的 `goal`/`success`/`format`，**落库走 GUI 那份**）。

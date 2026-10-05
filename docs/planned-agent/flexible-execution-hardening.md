@@ -43,6 +43,7 @@ A 组执行正确性、B 组执行状态机、C 组工具收窄（不落库部�
 | 批次 | 内容 | 状态 | 理由 |
 |---|---|---|---|
 | **P0** | C1（工具序列进报告）、A1、A2 | A1 ✅ · A2 ✅ · C1 ✅ | C1 零风险且是后续一切观测的前提；A1/A2 是硬缺陷 |
+| **P0+** | A6（空回答先重发再判失败，A2 的追加修正） | A6 ✅（2026-10-04） | 实测一次 2.4s 的空响应作废整次执行（见 A6） |
 | **P1** | D1、D2、B1a（取消即时）、B1b（超时 + 超时重试） | B1a ✅ · B1b ✅ · D1/D2 未做 | 确定性守卫 + 一个真实卡死风险 |
 | **P2** | A3、A4、A5、B2、C2、C3 | A3 ✅ · A4 ✅ · A5 ✅ · 其余未做 | 语义/预算类，需先定参数 |
 | **P3** | B3、B4、D3、C4 | B3 ✅ · 其余未做 | 动 UI / 动其它 crate / 只是文档约定 |
@@ -74,6 +75,33 @@ A 组执行正确性、B 组执行状态机、C 组工具收窄（不落库部�
 - **设计**：收敛分支先判 `answer.trim().is_empty()` —— 空则 `error = Some("模型未产出内容（空回答）")`、`output` 保持 `None`（→ `Failed`）。
 - **连带**：`deliverable_output`（`executor.rs:412-421`）按「有键」取交付输出，A2 保证 store 里不再出现空串，故**不必改**；但需在代码注释里写明这一依赖关系。
 - **验收**：`FakeAiClient` 返回空 content + 空 reasoning → 该步 `status == Failed`、`report.result == None`。
+
+#### A6（高）空回答立刻判该步失败 → 改为先重发  ✅ 已完成（2026-10-04）
+
+> **本项是 A2 的追加修正**：A2「空产出不能当成功」这条**不变**，改的是「空回答」出现时**先重发再判失败**。
+
+- **实测证据（2026-10-04，会话 `7e74bb00` run_id=1）**：step3 round1 已 `builtin_write_file` 写出脚本，
+  round2 模型返回**空回答**（无正文、无思考、无工具调用，**2.4s** 就返回）→ A2 守卫直接判 `Failed` →
+  其后每步 `Skipped` → 整次 `Failed`。一次瞬时空响应作废了已完成的 2 步（48.4s、prompt_tokens 134,680），
+  用户唯一手段是**重跑整次**（run_id=2）。
+- **设计**：把「空回答」从「终态失败」改为**可重发的无效响应** ——
+  **同一轮内重发同一条请求**（messages 一字不动），每轮最多 `ExecutorConfig::llm_empty_retries` 次（默认 1）；
+  用尽后仍空 → 仍按 A2 判 `Failed`，错误文案带「已重发 N 次」。
+- **为什么只做这一层（关键）**：重发的是**请求**，不是**步骤**。工具已执行、结果已回灌，
+  所以重发**不会重复执行有副作用的工具**；「整步重跑」会 —— 同一次实测里它会把 `move_logs.ps1` 再写一遍。
+- **与既有重试正交**：`llm_timeout_retries`（B1b）管「**没拿到响应**」，本项管「**拿到了但没有内容**」，
+  计数独立、日志独立。注意空回答是 **HTTP 200 的成功响应**，`ai-openai` 内层重试根本覆盖不到。
+- **不占轮数**：重发**不增加** `rounds`（否则 `max_rounds_per_step` 语义被污染），另记
+  `StepRunRecord::llm_retries`；`CallUsage` 增 `retry` 字段（同一轮内的第几次请求）。
+  不变式因此由 `call_usages.len() == rounds` 改为 **`== rounds + llm_retries`**。
+- **诊断（同批做，否则无法验证效果）**：空回答的 WARN 带 `finish_reason` / `completion_tokens`；
+  `ai-openai` 在「无 content + 无 tool_calls」时记一条 **debug** 摘要（截断原始 JSON）。
+  目的：把「provider 空响应」与「`max_tokens` 截断（`finish_reason: length`）」分开 —— 这次现场无从区分。
+- **明确不做**：整步重跑（副作用不可回滚）、拿工具输出冒充步骤产出（会把下游 `prior` 喂错数据）、
+  「从失败步继续」（需要新契约 + UI，单独排期）。
+- **验收**：`empty_answer_retried_then_succeeds`（第 1 次空 → 重发成功；`rounds == 1`、`llm_retries == 1`）、
+  `empty_answer_marks_step_failed`（连续空 → 用尽后 `Failed`，错误含重发次数）、
+  `empty_retries_disabled_fails_immediately`（`llm_empty_retries = 0` ⇒ 与改造前逐字等价）。
 
 #### A3（中）`dependencies` 指向不存在 / 未产出的引用被静默丢弃  ✅ 已完成（2026-09-28）
 

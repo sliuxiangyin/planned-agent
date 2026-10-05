@@ -20,6 +20,8 @@ pub const LOG_OUTPUT_MAX_CHARS: usize = 2_000;
 pub const DEFAULT_LLM_TIMEOUT_SECS: u64 = 180;
 /// 单次请求超时后的默认重试次数。
 pub const DEFAULT_LLM_TIMEOUT_RETRIES: usize = 1;
+/// 「空回答」的默认**重发**次数（每轮各自计算，见 `ExecutorConfig::llm_empty_retries`）。
+pub const DEFAULT_LLM_EMPTY_RETRIES: usize = 1;
 
 /// 执行器配置。
 #[derive(Debug, Clone)]
@@ -55,6 +57,18 @@ pub struct ExecutorConfig {
     /// 只重试超时：其它失败（4xx / 5xx / 网络）在 `ai-openai` 内部已按自己的策略重试过，
     /// 这一层再叠加会变成**倍数放大**。
     pub llm_timeout_retries: usize,
+    /// 「**空回答**」（既无正文也无思考、且无工具调用）的**重发**次数，**每轮各自计算**。
+    ///
+    /// 与 `llm_timeout_retries` **正交**：那条管「没拿到响应」，这条管「拿到了但没有内容」。
+    /// 空回答是 **HTTP 200 的成功响应**，`ai-openai` 内层重试覆盖不到，只能在这一层兜。
+    ///
+    /// 重发的是**同一条请求**（messages 一字不动）—— 工具已经执行、结果已回灌，
+    /// 所以重发**不会重复执行工具**（对比「整步重跑」会，见 hardening 稿 A6）。
+    /// 代价只是一次全量 prompt 请求。
+    ///
+    /// **不占** `max_rounds_per_step` 的轮数：另记 `StepRunRecord::llm_retries`
+    /// （`call_usages.len() == rounds + llm_retries`）。
+    pub llm_empty_retries: usize,
 }
 
 impl Default for ExecutorConfig {
@@ -69,6 +83,7 @@ impl Default for ExecutorConfig {
             spill_preview_chars: DEFAULT_SPILL_PREVIEW_CHARS,
             llm_timeout: Some(Duration::from_secs(DEFAULT_LLM_TIMEOUT_SECS)),
             llm_timeout_retries: DEFAULT_LLM_TIMEOUT_RETRIES,
+            llm_empty_retries: DEFAULT_LLM_EMPTY_RETRIES,
         }
     }
 }

@@ -227,6 +227,7 @@ impl FlexibleExecutor {
                 tracing::warn!(
                     step = index,
                     rounds = record.rounds,
+                    llm_retries = record.llm_retries,
                     tool_calls = record.tool_calls,
                     tools = %summarize_tools(&record.tool_sequence),
                     duration_ms = record.duration_ms,
@@ -240,6 +241,7 @@ impl FlexibleExecutor {
                     step = index,
                     status = ?record.status,
                     rounds = record.rounds,
+                    llm_retries = record.llm_retries,
                     tool_calls = record.tool_calls,
                     tools = %summarize_tools(&record.tool_sequence),
                     duration_ms = record.duration_ms,

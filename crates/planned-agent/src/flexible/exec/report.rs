@@ -24,6 +24,12 @@ pub enum StepStatus {
 pub struct CallUsage {
     /// 该步内的轮次序号（从 1 开始）。
     pub round: usize,
+    /// 同一轮内的第几次请求：`0` = 该轮首发，`n` = 该轮第 n 次**重发**（空回答重发）。
+    ///
+    /// 重发与首发在 `round` 上相同，所以 `call_usages.len()` **不再等于** `rounds`
+    /// （见 `StepRunRecord::rounds` / `llm_retries`）。
+    #[serde(default)]
+    pub retry: usize,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
 }
@@ -71,8 +77,18 @@ pub struct StepRunRecord {
     /// `#[serde(default)]` 让缺失该字段的旧 JSON 仍可解析。
     #[serde(default)]
     pub tool_sequence: Vec<ToolCallRecord>,
-    /// 该步的工具循环轮数（= `call_usages.len()`）。
+    /// 该步的工具循环轮数（工具调用驱动的轮数）。
+    ///
+    /// ⚠️ 与 `call_usages.len()` 的关系：`call_usages.len() == rounds + llm_retries`
+    /// （每一轮首发一条；空回答重发不占 `rounds`，只多出带 `retry > 0` 的条目）。
     pub rounds: usize,
+    /// 该步发生过的「空回答重发」总次数（0 = 从未重发）。
+    ///
+    /// 与 `llm_timeout_retries` 是**两条独立的线**：那条在 `request_llm` 内层自我消化、
+    /// 不记条目；这条每次都在 `call_usages` 里留一条。默认上限由
+    /// `ExecutorConfig::llm_empty_retries` 逐轮控制。
+    #[serde(default)]
+    pub llm_retries: usize,
     /// 单次（每轮 LLM 请求）token 明细。
     ///
     /// 循环每轮重发整个上下文，故第 N 轮的 `prompt_tokens` 含前 N-1 轮内容；
@@ -161,6 +177,7 @@ mod tests {
             tool_calls: 0,
             tool_sequence: vec![],
             rounds: 0,
+            llm_retries: 0,
             call_usages: vec![],
             output_summary: None,
             output: None,

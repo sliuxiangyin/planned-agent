@@ -460,7 +460,47 @@ impl OpenAiClient {
                 logprobs: None,
             }
         }).collect();
-        
+
+        // 诊断：整条响应「既无正文、也无思考、也无工具调用」—— 这正是上层（flexible 单步）
+        // 会判「空回答」的形态。此处**只留证据、不改行为**：`finish_reason` 是区分
+        // 「provider 空响应」与「被 max_tokens 截断（`length`）」的唯一线索，而两者处置
+        // 完全不同（前者重发即可，后者要动 `max_tokens`）。
+        if is_empty_assistant_response(&response) {
+            let raw = response
+                .choices
+                .iter()
+                .map(|choice| {
+                    let content = choice.message.content.as_deref().unwrap_or("");
+                    let reasoning = choice.message.reasoning_content.as_deref().unwrap_or("");
+                    let tool_calls = choice.message.tool_calls.as_ref().map(Vec::len).unwrap_or(0);
+                    format!(
+                        "index={} finish_reason={:?} content_chars={} \
+                         reasoning_chars={} tool_calls={tool_calls}",
+                        choice.index,
+                        choice.finish_reason,
+                        content.chars().count(),
+                        reasoning.chars().count()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" | ");
+            tracing::debug!(
+                model = %response.model,
+                choices = response.choices.len(),
+                completion_tokens = response
+                    .usage
+                    .as_ref()
+                    .map(|usage| usage.completion_tokens)
+                    .unwrap_or(0),
+                prompt_tokens = response
+                    .usage
+                    .as_ref()
+                    .map(|usage| usage.prompt_tokens)
+                    .unwrap_or(0),
+                "响应既无正文也无工具调用（空回答形态）—— 原始响应：{raw}"
+            );
+        }
+
         Ok(ChatCompletionResponse {
             id: response.id,
             object: response.object,
@@ -651,6 +691,34 @@ impl Clone for OpenAiClient {
     }
 }
 
+/// 一段可能缺省的文本是否「没有实质内容」（`None` 或全是空白）。
+///
+/// provider 返回 `""` / `"  \n"` 与 `null` 都应视为没有内容。
+fn is_blank_text(text: &Option<String>) -> bool {
+    text.as_deref().map_or(true, |text| text.trim().is_empty())
+}
+
+/// 整条响应是否「既无正文、也无思考、也无工具调用」。
+///
+/// 判定看**原始响应**字段（不看转换后的 `choices`）：转换会把空串的 `content` 折叠成
+/// `None`，所以必须以原始值为准。`choices` 本身为空**不算**「空回答」—— 那是另一种
+/// 异常（上层按「响应不含 choices」处理）。
+///
+/// 这条判据只用于**诊断日志**；真正决定「空回答」如何处置的是上层（`flexible` 单步的
+/// 空回答重发）。两边口径必须一致，故抽成函数、可测。
+fn is_empty_assistant_response(response: &CompatChatResponse) -> bool {
+    !response.choices.is_empty()
+        && response.choices.iter().all(|choice| {
+            is_blank_text(&choice.message.content)
+                && is_blank_text(&choice.message.reasoning_content)
+                && choice
+                    .message
+                    .tool_calls
+                    .as_ref()
+                    .is_none_or(|calls| calls.is_empty())
+        })
+}
+
 /// 把一段内容拆分为 `(reasoning, content)`。
 ///
 /// 兼容部分兼容提供商把思考内容以 `<think>...</think>` 标签写在 `content`
@@ -693,6 +761,41 @@ fn split_think_content(seg: &str, in_think: &mut bool) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 空回答诊断的判据：`null` 与空串 / 纯空白都算「空」；有正文 / 有思考 / 有工具调用都不算。
+    #[test]
+    fn empty_response_detection_covers_null_blank_and_non_empty() {
+        fn response(json: &str) -> CompatChatResponse {
+            serde_json::from_str(json)
+                .unwrap_or_else(|e| panic!("测试 JSON 应能解析为 CompatChatResponse: {e}"))
+        }
+
+        // 无正文（null）→ 空
+        assert!(is_empty_assistant_response(&response(
+            r#"{"id":"1","object":"chat.completion","created":0,"model":"MiniMax-M3","usage":null,
+                 "choices":[{"index":0,"message":{"role":"assistant","content":null},"finish_reason":"length"}]}"#
+        )));
+        // 空串 / 纯空白（provider 偶发）→ 同样算空
+        assert!(is_empty_assistant_response(&response(
+            r#"{"id":"1","object":"chat.completion","created":0,"model":"MiniMax-M3","usage":null,
+                 "choices":[{"index":0,"message":{"role":"assistant","content":"  \n"},"finish_reason":"stop"}]}"#
+        )));
+        // 有正文 → 不算空
+        assert!(!is_empty_assistant_response(&response(
+            r#"{"id":"1","object":"chat.completion","created":0,"model":"MiniMax-M3","usage":null,
+                 "choices":[{"index":0,"message":{"role":"assistant","content":"有内容"},"finish_reason":"stop"}]}"#
+        )));
+        // 只有思考内容 → 不算空（上层会把 reasoning 当产出）
+        assert!(!is_empty_assistant_response(&response(
+            r#"{"id":"1","object":"chat.completion","created":0,"model":"MiniMax-M3","usage":null,
+                 "choices":[{"index":0,"message":{"role":"assistant","reasoning_content":"想了一下"},"finish_reason":"stop"}]}"#
+        )));
+        // 有工具调用 → 不算空
+        assert!(!is_empty_assistant_response(&response(
+            r#"{"id":"1","object":"chat.completion","created":0,"model":"MiniMax-M3","usage":null,
+                 "choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"c1","function":{"name":"read","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#
+        )));
+    }
 
     /// 复现 MiniMax 返回 `finish_reason: ""`（空串）时，整块流不应解析失败，
     /// 空串应被宽容为 `None`。回归：修复前会抛 unknown variant 反序列化错误。

@@ -121,10 +121,12 @@ async fn run_step_with_prompt(
     // C1：工具序列 —— 与 `StepToolCall` 事件**同一处**采集（一处采集、两条出口）。
     let mut tool_sequence: Vec<ToolCallRecord> = Vec::new();
     let mut rounds = 0usize;
+    // 空回答**重发**的累计次数：**不占** `rounds`（见 `ExecutorConfig::llm_empty_retries`）。
+    let mut llm_retries = 0usize;
     let mut output: Option<String> = None;
     let mut error: Option<String> = None;
 
-    loop {
+    'step: loop {
         if is_cancelled(cancel) {
             tracing::info!(step = input.index, round = rounds, "收到取消信号，中止该步");
             error = Some("用户取消".to_string());
@@ -142,36 +144,46 @@ async fn run_step_with_prompt(
             extra: Default::default(),
         };
 
-        // 超时、超时重试、取消即时 都在 `request_llm` 里（见其文档）。
-        let response = match request_llm(ai, &request, cfg, cancel, input.index, rounds).await {
-            Ok(response) => response,
-            Err(reason) => {
-                error = Some(reason);
-                break;
-            }
-        };
+        // 本轮最多重发 `cfg.llm_empty_retries` 次（**不占** `rounds`）。每次重发都复用
+        // 同一条 `request`：`messages` 一字未动，工具已经执行、结果已回灌 ——
+        // 所以重发**不会重复执行工具**，只是让模型把这一轮的话重新说出来。
+        let mut retries_this_round = 0usize;
+        let (message, tool_calls) = loop {
+            // 超时、超时重试、取消即时 都在 `request_llm` 里（见其文档）。
+            let response = match request_llm(ai, &request, cfg, cancel, input.index, rounds).await {
+                Ok(response) => response,
+                Err(reason) => {
+                    error = Some(reason);
+                    break 'step;
+                }
+            };
 
-        // token 采集：每次请求记一条（缺失记 0，保证 call_usages.len() == rounds）
-        let (prompt_tokens, completion_tokens) = match response.usage {
-            Some(usage) => (usage.prompt_tokens, usage.completion_tokens),
-            None => (0, 0),
-        };
-        call_usages.push(CallUsage {
-            round: rounds,
-            prompt_tokens,
-            completion_tokens,
-        });
+            // token 采集：每次**请求**记一条（缺失记 0）。同一轮的首次请求 `retry = 0`，
+            // 空回答重发各记一条 `retry = 1..n` ⇒ `call_usages.len() == rounds + llm_retries`。
+            let (prompt_tokens, completion_tokens) = match response.usage {
+                Some(usage) => (usage.prompt_tokens, usage.completion_tokens),
+                None => (0, 0),
+            };
+            call_usages.push(CallUsage {
+                round: rounds,
+                retry: retries_this_round,
+                prompt_tokens,
+                completion_tokens,
+            });
 
-        let Some(choice) = response.choices.into_iter().next() else {
-            tracing::error!(
-                step = input.index,
-                round = rounds,
-                "LLM 响应不含 choices，该步失败"
-            );
-            error = Some("LLM 响应不含 choices".to_string());
-            break;
-        };
-        let message = choice.message;
+            let Some(choice) = response.choices.into_iter().next() else {
+                tracing::error!(
+                    step = input.index,
+                    round = rounds,
+                    "LLM 响应不含 choices，该步失败"
+                );
+                error = Some("LLM 响应不含 choices".to_string());
+                break 'step;
+            };
+            // 诊断用：`finish_reason` 是区分「provider 空响应」与「被 max_tokens 截断」的
+            // 唯一线索，必须在 `choice.message` 被 move 之前取出。
+            let finish_reason = choice.finish_reason;
+            let message = choice.message;
 
         let content = content_text(&message);
         let reasoning = message.reasoning_content.clone().unwrap_or_default();
@@ -188,30 +200,59 @@ async fn run_step_with_prompt(
             });
         }
 
-        let tool_calls = message.tool_calls.clone().unwrap_or_default();
-        if tool_calls.is_empty() {
-            // 收敛：优先用回答正文，没有正文才退回思考内容
-            let answer = if !content.is_empty() { content } else { reasoning };
-            // 空产出不能当成功：`Done` 的判据是「有产出」（见下方 status 计算），
-            // 若放一个空串进 store，下游 `prior` 会拿到空数据、甚至成为最终 result。
-            if answer.trim().is_empty() {
-                tracing::warn!(
+            let tool_calls = message.tool_calls.clone().unwrap_or_default();
+            if tool_calls.is_empty() {
+                // 收敛：优先用回答正文，没有正文才退回思考内容
+                let answer = if !content.is_empty() { content } else { reasoning };
+                // 空产出不能当成功：`Done` 的判据是「有产出」（见下方 status 计算），
+                // 若放一个空串进 store，下游 `prior` 会拿到空数据、甚至成为最终 result。
+                if answer.trim().is_empty() {
+                    // 空回答是「**无效响应**」而不是「终态失败」：provider 偶发空响应、
+                    // 推理预算耗尽被截断都会撞上（实测：一次 2.4s 的空响应让整次执行作废）。
+                    // 先按**同一条请求**重发 —— 不重复执行工具、不占轮数；仍空才判失败。
+                    if retries_this_round < cfg.llm_empty_retries {
+                        retries_this_round += 1;
+                        llm_retries += 1;
+                        tracing::warn!(
+                            step = input.index,
+                            round = rounds,
+                            attempt = retries_this_round,
+                            max_retries = cfg.llm_empty_retries,
+                            finish_reason = ?finish_reason,
+                            completion_tokens,
+                            "模型空回答（无正文 / 无思考 / 无工具调用），重发该轮请求"
+                        );
+                        continue;
+                    }
+                    tracing::warn!(
+                        step = input.index,
+                        round = rounds,
+                        retries = retries_this_round,
+                        finish_reason = ?finish_reason,
+                        completion_tokens,
+                        "模型既无正文也无思考内容（空回答），该步失败"
+                    );
+                    // 重发次数为 0（未开重发或已关闭）时保持**原文案**，改造前后观感一致。
+                    error = Some(if retries_this_round == 0 {
+                        "模型未产出内容（空回答）".to_string()
+                    } else {
+                        format!("模型未产出内容（空回答，已重发 {retries_this_round} 次）")
+                    });
+                    break 'step;
+                }
+                tracing::info!(
                     step = input.index,
-                    round = rounds,
-                    "模型既无正文也无思考内容（空回答），该步失败"
+                    rounds,
+                    output_chars = answer.chars().count(),
+                    "步骤产出完成（无工具调用）"
                 );
-                error = Some("模型未产出内容（空回答）".to_string());
-                break;
+                output = Some(answer);
+                break 'step;
             }
-            tracing::info!(
-                step = input.index,
-                rounds,
-                output_chars = answer.chars().count(),
-                "步骤产出完成（无工具调用）"
-            );
-            output = Some(answer);
-            break;
-        }
+
+            // 本轮拿到了工具调用 → 结束重发内层，交给外层执行工具
+            break (message, tool_calls);
+        };
 
         // 已达轮数上限：不再执行工具，直接判失败（避免无界循环）
         if rounds >= cfg.max_rounds_per_step {
@@ -343,6 +384,7 @@ async fn run_step_with_prompt(
             tool_calls: tool_call_count,
             tool_sequence,
             rounds,
+            llm_retries,
             call_usages,
             output_summary,
             output: record_output,
