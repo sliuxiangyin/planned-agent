@@ -5,6 +5,7 @@
 
 pub mod event;
 pub mod executor;
+pub mod recipe;
 pub mod report;
 pub mod step;
 

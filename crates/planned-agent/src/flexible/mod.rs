@@ -21,7 +21,8 @@
 //! │   ├── step/           单步执行（mod / llm / render）
 //! │   ├── prompt.rs       内置提示词常量
 //! │   ├── event.rs        进度事件 PlanRunEvent + PlanRunSink
-//! │   └── report.rs       执行报告 PlanRunReport / StepRunRecord
+//! │   ├── report.rs       执行报告 PlanRunReport / StepRunRecord
+//! │   └── recipe.rs       工具链记忆：反参数化 + 从报告提炼配方
 //! ├── run_service/        执行服务（宿主侧）：常驻循环 + 状态表 + 订阅
 //! └── testing.rs          测试桩（#[cfg(test)]）
 //! ```
@@ -44,6 +45,7 @@ pub use exec::executor::{
     ExecutorConfig, FlexibleExecutor, DEFAULT_CACHE_DIR, DEFAULT_LLM_TIMEOUT_RETRIES,
     DEFAULT_LLM_TIMEOUT_SECS, DEFAULT_SPILL_PREVIEW_CHARS, DEFAULT_SPILL_THRESHOLD_CHARS,
 };
+pub use exec::recipe::{recipes_from_report, shape_arguments, StepToolRecipe, ToolCallShape};
 pub use exec::report::{CallUsage, PlanRunReport, StepRunRecord, StepStatus, ToolCallRecord};
 pub use plan::output_schema::{OutputKind, OutputSchema};
 pub use plan::params::{render_step_expected_output, render_step_intent, PlanRunParams};

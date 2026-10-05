@@ -1,9 +1,12 @@
 # 工具链记忆（flexible）—— 从「上次成功的那条路」抄配方
 
-> 状态：**设计待审**（存储层已落地）。**已落地（2026-10-05）**：§6 的存储层两块 ——
-> `plans_flexible_sessions.revision` 迁移、`flexible_run_history` 建表（entity + repo +
-> 三处注册，含 3 个内联测试；`cargo test -p planned-agent-gui --bins` 93 例全绿）。
-> **其余未动**：`produce` 的 `bump_revision`、指纹比较、注入、开关。
+> 状态：**设计待审**（存储层 + 换版判据 + 提炼侧已落地）。**已落地（2026-10-05）**：
+> ① §6 的存储层两块 —— `plans_flexible_sessions.revision` 迁移、`flexible_run_history` 建表
+> （entity + repo + 三处注册，含 3 个内联测试；`cargo test -p planned-agent-gui --bins` 97 例全绿）；
+> ② §4.2 的换版判据 —— `save_snapshot` 比新旧 `steps` 算 `bump_revision`、`produce` 据此决定
+> `revision` 是否 `+1`（含 4 个内联测试）；③ §4.1/§5 的**提炼侧**（`flexible/exec/recipe.rs`）——
+> 反参数化 `shape_arguments` + 五条过滤规则 `recipes_from_report`（11 个内联单测）。
+> **其余未动**：写端口接线（`core.rs` 收尾）、注入（读）、学习开关。
 > 本文是 [`flexible-execution-improvements.md`](./flexible-execution-improvements.md) 的 **P2 细化稿**
 > （原稿 §5.5「成功配方」+ 条目 6/7/9），并且**改了原稿的一处默认**：载体从「写回模板字段」
 > 改为「**新建执行记录表**」（原稿 Q2/Q4/Q7 的默认建议被本轮拍板覆盖）。
@@ -80,7 +83,7 @@
 原样存 + 原样注入 → 本次参数换了文件，模型很可能**照抄旧路径**，把「减少弯路」变成「制造新错误」。
 这就是原稿 §11 那条风险的真正根因（「上次参数恰好对 → 被当成标准答案」）。
 
-**形状化算法**（纯函数，建议落 `flexible/plan/recipe.rs`）：
+**形状化算法**（纯函数，已落 `flexible/exec/recipe.rs`）：
 
 ```text
 输入：args_json: &str（实参原文）  +  params: &PlanRunParams
@@ -94,7 +97,8 @@
 ```
 
 - 反向替换是**新增**能力（`PlanRunParams` 现在只有正向 `render`，`plan/params.rs`）。
-  新函数建议与它同处或放 `recipe.rs`，**纯函数、可单测**（这是本仓库通行的做法）。
+  实现放 **`exec/recipe.rs`**（而非 `plan/recipe.rs`）：它消费 `PlanRunReport`（运行时类型），
+  放 `plan/` 会让「静态模板层」反向依赖运行时报告。`PlanRunParams::as_text_map` 已改 `pub(crate)`。
 - 形状化在**交给写端口之前**由内核完成（内核手上有 `params`，宿主不必重实现）。
 
 ### 4.2 表结构（宿主侧）
@@ -222,18 +226,20 @@ GUI 实现 → upsert flexible_run_history（UNIQUE(session_id, result_reference
 
 | 层 | 文件 | 改动 |
 |---|---|---|
-| 内核 · 新模块 | `flexible/plan/recipe.rs` | **新增**：`ToolStepRecipe` / 形状化（反参数化）/ 渲染注入文本；纯函数 + 单测 |
-| 内核 | `flexible/plan/params.rs` | 反向替换所需的值表访问（只读，不破坏现有 API） |
-| 内核 | `flexible/mod.rs` | 导出 `ToolStepRecipe` |
-| 内核 | `run_service/types.rs` | `RunRequest` 增 `previous_recipes: Option<Vec<ToolStepRecipe>>`、`history: Option<Arc<dyn RunHistoryStore>>` |
+| 内核 · 提炼（保存侧） | `flexible/exec/recipe.rs` | ✅ **已落地**（批 1）：`ToolCallShape` / `StepToolRecipe` + `shape_arguments`（反参数化）+ `recipes_from_report`（五条过滤规则）；11 个内联单测。**未做**：注入文本渲染（读侧） |
+| 内核 | `flexible/plan/params.rs` | ✅ `as_text_map` 改 `pub(crate)`（反参数化的反向查表） |
+| 内核 | `flexible/mod.rs` | ✅ 导出 `StepToolRecipe` / `ToolCallShape` / 两个函数 |
+| 内核 | `run_service/types.rs` | `RunRequest` 增 `plan_id` / `revision` / `history: Option<Arc<dyn RunHistoryStore>>`（写侧）+ `previous_recipes`（读侧） |
+| 内核 · 写端口 | `run_service/history.rs`（新） | `RunHistoryStore` trait：`save(plan_id, session_id, revision, recipes)` |
+| 内核 · 收尾 | `run_service/core.rs` | **写侧接缝**：`Ok(Ok(_report)) => return` 现在把报告丢弃 → 改为先写端口再 `return`（失败只 warn） |
 | 内核 | `run_service/mod.rs` | 导出 `RunHistoryStore` |
 | 内核 | `exec/prompt.rs` | `build_step_task` 增可选配方参数；新增注入段的拼装 |
 | 内核 | `exec/step/mod.rs` | `run_step` 透传本步配方；`StepInput` 增字段 |
-| 内核 | `exec/executor/mod.rs` | 每步按 `result_reference` 取配方；`run` 收尾调用写端口（失败只 warn） |
+| 内核 | `exec/executor/mod.rs` | 读侧：每步按 `result_reference` 取配方 |
 | 宿主 · 存储 | `storage/entities/flexible_run_history.rs`、`migrations/m*_create_flexible_run_history.rs`、`repository/flexible_run_history_repo.rs`、`storage/migrations/mod.rs`、`storage/entities/mod.rs`、`storage/repository/mod.rs`、`context/storage.rs` | 新表全套（照 `flexible_state` 的同名结构）；repo 提供 `upsert(session_id, result_reference, revision, tool_chain)` 与 `list_by_session_revision(session_id, revision)`。✅ **已落地** |
 | 宿主 · 迁移 | `storage/migrations/m*_add_plans_flexible_sessions_revision.rs` + `storage/migrations/mod.rs` | `plans_flexible_sessions` **加列 `revision`（i32, default 0）**。✅ **已落地** |
-| 宿主 · 实体 / 仓库 | `storage/entities/plans_flexible_sessions.rs`、`storage/repository/plans_flexible_sessions_repo.rs` | ✅ 实体字段已加、`create` 补默认 0；**待做**：`produce` 收 `bump_revision` 并 +1 |
-| 宿主 · 指纹比较 | `services/plans_flexible_service.rs` | `save_snapshot` 里算 `bump_revision`（比新旧 `steps`）；纯函数 + 单测 |
+| 宿主 · 实体 / 仓库 | `storage/entities/plans_flexible_sessions.rs`、`storage/repository/plans_flexible_sessions_repo.rs` | ✅ **已落地**：实体字段已加、`create` 补默认 0、`produce` 收 `bump_revision` 并在为真时 `revision + 1` |
+| 宿主 · 指纹比较 | `services/plans_flexible_service.rs` | ✅ **已落地**：`save_snapshot` 读旧值→纯函数 `steps_unchanged`（比新旧 `steps` 的 `serde_json::Value`，object 顺序不敏感 / 数组顺序敏感）→ 传给 `produce`。3 个判据单测 + 1 个端到端 `revision` 单测 |
 | 宿主 · 端口 | `services/run_service.rs` | 实现 `RunHistoryStore`（写库）；`start_run_with_template` 前读本会话**当前 `revision`** 的各步 `tool_chain` 塞进请求 |
 | 宿主 · UI | `pages/plan/left_panel/` | 「学习」开关（默认 OFF）+「上次路径」只读展示（可选，第二轮） |
 

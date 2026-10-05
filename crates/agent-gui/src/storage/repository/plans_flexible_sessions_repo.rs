@@ -108,20 +108,32 @@ impl PlansFlexibleSessionsRepo {
     /// 刷新 `updated_at` 并写 `closed_at`，返回更新后的 Model。
     ///
     /// 目标行由 `id`（= 会话/版本 id）定位；同一会话反复产出即覆盖同一行。
+    ///
+    /// `bump_revision`：是否推进 `revision`（会话内计划修订号）。由调用方比较新旧 `steps`
+    /// 内容后决定 —— 内容变了才 +1，只改 `inputs` / `output_schema` 不算换版。
+    /// 该号是 `flexible_run_history` 工具链记忆的判据（比较逻辑见
+    /// [`crate::services::plans_flexible_service::PlansFlexibleService::save_snapshot`]）。
     pub async fn produce(
         &self,
         id: &str,
         parameterized_task: &str,
+        bump_revision: bool,
     ) -> StorageResult<plans_flexible_sessions::Model> {
         let now = Utc::now().to_rfc3339();
-        let mut am: plans_flexible_sessions::ActiveModel =
-            plans_flexible_sessions::Entity::find_by_id(id)
-                .one(&self.db)
-                .await?
-                .ok_or_else(|| {
-                    StorageError::NotFound(format!("plans_flexible_sessions '{id}' not found"))
-                })?
-                .into();
+        let model = plans_flexible_sessions::Entity::find_by_id(id)
+            .one(&self.db)
+            .await?
+            .ok_or_else(|| {
+                StorageError::NotFound(format!("plans_flexible_sessions '{id}' not found"))
+            })?;
+        // 先算好再 `into()`（后者会吃掉 model）
+        let revision = if bump_revision {
+            model.revision + 1
+        } else {
+            model.revision
+        };
+        let mut am: plans_flexible_sessions::ActiveModel = model.into();
+        am.revision = Set(revision);
         am.parameterized_task = Set(Some(parameterized_task.to_string()));
         am.status = Set(status::PRODUCED.to_string());
         am.updated_at = Set(now.clone());

@@ -53,14 +53,23 @@ impl PlansFlexibleService {
     ///
     /// 写入 `session_id` 对应的会话行并置 `status=produced`；同一会话反复产出即覆盖同一行。
     /// `session_id` 必填：产物必然归属某个会话。
+    ///
+    /// **顺带维护 `revision`**（会话内计划修订号）：比对本次与上次定稿的 `steps` 内容，
+    /// **变了才 +1**（判据见 [`steps_unchanged`]）。该号是 `flexible_run_history` 工具链记忆的
+    /// 判据 —— 计划内容换过一代，旧记忆自动失配、不注入。
     pub async fn save_snapshot(
         &self,
         _plan_id: &str,
         session_id: &str,
         parameterized_task: &str,
     ) -> StorageResult<PlansFlexibleSessionsModel> {
+        let previous = self
+            .sessions_repo
+            .find_parameterized_task(session_id)
+            .await?;
+        let bump_revision = !steps_unchanged(previous.as_deref(), parameterized_task);
         self.sessions_repo
-            .produce(session_id, parameterized_task)
+            .produce(session_id, parameterized_task, bump_revision)
             .await
     }
 
@@ -173,9 +182,37 @@ fn template_state_from_raw(raw: &str) -> PlanTemplateState {
     }
 }
 
+/// 本次定稿的 `steps` 与上次的**内容相同**吗？（相同 → 不必推进 `revision`）
+///
+/// 只比 `steps`，**不比** `task` / `inputs` / `output_schema`：后三者不是工具链的相关项 ——
+/// 只改参数定义或输出声明时，上次的工具路径仍然适用，记忆应当保留。
+///
+/// 比较用 `serde_json::Value`：object 的 key 顺序不敏感、**数组顺序敏感**（步骤顺序即执行顺序）。
+/// 任一侧缺失（未定稿）或解析失败一律返回 `false` —— 保守换版，宁可失效也不误用。
+fn steps_unchanged(previous: Option<&str>, current: &str) -> bool {
+    let Some(previous) = previous else {
+        return false;
+    };
+    let (Ok(prev), Ok(cur)) = (
+        serde_json::from_str::<serde_json::Value>(previous),
+        serde_json::from_str::<serde_json::Value>(current),
+    ) else {
+        return false;
+    };
+    match (prev.get("steps"), cur.get("steps")) {
+        (Some(prev_steps), Some(cur_steps)) => prev_steps == cur_steps,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::entities::plans_flexible_sessions;
+    use crate::storage::migrations::Migrator;
+    use crate::storage::repository::PlanRepo;
+    use sea_orm::{ConnectOptions, Database, DatabaseConnection, EntityTrait};
+    use sea_orm_migration::MigratorTrait;
 
     #[test]
     fn ready_when_json_is_valid() {
@@ -201,5 +238,124 @@ mod tests {
             PlanTemplateState::Invalid(_) => {}
             other => panic!("应为 Invalid，实际 {other:?}"),
         }
+    }
+
+    // ── steps 内容指纹（save_snapshot 的换版判据）──
+
+    #[test]
+    fn steps_unchanged_ignores_key_order_and_other_fields() {
+        // 注意：含 `#E1` 的 JSON 必须用 `r##"…"##` —— `r#"…"#` 会被 `"#` 提前终止
+        let prev = r##"{"task":"t","inputs":[],"steps":[{"result_reference":"#E1","intent":"x"}]}"##;
+        // object 内 key 顺序不同，`inputs` / `task` 也变了 —— 但 steps 内容未变
+        let cur = r##"{"inputs":[{"name":"p"}],"steps":[{"intent":"x","result_reference":"#E1"}],"task":"t2"}"##;
+        assert!(steps_unchanged(Some(prev), cur), "只改 steps 之外的字段不该换版");
+    }
+
+    #[test]
+    fn steps_changed_when_content_or_order_differs() {
+        let a = r##"{"steps":[{"result_reference":"#E1","intent":"下载"}]}"##;
+        let b = r##"{"steps":[{"result_reference":"#E1","intent":"删除"}]}"##;
+        assert!(!steps_unchanged(Some(a), b), "intent 改了要换版");
+
+        let c = r##"{"steps":[{"result_reference":"#E2"},{"result_reference":"#E1"}]}"##;
+        let d = r##"{"steps":[{"result_reference":"#E1"},{"result_reference":"#E2"}]}"##;
+        assert!(!steps_unchanged(Some(c), d), "数组顺序变了要换版");
+    }
+
+    #[test]
+    fn steps_unchanged_false_when_missing_or_broken() {
+        assert!(!steps_unchanged(None, r#"{"steps":[]}"#), "未定稿 → 换版");
+        assert!(
+            !steps_unchanged(Some("{ not json"), r#"{"steps":[]}"#),
+            "旧值坏了 → 换版"
+        );
+        assert!(
+            !steps_unchanged(Some(r#"{"steps":[]}"#), "{ not json"),
+            "新值坏了 → 换版"
+        );
+        assert!(
+            !steps_unchanged(Some(r#"{"task":"t"}"#), r#"{"task":"t"}"#),
+            "两侧都没有 steps → 换版"
+        );
+    }
+
+    // ── save_snapshot → produce → revision ──
+
+    /// 内存 SQLite（`max_connections(1)`：in-memory 每连接是独立库）+ 全部迁移 + 一对 plan / session 父行。
+    async fn service_with_session() -> (PlansFlexibleService, DatabaseConnection, String) {
+        let mut opt = ConnectOptions::new("sqlite::memory:");
+        opt.max_connections(1).min_connections(1).sqlx_logging(false);
+        let db = Database::connect(opt).await.expect("connect");
+        Migrator::up(&db, None).await.expect("migrate");
+
+        let plan = PlanRepo::new(db.clone())
+            .create("t", "flexible")
+            .await
+            .expect("plan");
+        let session = PlansFlexibleSessionsRepo::new(db.clone())
+            .create(&plan.id, "s")
+            .await
+            .expect("session");
+
+        let service = PlansFlexibleService::new(
+            Arc::new(PlansFlexibleSessionsRepo::new(db.clone())),
+            Arc::new(FlexibleStateRepo::new(db.clone())),
+        );
+        (service, db, session.id)
+    }
+
+    async fn revision_of(db: &DatabaseConnection, session_id: &str) -> i32 {
+        plans_flexible_sessions::Entity::find_by_id(session_id)
+            .one(db)
+            .await
+            .expect("query")
+            .expect("session row")
+            .revision
+    }
+
+    #[tokio::test]
+    async fn save_snapshot_bumps_revision_only_when_steps_change() {
+        let (service, db, session_id) = service_with_session().await;
+
+        // 首次定稿：0 → 1
+        service
+            .save_snapshot(
+                "p",
+                &session_id,
+                r##"{"task":"t","inputs":[],"steps":[{"result_reference":"#E1","intent":"下载"}]}"##,
+            )
+            .await
+            .expect("first produce");
+        assert_eq!(revision_of(&db, &session_id).await, 1);
+
+        // 只改 inputs / output_schema：不换版，记忆得以保留
+        service
+            .save_snapshot(
+                "p",
+                &session_id,
+                r##"{"task":"t","inputs":[{"name":"p"}],"steps":[{"result_reference":"#E1","intent":"下载"}]}"##,
+            )
+            .await
+            .expect("inputs-only produce");
+        assert_eq!(
+            revision_of(&db, &session_id).await,
+            1,
+            "只改 inputs 不该换版"
+        );
+
+        // steps 内容变了：+1
+        service
+            .save_snapshot(
+                "p",
+                &session_id,
+                r##"{"task":"t","inputs":[{"name":"p"}],"steps":[{"result_reference":"#E1","intent":"删除"}]}"##,
+            )
+            .await
+            .expect("steps-changed produce");
+        assert_eq!(
+            revision_of(&db, &session_id).await,
+            2,
+            "steps 变了要换版"
+        );
     }
 }

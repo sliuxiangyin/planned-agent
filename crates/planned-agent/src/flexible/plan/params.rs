@@ -60,7 +60,9 @@ impl PlanRunParams {
     }
 
     /// 转成 `${name}` 替换用的文本表：字符串取原文，其余取 JSON 字面量。
-    fn as_text_map(&self) -> BTreeMap<String, String> {
+    ///
+    /// `pub(crate)` 是为了 `exec::recipe` 的**反参数化**（值 → 参数名，方向相反）。
+    pub(crate) fn as_text_map(&self) -> BTreeMap<String, String> {
         self.values
             .iter()
             .map(|(name, value)| (name.clone(), value_to_text(value)))

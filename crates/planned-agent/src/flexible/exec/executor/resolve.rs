@@ -7,7 +7,7 @@ use super::super::report::{StepRunRecord, StepStatus};
 use super::super::super::plan::template::FlexiblePlanTemplate; 
 
 /// 输出整理步的结果引用标识（它不是模板步骤，标签固定）。
-pub(super) const RESOLVE_RESULT_REFERENCE: &str = "#RESULT";
+pub(crate) const RESOLVE_RESULT_REFERENCE: &str = "#RESULT";
 
 /// 交付步的输出 —— 即最后一个「拿到了输出」的模板步骤。
 ///

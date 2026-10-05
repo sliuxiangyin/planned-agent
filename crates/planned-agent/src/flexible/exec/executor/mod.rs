@@ -22,7 +22,9 @@ use super::super::plan::template::{FlexiblePlanTemplate, PlanStep};
 
 use logging::{log_output, summarize_tools};
 use prior::{collect_dependency_issues, collect_prior, placeholder_record};
-use resolve::{deliverable_output, resolve_failed_record, RESOLVE_RESULT_REFERENCE};
+use resolve::{deliverable_output, resolve_failed_record};
+// 对外暴露给 `exec::recipe`（提炼工具链时要跳过输出整理步）。
+pub(crate) use resolve::RESOLVE_RESULT_REFERENCE;
 use spill::{new_run_dir_name, render_prior_output, spill_output, StoredOutput};
 use tools::{to_tool_definition, tool_definitions_for_names};
 
