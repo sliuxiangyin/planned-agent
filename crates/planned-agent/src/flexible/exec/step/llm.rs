@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use planned_agent_core::ai::types::{ChatCompletionRequest, ChatCompletionResponse};
+use planned_agent_core::ai::types::{ChatCompletionRequest, ChatCompletionResponse, MessageRole};
 use planned_agent_core::ai::AiClient;
 use tokio::sync::watch;
 
@@ -46,6 +46,83 @@ where
     }
 }
 
+/// 一次请求的**规模构成**（字符数）—— 用来回答「token 花在哪」。
+///
+/// `prompt_tokens` 是真值，但看不出构成；而不同区段的优化手段完全不同：
+/// - `definitions_chars` 大 → **收窄每步的工具表**（每步固定开销，且全部步骤受益）；
+/// - `system_chars` 大 → 精简 system 段（提示词 / 环境事实）；
+/// - `tool_chars` 大 → 工具**返回**的结果在累积（轮数越多越大）→ 考虑落盘 / 摘要；
+/// - `assistant_chars` 大 → 多轮思考文本在累积。
+///
+/// 口径是**字符数**（不是字节）：中文 1 字 ≈ 1 token、英文 4 字 ≈ 1 token，
+/// 字节会把中文放大三倍、误导占比。只用于看**占比**，不是精确 token。
+struct RequestShape {
+    messages: usize,
+    system_chars: usize,
+    user_chars: usize,
+    assistant_chars: usize,
+    tool_chars: usize,
+    definitions_chars: usize,
+    tools: usize,
+}
+
+impl RequestShape {
+    fn of(request: &ChatCompletionRequest) -> Self {
+        let mut system_chars = 0usize;
+        let mut user_chars = 0usize;
+        let mut assistant_chars = 0usize;
+        let mut tool_chars = 0usize;
+        for message in &request.messages {
+            let chars = json_chars(message);
+            match message.role {
+                MessageRole::System => system_chars += chars,
+                MessageRole::User => user_chars += chars,
+                MessageRole::Assistant => assistant_chars += chars,
+                MessageRole::Tool => tool_chars += chars,
+            }
+        }
+        Self {
+            messages: request.messages.len(),
+            system_chars,
+            user_chars,
+            assistant_chars,
+            tool_chars,
+            definitions_chars: request.tools.as_ref().map_or(0, |tools| json_chars(tools)),
+            tools: request.tools.as_ref().map_or(0, |tools| tools.len()),
+        }
+    }
+
+    /// 与响应里的**真值** token 一起打点：一眼看出各区段的占比。
+    fn log(&self, step: usize, round: usize, response: &ChatCompletionResponse) {
+        let (prompt_tokens, completion_tokens) = response
+            .usage
+            .as_ref()
+            .map(|usage| (usage.prompt_tokens, usage.completion_tokens))
+            .unwrap_or((0, 0));
+        tracing::info!(
+            step,
+            round,
+            messages = self.messages,
+            tools = self.tools,
+            definitions_chars = self.definitions_chars,
+            system_chars = self.system_chars,
+            user_chars = self.user_chars,
+            assistant_chars = self.assistant_chars,
+            tool_chars = self.tool_chars,
+            prompt_tokens,
+            completion_tokens,
+            "LLM 请求构成（字符数 + 真值 token）"
+        );
+    }
+}
+
+/// 序列化后的字符数（含 JSON 包装 —— 那部分也确实发给 provider）。
+fn json_chars<T: serde::Serialize>(value: &T) -> usize {
+    serde_json::to_string(value)
+        .map(|json| json.chars().count())
+        .unwrap_or(0)
+}
+
 /// 调一次 LLM 请求：带**单次请求超时**与**超时重试**，且让取消能**立即**打断。
 ///
 /// 返回 `Err(原因)` 时调用方直接结束该步 —— 「用户取消」与「调用失败」走同一条出口，
@@ -63,6 +140,8 @@ pub(crate) async fn request_llm(
     step_index: usize,
     round: usize,
 ) -> Result<ChatCompletionResponse, String> {
+    // 诊断：只在 INFO 启用时才求值（序列化整份请求不白做）。
+    let shape = tracing::enabled!(tracing::Level::INFO).then(|| RequestShape::of(request));
     let attempts = cfg.llm_timeout_retries.saturating_add(1);
     for attempt in 1..=attempts {
         let outcome = tokio::select! {
@@ -80,7 +159,12 @@ pub(crate) async fn request_llm(
         };
 
         match outcome {
-            Ok(Ok(response)) => return Ok(response),
+            Ok(Ok(response)) => {
+                if let Some(shape) = &shape {
+                    shape.log(step_index, round, &response);
+                }
+                return Ok(response);
+            }
             Ok(Err(err)) => {
                 // 失败原因必须同时进日志：报告里的原因只有 UI 看得到，事后查问题只能靠日志。
                 // 内层（`ai-openai`）已按自己的策略重试过 —— 这里**不再叠加**，直接失败。

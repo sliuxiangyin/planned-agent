@@ -53,3 +53,6 @@ pub use plan::placeholder::{
     collect_from_schema, collect_from_steps, collect_placeholders, render, render_lenient, validate,
 };
 pub use plan::template::{FlexiblePlanTemplate, PlanInput, PlanStep};
+// 脚本宿主已抽成独立 crate（`planned-agent-script-lua` —— 通用能力，不只 flexible 用）。
+// 这里转出一份，方便下游（如 GUI 注入）不必再多加一个依赖。
+pub use planned_agent_script_lua::ScriptHost;

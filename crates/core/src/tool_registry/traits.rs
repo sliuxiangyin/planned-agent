@@ -68,3 +68,23 @@ pub trait McpManagerTrait: Send + Sync {
     /// 获取服务器配置的分类（用于工具元数据）
     fn get_server_categories(&self, server_name: &str) -> Option<Vec<String>>;
 }
+
+/// 统一工具注册表 trait（抽象层）
+///
+/// 与 [`ToolExecutor`] 的分工：
+/// - [`ToolExecutor`] 是**单个**执行器，只认自己 `supported_tools()` 里的那几个工具；
+/// - 本 trait 是**统一入口**，按工具名把调用路由到 MCP / 自定义 / 内置里的任意一方。
+///
+/// 为什么要这层抽象：统一入口此前只存在于 `tool-manager` 的 `ToolRegistry` **具体类型**上，
+/// 下游想用它就得依赖整个 `tool-manager`。抽象提到这里之后，只需要「按名字调工具」
+/// 能力的下游（如 `script-lua`）**只依赖 `core`** 即可。
+///
+/// 与 [`McpManagerTrait`] 同构：抽象在 core，实现在上层。
+#[async_trait::async_trait]
+pub trait ToolRegistryTrait: Send + Sync {
+    /// 按工具名调用（内部路由到 MCP / 自定义 / 内置）。
+    async fn call_tool(&self, tool_name: &str, arguments: Value) -> Result<ToolResult>;
+
+    /// 列出全部可用工具名，供调用方（脚本 / UI）枚举。
+    fn tool_names(&self) -> Vec<String>;
+}

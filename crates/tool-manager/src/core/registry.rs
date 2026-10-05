@@ -4,7 +4,7 @@ use anyhow::Result;
 use serde_json::Value;
 use tracing::info;
 
-use planned_agent_core::mcp::types::Tool;
+use planned_agent_core::mcp::types::{Tool, ToolResult};
 use planned_agent_core::tool_registry::{ToolSource, ToolCategory, ToolExecutor};
 use crate::sub_agent::types::SubAgentSessionRunner;
 use crate::sub_agent::executor::SubAgentToolExecutor;
@@ -849,6 +849,23 @@ impl ToolRegistry {
             custom_count,
             builtin_count,
         }
+    }
+}
+
+/// [`ToolRegistryTrait`](planned_agent_core::tool_registry::ToolRegistryTrait) 的实现：
+/// 统一入口的抽象版。
+///
+/// `ToolRegistry::call_tool` 返回 [`ToolOutcome`]（多带了 `categories`），而 trait 只承诺
+/// [`ToolResult`] —— 这里把两者对齐：脚本等下游要的是结果本身，不做分类路由。
+#[async_trait::async_trait]
+impl planned_agent_core::tool_registry::ToolRegistryTrait for ToolRegistry {
+    async fn call_tool(&self, tool_name: &str, arguments: Value) -> Result<ToolResult> {
+        // 与固有方法**同名** —— 用 UFCS 点名固有那个，否则会递归调用自己。
+        Ok(ToolRegistry::call_tool(self, tool_name, arguments).await?.result)
+    }
+
+    fn tool_names(&self) -> Vec<String> {
+        self.get_all_tools().into_iter().map(|tool| tool.name).collect()
     }
 }
 

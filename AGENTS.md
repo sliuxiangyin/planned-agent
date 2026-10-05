@@ -16,7 +16,7 @@
 
 代码实现：`planned-agent` crate 的 `flexible/`（灵活执行器）、`chat/`（对话与子 agent）、以及 `core::planner`（Coarse / ReAct / RePlanner）。
 
-## 1. workspace 分层（10 个 crate）
+## 1. workspace 分层（11 个 crate）
 
 依赖**只能自上而下**，这是硬约束。下表按层排列（`crates/*/Cargo.toml` 逐个核对）：
 
@@ -29,6 +29,7 @@
 | L1 | `crates/mcp-rmcp` → `planned-agent-mcp-rmcp` | MCP 接入（持久化 + 运行时） | core | `README.md`、`docs/mcp-rmcp.md` |
 | L1 | `crates/prompt-manager` → `planned-agent-prompt-manager` | 基于文件系统的 Prompt 模板加载/渲染 | core | `README.md` |
 | L1 | `crates/tool-manager` → `planned-agent-tool-manager` | 统一工具管理器（MCP / 自定义 / 内置） | core | `ANALYSIS.md`、`docs/tool-manager.md` |
+| L1 | `crates/script-lua` → `planned-agent-script-lua` | Lua 脚本宿主（沙箱 + `tools.call`）**只依赖 core** | core | — |
 | L2 | `crates/ai-manager` → `planned-agent-ai-manager` | 多 AI 提供商客户端管理 | core, ai-openai | `docs/ai-manager.md` |
 | L3 | `crates/planned-agent` → `planned-agent` (lib `planned_agent`) | **Plan-and-Execute 流水线** + `flexible` / `chat` 模块 | core, ai-openai, ai-manager, mcp-rmcp, prompt-manager, tool-manager, rag | `docs/planned-agent.md`、`docs/planned-agent/` |
 | L4 | `crates/agent-gui` → `planned-agent-gui` | **Dioxus 0.7 桌面客户端**（唯一消费 `planned-agent` 的 crate） | core, ai-manager, mcp-rmcp, prompt-manager, tool-manager, rag, planned-agent | `docs/agent-gui-storage.md` |
@@ -49,6 +50,7 @@
 | AI 请求 / 流式 / token | `core::ai`（trait `AiClient`）→ 实现看 `crates/ai-openai` |
 | 多提供商切换 | `crates/ai-manager` |
 | 工具注册 / 校验 / 内置工具 | `crates/tool-manager`（抽象在 `core::tool_registry`） |
+| **Lua 脚本执行** | `crates/script-lua`（宿主能力抽象在 `core::tool_registry::ToolRegistryTrait`） |
 | MCP 服务器接入 | `crates/mcp-rmcp`（抽象在 `core::mcp`） |
 | Prompt 模板加载 / 渲染 | `crates/prompt-manager`（抽象在 `core::prompt`） |
 | 规划（Coarse / ReAct / RePlanner） | `core::planner`（含实现，不只抽象） |

@@ -13,4 +13,4 @@ pub mod traits;
 
 // 在模块顶层重新导出常用类型，避免下游写完整路径
 pub use types::{ToolCategory, ToolSource};
-pub use traits::{BuiltinToolProvider, McpManagerTrait, ToolExecutor};
+pub use traits::{BuiltinToolProvider, McpManagerTrait, ToolExecutor, ToolRegistryTrait};

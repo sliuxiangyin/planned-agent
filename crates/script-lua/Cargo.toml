@@ -1,0 +1,14 @@
+[package]
+name = "planned-agent-script-lua"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+planned-agent-core = { path = "../core" }
+mlua = { version = "0.12.2", features = ["lua54", "vendored", "async", "send", "serde"] }
+serde_json.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio.workspace = true

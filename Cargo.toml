@@ -7,6 +7,7 @@ members = [
     "crates/mcp-rmcp",
     "crates/prompt-manager",
     "crates/tool-manager",
+    "crates/script-lua",
     "crates/planned-agent",
     "crates/rag",
     "crates/agent-gui",
