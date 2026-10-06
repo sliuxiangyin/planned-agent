@@ -804,6 +804,12 @@
             resolve_req.contains("builtin_read_file_lines"),
             "文件说明应给出读取方式: {resolve_req}"
         );
+        // 落盘文案必须同时列出两个读回工具（按需二选一，不是固定两步）
+        // —— 它与 prompt.rs 第 3 条是同一套读法的两处落点，改一处必须同步另一处。
+        assert!(
+            resolve_req.contains("builtin_grep_file"),
+            "文件说明应给出搜索定位方式: {resolve_req}"
+        );
         assert!(!resolve_req.contains(&long), "整理步不该收到全文");
 
         let _ = std::fs::remove_dir_all(&cache_dir);

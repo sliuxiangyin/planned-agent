@@ -123,7 +123,7 @@ crates/tool-manager/src/builtin/
 
 ---
 
-## 4. 工具清单：旧 → 新对照（23 个）
+## 4. 工具清单：旧 → 新对照（本次重写 23 个；后增补 1 个，现 24 个）
 
 | # | 新工具名（`builtin_` 前缀） | 旧对应 | 形态 |
 |---|---|---|---|
@@ -151,6 +151,7 @@ crates/tool-manager/src/builtin/
 | 22 | `builtin_unzip_file` | — | 新增 |
 | 23 | `builtin_zip_directory` | — | 新增 |
 | ✗ | ~~`builtin_list_allowed_directories`~~ | — | **不做**（④） |
+| 24 | `builtin_grep_file` | — | **后续增补**（不属于本次重写）：单文件内容搜索，补「落盘产出只能顺序读」的缺口，见 `docs/planned-agent/builtin-grep-file.md` |
 
 全部归 `ToolCategory::File`（`crates/core/src/tool_registry/types.rs:22`，已存在，**`core` 零改动**）。
 

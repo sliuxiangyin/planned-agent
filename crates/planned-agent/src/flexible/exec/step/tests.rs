@@ -121,6 +121,7 @@
                 prior: &[],
                 tools: &[],
                 index: 1,
+                run_dir: "",
             },
             &(ai as Arc<dyn AiClient>),
             &registry,
@@ -160,6 +161,7 @@
                 prior: &[],
                 tools: &[],
                 index: 1,
+                run_dir: "",
             },
             &(ai as Arc<dyn AiClient>),
             &registry,
@@ -202,6 +204,7 @@
                 prior: &[],
                 tools: &[],
                 index: 1,
+                run_dir: "",
             },
             &(ai as Arc<dyn AiClient>),
             &registry,
@@ -260,6 +263,7 @@
                 prior: &[],
                 tools: &[],
                 index: 1,
+                run_dir: "",
             },
             &(ai as Arc<dyn AiClient>),
             &registry,
@@ -298,6 +302,7 @@
                 prior: &[],
                 tools: &[],
                 index: 1,
+                run_dir: "",
             },
             &(ai as Arc<dyn AiClient>),
             &registry,
@@ -334,6 +339,7 @@
                 prior: &[],
                 tools: &[],
                 index: 1,
+                run_dir: "",
             },
             &(ai as Arc<dyn AiClient>),
             &registry,
@@ -372,6 +378,7 @@
                 prior: &[],
                 tools: &[],
                 index: 1,
+                run_dir: "",
             },
             &(ai as Arc<dyn AiClient>),
             &registry,
@@ -415,6 +422,7 @@
                 prior: &[],
                 tools: &[],
                 index: 1,
+                run_dir: "",
             },
             &(ai.clone() as Arc<dyn AiClient>),
             &registry,
@@ -467,6 +475,7 @@
                 prior: &[],
                 tools: &[],
                 index: 1,
+                run_dir: "",
             },
             &(ai as Arc<dyn AiClient>),
             &registry,
@@ -505,6 +514,7 @@
                 prior: &[],
                 tools: &[],
                 index: 1,
+                run_dir: "",
             },
             &(ai as Arc<dyn AiClient>),
             &registry,
@@ -545,4 +555,252 @@
             "超长入参应截断，实际 {} 字符",
             rendered.chars().count()
         );
+    }
+
+    // ─── 单步内工具输出落盘 ──────────────────────────────────────
+    // 见 docs/planned-agent/flexible-step-tool-output-spill.md
+
+    use planned_agent_core::ai::types::MessageContent;
+
+    /// 每个用例一个独立临时目录（并行用例互不干扰）。
+    fn temp_cache_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "planned-agent-flexible-tool-spill-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// 带落盘目录的配置。
+    fn cfg_with_cache(max_rounds_per_step: usize, cache_dir: std::path::PathBuf) -> ExecutorConfig {
+        ExecutorConfig {
+            max_rounds_per_step,
+            cache_dir,
+            ..Default::default()
+        }
+    }
+
+    /// 取第 `index` 条请求里那条 tool 消息的文本内容。
+    fn tool_content_of_request(ai: &FakeAiClient, index: usize) -> String {
+        let requests = ai.requests();
+        let message = requests[index]
+            .messages
+            .iter()
+            .find(|message| matches!(message.role, MessageRole::Tool))
+            .unwrap_or_else(|| panic!("第 {index} 条请求里应有 tool 消息"));
+        match &message.content {
+            Some(MessageContent::ToolResult { content, .. }) => content.clone(),
+            other => panic!("tool 消息应是 ToolResult，实为 {other:?}"),
+        }
+    }
+
+    /// 工具输出超过阈值 → 落盘；**进 messages 的那一份**是引用（请求里看不到全文）。
+    #[tokio::test]
+    async fn oversized_tool_output_spills_and_request_carries_reference() {
+        let huge = "网页正文".repeat(3_000); // 12_000 字符 > 默认阈值 8_000
+        let ai = FakeAiClient::new(vec![
+            tool_response("call-1", "read", json!({"path": "a.txt"}), 100, 20),
+            text_response("已读取", 150, 10),
+        ]);
+        let (registry, _tool) = registry_with("read", json!(huge.clone()), false);
+        let step_def = step("#E1");
+        let sink = RecordingSink::default();
+        let cache_dir = temp_cache_dir("oversized");
+
+        let result = run_step(
+            prompt::STEP_SYSTEM_PROMPT,
+            StepInput {
+                step: &step_def,
+                intent: "读文件",
+                expected_output: "做完",
+                prior: &[],
+                tools: &[],
+                index: 1,
+                run_dir: "run-test-0",
+            },
+            &(ai.clone() as Arc<dyn AiClient>),
+            &registry,
+            &cfg_with_cache(MAX_ROUNDS, cache_dir.clone()),
+            &sink,
+            None,
+        )
+        .await;
+
+        assert_eq!(result.record.status, StepStatus::Done);
+
+        // ① 落盘文件存在，内容逐字等于工具原文
+        let written = std::fs::read_to_string(cache_dir.join("run-test-0").join("tool-s1-r1-0.txt"))
+            .expect("超阈值应已落盘");
+        assert_eq!(written, huge);
+
+        // ② 第二轮请求（带工具结果）里那条 tool 消息是引用，不是全文
+        let content = tool_content_of_request(&ai, 1);
+        assert!(content.contains("已存为临时文件"), "应是落盘引用：{content}");
+        assert!(content.contains("tool-s1-r1-0.txt"), "应带文件路径：{content}");
+        assert!(
+            content.chars().count() < 2_000,
+            "引用文案不该含全文，实际 {} 字符",
+            content.chars().count()
+        );
+
+        let _ = std::fs::remove_dir_all(&cache_dir);
+    }
+
+    /// 小输出不回归：原样内联，且不建目录、不写文件。
+    #[tokio::test]
+    async fn small_tool_output_stays_inline() {
+        let ai = FakeAiClient::new(vec![
+            tool_response("call-1", "read", json!({"path": "a.txt"}), 100, 20),
+            text_response("已读取", 150, 10),
+        ]);
+        let (registry, _tool) = registry_with("read", json!("file body"), false);
+        let step_def = step("#E1");
+        let sink = RecordingSink::default();
+        let cache_dir = temp_cache_dir("small");
+
+        let result = run_step(
+            prompt::STEP_SYSTEM_PROMPT,
+            StepInput {
+                step: &step_def,
+                intent: "读文件",
+                expected_output: "做完",
+                prior: &[],
+                tools: &[],
+                index: 1,
+                run_dir: "run-test-1",
+            },
+            &(ai.clone() as Arc<dyn AiClient>),
+            &registry,
+            &cfg_with_cache(MAX_ROUNDS, cache_dir.clone()),
+            &sink,
+            None,
+        )
+        .await;
+
+        assert_eq!(result.record.status, StepStatus::Done);
+        assert_eq!(tool_content_of_request(&ai, 1), "file body");
+        assert!(
+            !cache_dir.join("run-test-1").exists(),
+            "未超阈值就不该建目录或写文件"
+        );
+
+        let _ = std::fs::remove_dir_all(&cache_dir);
+    }
+
+    /// 落盘失败 → 告警并回退内联全文，且**该步仍然成功**
+    /// （与跨步产出「IO 失败 → 该步 Failed」刻意不同，见设计稿 §2.7）。
+    #[tokio::test]
+    async fn spill_failure_falls_back_to_inline_without_failing_step() {
+        let huge = "网页正文".repeat(3_000);
+        let ai = FakeAiClient::new(vec![
+            tool_response("call-1", "read", json!({"path": "a.txt"}), 100, 20),
+            text_response("已读取", 150, 10),
+        ]);
+        let (registry, _tool) = registry_with("read", json!(huge.clone()), false);
+        let step_def = step("#E1");
+        let sink = RecordingSink::default();
+
+        // 把一个**文件**当 cache_dir：`create_dir_all` 必失败
+        let blocker = std::env::temp_dir().join(format!(
+            "planned-agent-tool-spill-blocker-{}",
+            std::process::id()
+        ));
+        std::fs::write(&blocker, b"not a directory").expect("写 blocker 文件");
+
+        let result = run_step(
+            prompt::STEP_SYSTEM_PROMPT,
+            StepInput {
+                step: &step_def,
+                intent: "读文件",
+                expected_output: "做完",
+                prior: &[],
+                tools: &[],
+                index: 1,
+                run_dir: "run-test-2",
+            },
+            &(ai.clone() as Arc<dyn AiClient>),
+            &registry,
+            &cfg_with_cache(MAX_ROUNDS, blocker.clone()),
+            &sink,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            result.record.status,
+            StepStatus::Done,
+            "落盘失败不该判该步失败"
+        );
+        let content = tool_content_of_request(&ai, 1);
+        assert!(
+            !content.contains("已存为临时文件"),
+            "落盘失败应回退内联，而不是引用"
+        );
+        assert_eq!(content, huge, "回退时应是全文");
+
+        let _ = std::fs::remove_file(&blocker);
+    }
+
+    /// 回灌函数本身：阈值两侧的行为、文件名、文案（含 `limit` 说明的回归锁）。
+    #[tokio::test]
+    async fn tool_output_for_llm_switches_at_threshold() {
+        let step_def = step("#E1");
+        let cache_dir = temp_cache_dir("unit");
+        let cfg = cfg_with_cache(MAX_ROUNDS, cache_dir.clone());
+        let input = StepInput {
+            step: &step_def,
+            intent: "读文件",
+            expected_output: "做完",
+            prior: &[],
+            tools: &[],
+            index: 1,
+            run_dir: "run-unit",
+        };
+
+        // 未超阈值：原样返回
+        assert_eq!(
+            super::tool_output_for_llm("小输出", &input, &cfg, 1, 0).await,
+            "小输出"
+        );
+
+        // 超阈值：引用文案，带轮次与序号命名的文件
+        let reference = super::tool_output_for_llm(&"甲".repeat(9_000), &input, &cfg, 2, 1).await;
+        assert!(reference.contains("工具输出较大"), "{reference}");
+        assert!(reference.contains("tool-s1-r2-1.txt"), "{reference}");
+        assert!(reference.contains("不传 `limit` 会一次读到文件末尾"), "{reference}");
+
+        // 同轮两个工具各写一份，互不覆盖
+        super::tool_output_for_llm(&"乙".repeat(9_000), &input, &cfg, 3, 0).await;
+        super::tool_output_for_llm(&"丙".repeat(9_000), &input, &cfg, 3, 1).await;
+        let dir = cache_dir.join("run-unit");
+        assert!(dir.join("tool-s1-r3-0.txt").exists());
+        assert!(dir.join("tool-s1-r3-1.txt").exists());
+        assert_ne!(
+            std::fs::read_to_string(dir.join("tool-s1-r3-0.txt")).unwrap(),
+            std::fs::read_to_string(dir.join("tool-s1-r3-1.txt")).unwrap()
+        );
+
+        // 跨步骤不覆盖：`round`/`nth` 是**步内**计数，而 `run_dir` 是 run 级 ——
+        // 文件名必须带步骤序号，否则不同步骤的同轮次同序号会互相覆盖。
+        let input_step2 = StepInput {
+            step: &step_def,
+            intent: "读文件",
+            expected_output: "做完",
+            prior: &[],
+            tools: &[],
+            index: 2,
+            run_dir: "run-unit",
+        };
+        super::tool_output_for_llm(&"丁".repeat(9_000), &input_step2, &cfg, 3, 0).await;
+        assert!(
+            dir.join("tool-s2-r3-0.txt").exists(),
+            "不同步骤的同轮次同序号必须各写一份"
+        );
+        assert_ne!(
+            std::fs::read_to_string(dir.join("tool-s1-r3-0.txt")).unwrap(),
+            std::fs::read_to_string(dir.join("tool-s2-r3-0.txt")).unwrap()
+        );
+
+        let _ = std::fs::remove_dir_all(&cache_dir);
     }

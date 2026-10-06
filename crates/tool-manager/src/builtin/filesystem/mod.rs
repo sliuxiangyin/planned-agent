@@ -191,6 +191,14 @@ impl BuiltinToolProvider for FilesystemProvider {
             ),
             (
                 Tool {
+                    name: "builtin_grep_file".to_string(),
+                    description: contract::GREP_FILE_DESCRIPTION.to_string(),
+                    input_schema: contract::grep_file_schema(),
+                },
+                vec![ToolCategory::File],
+            ),
+            (
+                Tool {
                     name: "builtin_calculate_directory_size".to_string(),
                     description: contract::CALCULATE_DIRECTORY_SIZE_DESCRIPTION.to_string(),
                     input_schema: contract::calculate_directory_size_schema(),
@@ -277,6 +285,7 @@ impl ToolExecutor for FilesystemExecutor {
             "builtin_get_file_info".to_string(),
             "builtin_search_files".to_string(),
             "builtin_search_files_content".to_string(),
+            "builtin_grep_file".to_string(),
             "builtin_calculate_directory_size".to_string(),
             "builtin_find_duplicate_files".to_string(),
             "builtin_find_empty_directories".to_string(),
@@ -318,6 +327,7 @@ impl ToolExecutor for FilesystemExecutor {
             "builtin_search_files_content" => {
                 search::content::search_files_content(&self.service, &arguments).await
             }
+            "builtin_grep_file" => search::grep::grep_file(&self.service, &arguments).await,
             "builtin_calculate_directory_size" => {
                 info::calculate_directory_size(&self.service, &arguments).await
             }

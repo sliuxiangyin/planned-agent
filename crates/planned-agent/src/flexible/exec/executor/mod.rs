@@ -25,7 +25,7 @@ use prior::{collect_dependency_issues, collect_prior, placeholder_record};
 use resolve::{deliverable_output, resolve_failed_record};
 // 对外暴露给 `exec::recipe`（提炼工具链时要跳过输出整理步）。
 pub(crate) use resolve::RESOLVE_RESULT_REFERENCE;
-use spill::{new_run_dir_name, render_prior_output, spill_output, StoredOutput};
+use super::spill::{new_run_dir_name, render_prior_output, spill_output, StoredOutput};
 use tools::{to_tool_definition, tool_definitions_for_names};
 
 // ────────── 步骤产出落盘（见 docs/planned-agent/flexible-step-output-spill.md） ──────────
@@ -35,7 +35,6 @@ mod config;
 mod logging;
 mod prior;
 mod resolve;
-mod spill;
 mod tools;
 
 pub use config::{
@@ -176,6 +175,7 @@ impl FlexibleExecutor {
                     prior: &prior,
                     tools: &tools,
                     index,
+                    run_dir: &run_dir,
                 },
                 &self.ai,
                 &self.tools,
@@ -275,6 +275,7 @@ impl FlexibleExecutor {
             self.resolve_result(
                 template,
                 params,
+                &run_dir,
                 &store,
                 &mut records,
                 sink,
@@ -351,6 +352,7 @@ impl FlexibleExecutor {
         &self,
         template: &FlexiblePlanTemplate,
         params: &PlanRunParams,
+        run_dir: &str,
         store: &HashMap<String, StoredOutput>,
         records: &mut Vec<StepRunRecord>,
         sink: &dyn PlanRunSink,
@@ -397,7 +399,7 @@ impl FlexibleExecutor {
             });
 
         // 交付步的产出必须给：未落盘时是全文，落盘后是「文件说明 + 预览」
-        // （整理步因此需要 `builtin_read_file_lines`，见下方 tools）。
+        // （整理步因此需要读回工具，见下方 tools）。
         let preview_chars = self.cfg.spill_preview_chars;
         let mut prior = Vec::with_capacity(template.steps.len() + 1);
         prior.push((
@@ -429,8 +431,13 @@ impl FlexibleExecutor {
             intent: intent.clone(),
         });
         // 交付产出可能已落盘 —— 整理步必须能读回来（「不带工具」在落盘机制下不再成立）。
-        // 只给这一个只读工具：整理仍是分析，不需要别的外部数据。
-        let resolve_tools = tool_definitions_for_names(&self.tools, &["builtin_read_file_lines"]);
+        // 只给这两个只读工具：`builtin_read_file_lines` 按段读、`builtin_grep_file` 按内容定位 ——
+        // 二者按需二选一（不是必须两步）：已知读哪段就直接读，只知道找什么才先搜。
+        // 整理仍是分析，不需要别的外部数据源。
+        let resolve_tools = tool_definitions_for_names(
+            &self.tools,
+            &["builtin_read_file_lines", "builtin_grep_file"],
+        );
         let outcome = run_output_resolve(
             StepInput {
                 step: &resolve_step,
@@ -439,6 +446,7 @@ impl FlexibleExecutor {
                 prior: &prior,
                 tools: &resolve_tools,
                 index,
+                run_dir,
             },
             &self.ai,
             &self.tools,

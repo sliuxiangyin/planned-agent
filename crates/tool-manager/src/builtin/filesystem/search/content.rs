@@ -25,8 +25,8 @@ use crate::builtin::filesystem::support::{
 
 use super::{rel_to_slash, walk_all};
 
-/// 单次返回的匹配行上限（① 防爆）。
-const MAX_MATCHES: usize = 500;
+/// 单次返回的匹配行上限（① 防爆）。`grep_file` 的 `max_matches` 硬上限也用它。
+pub(super) const MAX_MATCHES: usize = 500;
 /// 单文件读取上限（① 防爆）：超过则跳过该文件。
 const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 

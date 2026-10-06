@@ -19,6 +19,7 @@ use super::event::{PlanRunEvent, PlanRunSink};
 use super::executor::ExecutorConfig;
 use super::prompt;
 use super::report::{CallUsage, StepRunRecord, StepStatus, ToolCallRecord};
+use super::spill;
 use super::super::plan::template::PlanStep;
 
 /// 输出摘要的字符上限。
@@ -47,6 +48,8 @@ pub(crate) struct StepInput<'a> {
     pub tools: &'a [ToolDefinition],
     /// 步骤序号（从 1 开始）
     pub index: usize,
+    /// 本次执行的产出目录名（工具大输出落盘用；由执行器生成，见 `exec::spill`）
+    pub run_dir: &'a str,
 }
 
 /// 单步执行结果。
@@ -96,6 +99,52 @@ pub(crate) async fn run_output_resolve(
         cancel,
     )
     .await
+}
+
+/// 工具输出进 messages 的那一份：超过阈值就落盘，改用「文件 + 预览」引用。
+///
+/// 落盘失败**不**判该步失败（与跨步产出的严格语义刻意不同，见
+/// `docs/planned-agent/flexible-step-tool-output-spill.md` §2.7）：工具已经执行完了，
+/// 落盘失败只是这条输出多占上下文 —— 全文照旧内联，信息一点没丢。
+async fn tool_output_for_llm(
+    output: &str,
+    input: &StepInput<'_>,
+    cfg: &ExecutorConfig,
+    round: usize,
+    nth: usize,
+) -> String {
+    // 文件名不含 LLM 给的任何字符串（只含步骤/轮次/序号），没有目录穿越风险。
+    // **必须带步骤序号**：`run_dir` 是 run 级目录，而 `round`/`nth` 在每步内从 0 重新计数，
+    // 只用后者会让不同步骤的工具输出互相覆盖。
+    let file_name = format!("tool-s{}-r{round}-{nth}.txt", input.index);
+    match spill::spill_text(
+        &cfg.cache_dir,
+        input.run_dir,
+        &file_name,
+        cfg.spill_threshold_chars,
+        output,
+    )
+    .await
+    {
+        Ok(Some(spilled)) => spill::render_spill_reference(
+            output,
+            &spilled,
+            cfg.spill_preview_chars,
+            spill::SpillKind::ToolOutput,
+        ),
+        Ok(None) => output.to_string(),
+        Err(error) => {
+            tracing::warn!(
+                step = input.index,
+                round,
+                nth,
+                file = %file_name,
+                %error,
+                "工具输出落盘失败，回退为内联全文"
+            );
+            output.to_string()
+        }
+    }
 }
 
 /// 单步执行的内核：system prompt 由调用方决定。
@@ -272,7 +321,7 @@ async fn run_step_with_prompt(
 
         // 回灌 assistant 消息（含 tool_calls），再逐个执行工具
         messages.push(message);
-        for call in tool_calls {
+        for (nth, call) in tool_calls.into_iter().enumerate() {
             if is_cancelled(cancel) {
                 tracing::info!(step = input.index, round = rounds, "工具循环中收到取消信号");
                 error = Some("用户取消".to_string());
@@ -346,7 +395,10 @@ async fn run_step_with_prompt(
                 args: args_line,
                 ok,
             });
-            messages.push(tool_message(&call.id, &tool_output));
+            // 大输出落盘：**只换「进 messages 的那一份」**，日志 / 事件 / 报告仍用原文。
+            let content_for_llm =
+                tool_output_for_llm(&tool_output, &input, cfg, rounds, nth).await;
+            messages.push(tool_message(&call.id, &content_for_llm));
         }
         if error.is_some() {
             break;

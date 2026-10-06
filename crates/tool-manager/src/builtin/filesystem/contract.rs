@@ -50,8 +50,11 @@ pub(crate) const READ_FILE_LINES_DESCRIPTION: &str = concat!(
     "\n",
     "调用规则：\n",
     "1. path 是文件路径；相对路径基于进程当前工作目录解析（不是工作区根），建议传绝对路径。\n",
+    "   本工具按行号读（已知要读哪一段、或想直接看全文就用它）；若只知道要找什么、不知道在第几行，\n",
+    "   用 builtin_grep_file 定位。两个工具按需二选一，不是必须配合的两步。\n",
     "2. offset 是起始行号，**从 0 开始**（0-based）；limit 是本次最多读取的行数，省略则读到文件末尾。\n",
-    "3. 返回选中的行，行间用 \\n 连接，**不带行号前缀**。\n",
+    "3. 返回选中的行，行间用 \\n 连接。默认**不带行号前缀**；`with_line_numbers=true` 时行前缀格式\n",
+    "   与 builtin_read_text_file 相同（「右对齐行号 + 空格 + | + 空格」，行号从 1 开始）。\n",
     "4. 编码 / 二进制 / 上限规则同 builtin_read_text_file。\n",
     "5. 失败返回错误码：file_not_found / permission_denied / path_outside_allowed / is_a_directory /\n",
     "   invalid_encoding / binary_file / content_too_large / invalid_arguments / internal_error。\n",
@@ -74,6 +77,10 @@ pub(crate) fn read_file_lines_schema() -> Value {
                 "type": "integer",
                 "minimum": 1,
                 "description": "本次最多读取的行数；省略则读到文件末尾。"
+            },
+            "with_line_numbers": {
+                "type": "boolean",
+                "description": "为 true 时每行加「右对齐行号 + | 」前缀（行号从 1 开始），格式同 builtin_read_text_file。默认 false（不带行号）。"
             }
         },
         "required": ["path", "offset"]
@@ -384,6 +391,81 @@ pub(crate) fn search_files_schema() -> Value {
             }
         },
         "required": ["path", "pattern"]
+    })
+}
+
+// ── builtin_grep_file ───────────────────────────────────────────────────────
+
+pub(crate) const GREP_FILE_DESCRIPTION: &str = concat!(
+    "在**单个文件**里搜索文本或正则，返回带行号与上下文的命中片段。\n",
+    "\n",
+    "与本工具族其他搜索工具的分工：本工具搜**一个文件**（path 必须是文件）；\n",
+    "builtin_search_files_content 搜**整个目录树**；builtin_search_files 按文件名搜。\n",
+    "拿到一个文件路径（例如某个落盘的大产出）要定位内容时，用本工具比用\n",
+    "builtin_read_file_lines 从头逐段翻更省。两个工具**按需二选一、不是必须两步**：\n",
+    "已知要读哪一段或想看全文就别用本工具，直接用 builtin_read_file_lines。\n",
+    "\n",
+    "调用规则：\n",
+    "1. path 是**文件**路径（传目录会报 is_a_directory）；相对路径基于进程当前工作目录解析，建议传绝对路径。\n",
+    "2. query 是要找的内容；is_regex=true 时按正则解释（默认 false：字面量）。\n",
+    "   ignore_case 只作用于字面量（默认 true）；写成正则时用正则自身的 (?i) 控制大小写。\n",
+    "3. context_lines 是每处命中前后各显示的行数（默认 2，上限 10）；\n",
+    "   max_matches 是本次最多返回多少处（默认 100，上限 500）。\n",
+    "4. 命中行以 `>` 开头、上下文行以空格开头，格式「<标记><右对齐行号> | <行内容>」，行号从 1 开始。\n",
+    "5. 命中可能一次返回不完：输出末尾给出「共 N 处匹配（本次返回第 a-b 处）；续读：match_offset=b」，\n",
+    "   把该值传给 match_offset 取下一批（该值超出范围会报 invalid_arguments）。\n",
+    "   「一处」= 一行（同一行里出现多次只算一处，与 builtin_search_files_content 的“列”计数不同）。\n",
+    "6. 行号可与 builtin_read_file_lines 配合精读：offset = 行号 - 1（offset 是 0-based）。\n",
+    "7. 二进制文件拒搜；文件超过 64 MiB 报 content_too_large。\n",
+    "8. 失败返回错误码：regex_error / is_a_directory / file_not_found / permission_denied /\n",
+    "   path_outside_allowed / content_too_large / binary_file / invalid_encoding / invalid_arguments /\n",
+    "   internal_error。\n",
+);
+
+pub(crate) fn grep_file_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "要搜索的**文件**路径（不是目录）。建议传绝对路径；必须在允许目录内。"
+            },
+            "query": {
+                "type": "string",
+                "description": "要搜索的内容（字面量或正则）。"
+            },
+            "is_regex": {
+                "type": "boolean",
+                "default": false,
+                "description": "为 true 时把 query 当正则表达式。"
+            },
+            "ignore_case": {
+                "type": "boolean",
+                "default": true,
+                "description": "字面量搜索是否忽略大小写（is_regex=true 时不生效，用正则的 (?i)）。"
+            },
+            "context_lines": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10,
+                "default": 2,
+                "description": "每处命中前后各显示的行数。"
+            },
+            "max_matches": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 500,
+                "default": 100,
+                "description": "本次最多返回多少处命中。"
+            },
+            "match_offset": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 0,
+                "description": "跳过前 N 处命中，用于取下一批（续读值见上次输出末尾）。"
+            }
+        },
+        "required": ["path", "query"]
     })
 }
 

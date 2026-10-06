@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use super::spill::StoredOutput;
+use super::super::spill::StoredOutput;
 use super::super::report::{StepRunRecord, StepStatus};
 use super::super::super::plan::template::FlexiblePlanTemplate; 
 

@@ -67,7 +67,7 @@
 |---|---|---|
 | `exec/executor/mod.rs` | **总编排** | `FlexibleExecutor`(:47)、`new`(:54)、`run`(:65)、`resolve_result`(:346，输出整理步) |
 | `exec/executor/config.rs` | 执行配置与默认常量 | `ExecutorConfig`(:26) + `DEFAULT_*`（见 §4-⑨） |
-| `exec/executor/spill.rs` | 大产出落盘 + 预览 | `StoredOutput`(:26)、`SpilledOutput`(:33)、`spill_output`(:53)、`render_prior_output`(:81) |
+| `exec/spill.rs` | 大文本落盘 + 预览渲染（**跨步产出与步内工具输出共用**） | `SpillKind`(:31)、`StoredOutput`(:43)、`SpilledOutput`(:50)、`spill_text`(:69)、`spill_output`(:98)、`render_spill_reference`(:118)、`render_prior_output`(:145) |
 | `exec/executor/resolve.rs` | 输出整理步的取数与兜底 | `RESOLVE_RESULT_REFERENCE = "#RESULT"`(:10)、`deliverable_output`(:17)、`resolve_failed_record`(:29) |
 | `exec/executor/prior.rs` | 前序产出注入 + 依赖校验 | `collect_dependency_issues`(:19)、`collect_prior`(:43)、`placeholder_record`(:66) |
 | `exec/executor/tools.rs` | 工具定义表组装 | `tool_definitions_for_names`(:8)、`to_tool_definition`(:18) |
@@ -111,12 +111,12 @@ RunServiceCore::run 常驻循环 → RunLoop::start → FlexibleExecutor::run
    │ ② system prompt 整次只算一次                           exec/prompt.rs:38
    │ ③ 每步：展开 ${} → StepStarted → collect_prior → run_step
    │                                                     executor/mod.rs:108-256
-   │ ④ 产出超阈值落盘                                      executor/spill.rs:53
+   │ ④ 产出超阈值落盘                                      exec/spill.rs:98
    ▼
 success = 模板每步都 Done（**在追加整理步之前算**）        executor/mod.rs:262
    ├─ 无契约   → 结果 = 交付步原文（不再调 LLM）           executor/mod.rs:355-363
    ├─ 契约非法 → 补一条 Failed 整理步，result=None，任务仍可 success   :365-378
-   └─ 有契约   → 跑 #RESULT 整理步（只给 builtin_read_file_lines）      :380-462
+   └─ 有契约   → 跑 #RESULT 整理步（只给 builtin_read_file_lines + builtin_grep_file）  :380-462
    ▼
 PlanRunReport ─► PlanRunEvent::RunFinished ─► apply_event 归并进 RunSnapshot
                                           run_service/state.rs:16
@@ -175,7 +175,7 @@ UI 边填边预览用 `render_lenient`（保留占位符 + 回报 missing，纯�
 | 模板新字段 | `plan/template.rs` | **必须** `#[serde(default)]`；同步 agent-gui 的保存校验与面板展示 |
 | 输出契约新 `kind` / 新字段 | `plan/output_schema.rs`（唯一定义处） | 同步 `OutputKind::ALL`、`uses_fields`、GUI 同名字段 |
 | 占位符语义变化 | `plan/placeholder.rs` | **同步 GUI 镜像实现（见 §7-⑫）** |
-| 执行期新行为 | `exec/executor/` 下**新建小模块** | 保持「总编排只在 `mod.rs`」（config/spill/resolve/prior/tools 就是这么拆的） |
+| 执行期新行为 | `exec/executor/` 下**新建小模块** | 保持「总编排只在 `mod.rs`」（config/resolve/prior/tools 就是这么拆的；`spill` 因 executor 与 step 共用，提升到了 `exec/` 层） |
 | 新的进度事件 | `exec/event.rs` | 同步 `run_service/state.rs::apply_event`（**穷尽 match，无 `_` 分支**）与快照字段 |
 | 报告新指标 | `exec/report.rs` | 可选字段加 `#[serde(default)]` |
 | 宿主新查询 / 命令 | `run_service/types.rs` + `service.rs` + `core.rs` | 启动走命令队列；查询 / 订阅 / 取消走 `RunStore` |
@@ -215,9 +215,11 @@ cargo test -p planned-agent-gui --bins            # 宿主侧（消费方）
    `RunUpdate::session_id()` 过滤（`run_service/types.rs:356-366`）。
 6. **`is_cancelled` 有两份**（`exec/executor/mod.rs:466` 与 `exec/step/llm.rs:12`，同名同语义）——
    改一处别忘另一处。
-7. **spill 阈值是「含等号」的 `<=`**：等于阈值仍内联，多 1 字符才落盘（`exec/executor/spill.rs:53-76`）。
-   落盘 **≠ 省内存**：全文始终留在 `StoredOutput.content`，落盘只是「不把全文塞进下游 prompt」；
-   文件名用**步骤序号**而非 `result_reference`（防目录穿越）。
+7. **spill 阈值是「含等号」的 `<=`**：等于阈值仍内联，多 1 字符才落盘（`exec/spill.rs:69-96`）。
+   落盘 **≠ 省内存**：全文始终留在调用方手里，落盘只是「不把全文塞进上下文」；
+   文件名用**序号**而非 `result_reference`（防目录穿越）。
+   **两个消费者**：跨步产出（`executor`，`step-<i>.txt`，IO 失败 → 该步 `Failed`）与
+   步内工具输出（`step`，`tool-s<步>-r<轮次>-<序号>.txt`，IO 失败 → 告警 + 回退内联，**不**判该步失败）。
 8. **`OUTPUT_MAX_CHARS`(8000) 只截「记录侧」**（`exec/step/mod.rs:322-331`）：`StepRunResult.output`
    保持不截断，下游 `prior` 依赖它。
 9. **依赖校验只警告不阻断**（`exec/executor/prior.rs:19`），运行期 `collect_prior` 兜底跳过未命中引用。
@@ -251,6 +253,7 @@ cargo test -p planned-agent-gui --bins            # 宿主侧（消费方）
 | `flexible-executor.md` | 执行器内核：模板 + 参数 → 逐步执行 → 报告 / 事件 | 🚧 内核已实现（宿主接线 / 落库另见下两行） |
 | `flexible-run-service.md` | 宿主侧常驻执行服务、零依赖接缝 | ✅ 已实现 |
 | `flexible-step-output-spill.md` | 大产出「落文件 + 句柄传递」取代硬截断 | ✅ 已按稿实施 |
+| `flexible-step-tool-output-spill.md` | 单步内工具输出「落盘 + 句柄」（只做不内联；chat 侧同类问题待做） | ✅ 已按稿实施 |
 | `flexible-output-step.md` | 新增「输出定义」步（`output_schema` 的来源） | ⚠️ 设计稿（未实施，落点在 GUI/prompts 侧） |
 | `flexible-output-followups.md` | 面板展示 `output_schema` 与本次结果 | ✅ 已实施（GUI 侧） |
 | `flexible-execution-audit.md` | 一次真实执行日志的只读诊断 | 📋 待逐条拍板 |

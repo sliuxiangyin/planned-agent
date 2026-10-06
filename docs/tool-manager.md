@@ -360,7 +360,7 @@ registry.update_tool_categories("tool_name", vec![
 | 工具名 | 描述 |
 |--------|------|
 | `builtin_read_text_file` | 读取整个文本文件（**裸文本**；`with_line_numbers=true` 时行号格式 `{:>6} | `） |
-| `builtin_read_file_lines` | 按行范围读取（`offset` **0-based**、`limit` 默认 2000） |
+| `builtin_read_file_lines` | 按行范围读取（`offset` **0-based**；`limit` **省略则读到文件末尾**，大文件请显式传；`with_line_numbers=true` 时行号格式同 `builtin_read_text_file`） |
 | `builtin_read_multiple_text_files` | 批量读取，以 `=== <路径> ===` 分隔；单项失败内联标注 |
 | `builtin_head_file` / `builtin_tail_file` | 预览文件头 / 尾 N 行 |
 | `builtin_read_media_file` / `builtin_read_multiple_media_files` | 读媒体文件，返回 `{mime_type, size_bytes, data_base64}` |
@@ -389,7 +389,8 @@ registry.update_tool_categories("tool_name", vec![
 | 工具名 | 描述 |
 |--------|------|
 | `builtin_search_files` | glob 搜文件名（大小写不敏感，`excludePatterns` / `min_bytes` / `max_bytes`） |
-| `builtin_search_files_content` | 搜内容（字面量或正则），返回 `路径:行号:列号: 行内容` |
+| `builtin_search_files_content` | 搜内容（字面量或正则），返回 `路径:行号:列号: 行内容`；`path` 必须是**目录** |
+| `builtin_grep_file` | 搜**单个文件**（`path` 必须是文件）；带上下文与 1-based 行号，`match_offset` 分页续读 |
 | `builtin_find_duplicate_files` | 按内容找重复文件（size 分组 + 逐字节比对，零哈希依赖） |
 | `builtin_find_empty_directories` | 找空目录 |
 
@@ -400,7 +401,7 @@ registry.update_tool_categories("tool_name", vec![
 | `builtin_zip_files` / `builtin_zip_directory` | 打包文件 / 目录（内存中打包 + 原子落盘） |
 | `builtin_unzip_file` | 解压（`enclosed_name` 防 zip-slip） |
 
-共 **23 个**工具，全部归 `ToolCategory::File`。路径一律经 cap-std 沙箱解析，越界返回 `path_outside_allowed`。
+共 **24 个**工具，全部归 `ToolCategory::File`。路径一律经 cap-std 沙箱解析，越界返回 `path_outside_allowed`。
 
 可预期失败**统一返回错误码**（`Ok` + `is_error: true` 的 `{ error, message }`），不返回 `Err`（只有未知工具名才 `Err`）。
 共享实现（沙箱与路径解析、错误码、原子写、编码探测、审计）在 `src/builtin/filesystem/core.rs` 与 `support.rs`。

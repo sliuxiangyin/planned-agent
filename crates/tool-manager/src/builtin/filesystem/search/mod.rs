@@ -2,6 +2,7 @@
 
 pub(crate) mod content;
 pub(crate) mod files;
+pub(crate) mod grep;
 pub(crate) mod tree;
 
 use std::path::PathBuf;

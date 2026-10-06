@@ -192,6 +192,11 @@ pub(crate) fn decode(bytes: &[u8], encoding: TextEncoding) -> Result<String, Str
 /// 二进制探测只看文件开头这么多字节。
 pub(crate) const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
+/// 行号前缀的列宽（`{:>6} | `）—— **全族唯一来源**：
+/// `read_text_file`、`read_file_lines`（`with_line_numbers`）、`grep_file` 必须一致，
+/// 否则同一份文件在不同工具里行号对不齐。
+pub(crate) const LINE_NUMBER_WIDTH: usize = 6;
+
 /// 开头 8 KiB 含 NUL 字节即判二进制。
 ///
 /// 调用前必须先走 [`sniff_encoding`]：带 BOM 的 UTF-16 文本天然到处是 NUL，

@@ -146,6 +146,55 @@ async fn read_file_lines_offset_is_zero_based() {
 }
 
 #[tokio::test]
+async fn read_file_lines_with_line_numbers_matches_text_file_format() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, "one\ntwo\nthree\n").unwrap();
+
+    let provider = provider(dir.path());
+    let result = exec(
+        &provider,
+        "builtin_read_file_lines",
+        json!({ "path": p(&file), "offset": 1, "limit": 2, "with_line_numbers": true }),
+    )
+    .await;
+
+    let rendered = text(&result);
+    // 行号是**文件里的真实行号**（1-based），不是「本次选中的第几行」；
+    // 格式与 builtin_read_text_file 一致（右对齐 + ` | `），见 contract.rs 的 LINE_NUMBER 说明。
+    assert!(rendered.contains("     2 | two"), "实际输出：{rendered}");
+    assert!(rendered.contains("     3 | three"), "实际输出：{rendered}");
+    assert!(!rendered.contains("     1 | one"), "未选中的行不该出现：{rendered}");
+}
+
+#[tokio::test]
+async fn read_file_lines_without_line_numbers_is_verbatim() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, "one\ntwo\nthree\n").unwrap();
+
+    let provider = provider(dir.path());
+    // 省略参数
+    let omitted = exec(
+        &provider,
+        "builtin_read_file_lines",
+        json!({ "path": p(&file), "offset": 1, "limit": 2 }),
+    )
+    .await;
+    // 显式传 false
+    let explicit = exec(
+        &provider,
+        "builtin_read_file_lines",
+        json!({ "path": p(&file), "offset": 1, "limit": 2, "with_line_numbers": false }),
+    )
+    .await;
+
+    // 零回归：与改动前逐字相同，且「省略」与「显式 false」两条路径无差别
+    assert_eq!(text(&omitted), "two\nthree");
+    assert_eq!(text(&explicit), "two\nthree");
+}
+
+#[tokio::test]
 async fn read_text_file_rejects_binary_content() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("bin.dat");
@@ -802,7 +851,7 @@ async fn every_registered_tool_is_dispatchable() {
         .map(|(tool, _)| tool.name)
         .collect();
 
-    assert_eq!(names.len(), 23, "工具数量应与设计稿一致：{names:?}");
+    assert_eq!(names.len(), 24, "工具数量应与设计稿一致：{names:?}");
 
     // 每个名字都必须有分派分支（未知名字会返回 Err）
     let executor = provider.executor();
@@ -812,4 +861,158 @@ async fn every_registered_tool_is_dispatchable() {
             panic!("{name} 没有分派分支：{error}");
         }
     }
+}
+
+// ── builtin_grep_file（单文件内容搜索） ─────────────────────────────────────
+
+#[tokio::test]
+async fn grep_file_finds_hits_with_context_and_line_numbers() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, "alpha\nbeta\ngamma\ndelta\n").unwrap();
+
+    let provider = provider(dir.path());
+    let result = exec(
+        &provider,
+        "builtin_grep_file",
+        json!({ "path": p(&file), "query": "gamma", "context_lines": 1 }),
+    )
+    .await;
+
+    let rendered = text(&result);
+    // 命中行以 `>` 标记、上下文行以空格标记，行号 1-based 且与 read_text_file 同列宽
+    assert!(rendered.contains(">     3 | gamma"), "命中行：{rendered}");
+    assert!(rendered.contains("\n      2 | beta"), "上文行：{rendered}");
+    assert!(rendered.contains("\n      4 | delta"), "下文行：{rendered}");
+    assert!(!rendered.contains("alpha"), "超出上下文的行不该出现：{rendered}");
+    assert!(rendered.contains("共 1 处匹配"), "应给出命中总数：{rendered}");
+    assert!(
+        rendered.contains("offset = 行号 - 1"),
+        "行号换算式必须写死在输出里：{rendered}"
+    );
+}
+
+#[tokio::test]
+async fn grep_file_paginates_with_match_offset() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, "hit 1\nno\nhit 2\nno\nhit 3\n").unwrap();
+
+    let provider = provider(dir.path());
+    let first = exec(
+        &provider,
+        "builtin_grep_file",
+        json!({ "path": p(&file), "query": "hit", "max_matches": 2, "context_lines": 0 }),
+    )
+    .await;
+    let rendered = text(&first);
+    assert!(
+        rendered.contains("共 3 处匹配（本次返回第 1-2 处）；续读：match_offset=2"),
+        "第一批应提示续读：{rendered}"
+    );
+    assert!(rendered.contains("     1 | hit 1"), "第一批首处：{rendered}");
+    assert!(rendered.contains("     3 | hit 2"), "第一批次处：{rendered}");
+    assert!(!rendered.contains("hit 3"), "第一批不该含第三处：{rendered}");
+
+    let second = exec(
+        &provider,
+        "builtin_grep_file",
+        json!({
+            "path": p(&file), "query": "hit", "max_matches": 2,
+            "match_offset": 2, "context_lines": 0
+        }),
+    )
+    .await;
+    let rendered = text(&second);
+    assert!(rendered.contains("     5 | hit 3"), "第二批应含第三处：{rendered}");
+    // 最后一批不再给续读提示，免得模型白跑一次
+    assert!(
+        rendered.contains("共 3 处匹配（本次返回第 3-3 处，已到最后）"),
+        "最后一批不该提示续读：{rendered}"
+    );
+    assert!(!rendered.contains("match_offset=3"), "不该再提示续读：{rendered}");
+}
+
+#[tokio::test]
+async fn grep_file_is_case_insensitive_by_default_and_sensitive_on_demand() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, "Needle\nneedle\n").unwrap();
+
+    let provider = provider(dir.path());
+    let insensitive = exec(
+        &provider,
+        "builtin_grep_file",
+        json!({ "path": p(&file), "query": "needle", "context_lines": 0 }),
+    )
+    .await;
+    assert!(
+        text(&insensitive).contains("共 2 处匹配"),
+        "默认忽略大小写：{}",
+        text(&insensitive)
+    );
+
+    let sensitive = exec(
+        &provider,
+        "builtin_grep_file",
+        json!({ "path": p(&file), "query": "needle", "ignore_case": false, "context_lines": 0 }),
+    )
+    .await;
+    assert!(
+        text(&sensitive).contains("共 1 处匹配"),
+        "显式 ignore_case=false 时区分大小写：{}",
+        text(&sensitive)
+    );
+}
+
+#[tokio::test]
+async fn grep_file_marks_every_hit_even_when_contexts_overlap() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, "hit a\nhit b\nhit c\n").unwrap();
+
+    let provider = provider(dir.path());
+    // context_lines=2 时三处命中的上下文完全重叠 —— 三行都必须是命中行（都带 `>`）。
+    // 回归：旧实现用「行号 → 是否命中」的单个 map 边插边盖，后一个命中的上下文
+    // 会把前一个命中行盖成非命中。
+    let result = exec(
+        &provider,
+        "builtin_grep_file",
+        json!({ "path": p(&file), "query": "hit", "context_lines": 2 }),
+    )
+    .await;
+
+    let rendered = text(&result);
+    assert!(rendered.contains(">     1 | hit a"), "第 1 行是命中：{rendered}");
+    assert!(rendered.contains(">     2 | hit b"), "第 2 行是命中：{rendered}");
+    assert!(rendered.contains(">     3 | hit c"), "第 3 行是命中：{rendered}");
+    assert!(
+        rendered.contains("共 3 处匹配（已全部返回）"),
+        "三行各算一处：{rendered}"
+    );
+}
+
+#[tokio::test]
+async fn grep_file_rejects_directory_and_invalid_regex() {
+    let dir = tempdir().unwrap();
+    let provider = provider(dir.path());
+
+    // 传目录：与 builtin_search_files_content 的报错方向正好相反
+    let on_dir = exec(
+        &provider,
+        "builtin_grep_file",
+        json!({ "path": p(dir.path()), "query": "x" }),
+    )
+    .await;
+    assert!(on_dir.is_error, "传目录必须失败：{:?}", code(&on_dir));
+    assert_eq!(code(&on_dir).as_deref(), Some("is_a_directory"));
+
+    // 坏正则
+    let bad_regex = exec(
+        &provider,
+        "builtin_grep_file",
+        json!({ "path": p(dir.path()), "query": "(", "is_regex": true }),
+    )
+    .await;
+    assert_eq!(code(&bad_regex).as_deref(), Some("regex_error"));
 }

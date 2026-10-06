@@ -15,15 +15,14 @@ use planned_agent_core::mcp::types::ToolResult;
 
 use crate::builtin::filesystem::core::{FilesystemService, Resolved};
 use crate::builtin::filesystem::support::{
-    TextEncoding, decode, failure, looks_binary, path_error, sniff_encoding, string_array,
-    tool_result,
+    LINE_NUMBER_WIDTH, TextEncoding, decode, failure, looks_binary, path_error, sniff_encoding,
+    string_array, tool_result,
 };
 
 /// 单文件「全文入内存」的硬上限（①）。
-const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
-
-/// 行号列宽度：与上游 `format!("{:>6} | {}", ...)` 一致（③）。
-const LINE_NUMBER_WIDTH: usize = 6;
+///
+/// `grep_file` 复用同一值 —— 同一个文件「能读就能搜」，不出现「读得出、搜不了」。
+pub(crate) const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// `builtin_read_text_file`
 pub(crate) async fn read_text_file(service: &FilesystemService, arguments: &Value) -> ToolResult {
@@ -116,6 +115,11 @@ pub(crate) async fn read_file_lines(service: &FilesystemService, arguments: &Val
         );
     };
     let limit = arguments.get("limit").and_then(Value::as_u64);
+    // 默认关闭：不对既有调用方产生任何输出变化。
+    let with_line_numbers = arguments
+        .get("with_line_numbers")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let path = Path::new(path_str);
 
     let resolved = match service.resolve(path).await {
@@ -153,7 +157,24 @@ pub(crate) async fn read_file_lines(service: &FilesystemService, arguments: &Val
         None => lines.len(),
     };
     let selected = end - start;
-    let output = lines[start..end].join("\n");
+    let output = if with_line_numbers {
+        // 与 `read_text_file` 同一格式（「右对齐行号 + 空格 + | + 空格」），不另造一种行号写法。
+        // 注意 `offset` 是 0-based，而展示行号从 1 开始，故用 `start + index + 1`。
+        lines[start..end]
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                format!(
+                    "{:>width$} | {line}",
+                    start + index + 1,
+                    width = LINE_NUMBER_WIDTH
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        lines[start..end].join("\n")
+    };
 
     let duration_ms = started.elapsed().as_millis() as u64;
     tracing::info!(
@@ -164,6 +185,7 @@ pub(crate) async fn read_file_lines(service: &FilesystemService, arguments: &Val
         limit,
         total_lines = lines.len(),
         selected,
+        with_line_numbers,
         duration_ms,
         "按行读取完毕"
     );

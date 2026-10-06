@@ -4,7 +4,7 @@ use planned_agent_core::ai::types::{FunctionDefinition, ToolDefinition, ToolType
 use planned_agent_core::mcp::types::Tool;
 use planned_agent_tool_manager::ToolRegistry; 
 
-/// 按工具名精确取定义（输出整理步只需要 `builtin_read_file_lines`）。
+/// 按工具名精确取定义（输出整理步只用 `builtin_read_file_lines` + `builtin_grep_file`）。
 pub(super) fn tool_definitions_for_names(tools: &ToolRegistry, names: &[&str]) -> Vec<ToolDefinition> {
     tools
         .get_enabled_tools_with_categories()

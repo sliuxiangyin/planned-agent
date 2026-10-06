@@ -100,12 +100,42 @@ pub enum MessageRole {
 pub enum MessageContent {
     /// 文本内容
     Text { text: String },
-    /// 图片内容
-    Image { image_url: ImageUrl },
+    /// 图片内容（单图、无文字）
+    Image { image: ImageSource },
+    /// 图文混排：多段内容，与 OpenAI 的 content part 数组一一对应
+    Parts { parts: Vec<ContentPart> },
     /// 工具调用结果
     ToolResult { tool_call_id: String, content: String },
 }
+
+/// 一条用户消息里的一段内容（与 OpenAI 的 content part 一一对应）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    /// 文本段
+    Text { text: String },
+    /// 图片段
+    Image { image: ImageSource },
+}
+
+/// 图片来源：可直接使用的地址，或本地文件（发请求前由适配层读盘 + base64 转成 `data:` URL）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ImageSource {
+    Url {
+        url: String,
+        detail: Option<ImageDetail>,
+    },
+    File {
+        path: PathBuf,
+        detail: Option<ImageDetail>,
+    },
+}
 ```
+
+> 图片输入（多模态）的完整语义见 `docs/planned-agent/multimodal-image-input.md`：
+> `ImageSource::File` 由 `crates/ai-openai` 在读盘阶段转成 `data:` URL；
+> 图片段只在 **user** 消息里受支持（底层 `async-openai` 的其它角色 part 只有文本）。
 
 ## 统一消息结构
 
