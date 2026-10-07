@@ -41,7 +41,8 @@ crates/agent-gui/
 ### 1. SQLite 自动初始化
 
 启动时：
-1. 解析 DB 文件路径（环境变量 `PLANNED_AGENT_DB_PATH` > 配置 > cwd 拼接）
+1. 解析 DB 文件路径（环境变量 `PLANNED_AGENT_DB_PATH` **整值覆盖** > 由全局 `cache_root` 派生
+   —— 见 `docs/planned-agent/gui-cache-root.md` §3.3/§3.6）
 2. `Database::connect("sqlite://...?mode=rwc")` 建立连接
 3. `Migrator::up(&db, None)` 应用全部 pending 迁移（幂等）
 4. 构造 1 个 `TestRepo`（MVP 占位）
@@ -64,9 +65,9 @@ crates/agent-gui/
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuiStorageConfig {
-    /// SQLite 数据库文件路径（相对路径以 cwd 为基准）
+    /// SQLite 数据库文件路径 —— 默认是 `cache_root` 下的**单段名** `agent-gui.db`
     #[serde(default = "default_storage_db_path")]
-    pub db_path: String,            // 默认 "./data/agent-gui.db"
+    pub db_path: String,            // 默认 "agent-gui.db"（生效路径 <cache_root>/agent-gui.db）
 
     /// 启动时打印 schema 概要（仅调试）
     #[serde(default)]
@@ -190,11 +191,18 @@ PLANNED_AGENT_DB_PATH=/tmp/debug.db cargo run -p planned-agent-gui
 
 ```toml
 # ═══════════════════════════════════════════════════════════
+# 全局缓存根（sled KV / SQLite / flexible 产出 / RAG 向量库都拼在它下面）
+# 见 docs/planned-agent/gui-cache-root.md
+# ═══════════════════════════════════════════════════════════
+cache_root = "./data"
+
+# ═══════════════════════════════════════════════════════════
 # 本地持久化（SQLite via SeaORM）
 # ═══════════════════════════════════════════════════════════
 [storage]
 # SQLite 数据库文件路径（启动时若不存在则自动创建）
-db_path = "./data/agent-gui.db"
+# 单段名 → 拼在 `cache_root` 下；绝对路径 / 多段相对路径 → 原语义（相对 cwd）
+db_path = "agent-gui.db"
 # 启动时是否打印 schema 概要（调试用；MVP 留 false）
 echo_schema = false
 ```
@@ -358,7 +366,7 @@ crates/agent-gui
 2. **复用既有模式**：6 个 `Resource` 注入与 `InitStatus` 汇总与现有 5 个模块完全对齐
 3. **失败容错**：Storage 不可用时 GUI 仍可启动（与 rag/mcp 同策略）
 4. **迁移幂等**：`Migrator::up(&db, None)` 配合 `seaql_migrations` 表确保二次启动不重跑
-5. **路径灵活**：环境变量 > 配置文件 > 默认值三级优先级
+5. **路径灵活**：环境变量（整值覆盖）> 由全局 `cache_root` 派生 > 单段默认名
 6. **阶段 2 友好**：新增业务表 = 新增 entity + migration + repository + StorageContext 字段，零侵入现有代码
 
 ## 验证清单

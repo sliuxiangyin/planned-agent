@@ -53,12 +53,15 @@ pub fn start_run_service(services: &ReadyServices) -> (Arc<RunService>, Arc<Plan
 /// 为什么不做成「传 `session_id` 让服务去读库」：那正是 v1 的接缝形态，会把「会话是否定稿 /
 /// 模板能否反序列化」带进执行路径（见设计稿 §12）。将来首页要「直接跑某个会话」时，
 /// 在调用方 `load_template` 之后再调本函数即可 —— 三态解析留在 UI 层。
-/// 组装执行器配置：**会话段在这里拼上** —— 执行器不认识「会话」概念
-/// （见 `docs/planned-agent/flexible-step-output-spill.md` §5.2）。
+/// 组装执行器配置：**会话段在这里拼上** —— 执行器不认识「会话」概念，也不知道
+/// 宿主的全局缓存根；产出**根目录**由 `GuiConfig::flexible_output_dir()` 解析（已含 `cache_root`），
+/// 见 `docs/planned-agent/gui-cache-root.md` §3.4、`flexible-step-output-spill.md` §5.2。
 fn executor_config_for(session_id: &str) -> ExecutorConfig {
-    let flexible = &crate::app_config().flexible;
+    let app = crate::app_config();
+    let flexible = &app.flexible;
     ExecutorConfig {
-        cache_dir: std::path::PathBuf::from(&flexible.output_cache_dir).join(session_id),
+        // 产出根目录（已含 `cache_root`）再拼上会话段
+        cache_dir: app.flexible_output_dir().join(session_id),
         spill_threshold_chars: flexible.spill_threshold_chars,
         spill_preview_chars: flexible.spill_preview_chars,
         // `0` 在配置里表示「不限制」，对应内核的 `None`。

@@ -59,7 +59,7 @@ pub async fn bootstrap(
     // 3. KV 缓存（异步，必须先于 mcp）
     on_progress("kv");
     let kv = Arc::new(
-        KvContext::init(&config.cache)
+        KvContext::init(&config.cache, config.kv_path())
             .await
             .map_err(|e| vec![("KV 缓存".to_string(), e.to_string())])?,
     );
@@ -83,13 +83,13 @@ pub async fn bootstrap(
 
     // 6. Storage（异步：SQLite + 迁移 + Repos）
     on_progress("storage");
-    let storage = StorageContext::init(&config.storage)
+    let storage = StorageContext::init(&config.storage, config.db_path())
         .await
         .map_err(|e| vec![("Storage 数据库".to_string(), e.to_string())])?;
 
     // 7. RAG（异步，可选：失败不阻塞）——放到必需模块之后，避免可选 init 阻塞就绪
     on_progress("rag");
-    let rag = match RagContext::init(&config.rag).await {
+    let rag = match RagContext::init(&config.rag, config.rag_store_path()).await {
         Ok(ctx) => Some(Arc::new(ctx)),
         Err(e) => {
             tracing::warn!("RAG 未启用（可选模块，不阻塞启动）: {}", e);

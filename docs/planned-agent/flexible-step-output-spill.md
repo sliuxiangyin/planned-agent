@@ -8,7 +8,7 @@
 > **实施状态（2026-09-28）：已按本稿实施。**
 > 落点：`flexible/executor.rs`（`ExecutorConfig` 三字段 + 落盘 + `prior` 渲染 + 整理步给 `builtin_read_file`）、
 > `flexible/prompt.rs`（`STEP_SYSTEM_PROMPT` 加读文件规则）、`flexible/report.rs` 与 `run_service/types.rs`（`output_file`）、
-> GUI `config.rs`（`[flexible]` 段）+ `services/run_service.rs`（拼会话段）。
+> GUI `config/flexible.rs`（`[flexible]` 段）+ `services/run_service.rs`（拼会话段）。
 > 验收：`cargo test -p planned-agent --lib flexible::` = 88 passed；`cargo test -p planned-agent-gui --bins` = 63 passed。
 >
 > ⚠️ **勘误（2026-09-30）**：本文写于 `file_tools` 时代，文件工具此后已被 `filesystem` 工具族取代
@@ -154,7 +154,7 @@ step N 产出 output（StepRunResult.output，当前不截断）
 | `threshold_chars` | 8 000 | 超过则落文件（与记录侧 `OUTPUT_MAX_CHARS` 对齐） |
 | `preview_chars` | 800 | prior 里保留的预览长度 |
 
-> 配置落在 GUI `config.rs` 的 `[flexible]` 段，沿用既有模式
+> 配置落在 GUI `config/flexible.rs` 的 `[flexible]` 段，沿用既有模式
 > （`Option<T>` + `#[serde(default = "default_xxx")]`，参考 `kv_cache.path` 的 `default_cache_path()`）。
 
 ---
@@ -226,7 +226,7 @@ step N 产出 output（StepRunResult.output，当前不截断）
 | `flexible/prompt.rs` | `STEP_SYSTEM_PROMPT` 加「按需读文件」规则（§4.1） |
 | `flexible/report.rs` | `StepRunRecord.output_file` |
 | `flexible/run_service/types.rs` | `StepSnapshot.output_file` |
-| `crates/agent-gui/src/config.rs` | `[flexible]` 段 + 默认值 |
+| `crates/agent-gui/src/config/flexible.rs` | `[flexible]` 段 + 默认值 |
 | `crates/agent-gui/src/...` 装配处 | 把 `cache_dir`（含 session_id）塞进 `ExecutorConfig` |
 | `builtin_read_file` / `builtin_write_file` | **不改**（能力已够：`file_tools.rs:181-218` / `:220-252`） |
 | 日志 | `executor.rs` 新增 `log_output()`（单行 + 封顶）与 `LOG_OUTPUT_MAX_CHARS`；三条日志（步骤结束 / 步骤失败 / 整理步结束）带产出 |

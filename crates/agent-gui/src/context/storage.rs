@@ -1,7 +1,7 @@
 //! Storage 模块 GUI 适配层
 //!
 //! 启动流程：
-//!   1. 解析 DB 文件路径（多候选 + 自动 mkdir 父目录）
+//!   1. 解析 DB 文件路径（由全局 `cache_root` 派生；`PLANNED_AGENT_DB_PATH` 可整值覆盖）
 //!   2. `Database::connect("sqlite://...?mode=rwc")` 建立连接
 //!   3. `Migrator::up(&db, None)` 应用全部 pending 迁移
 //!   4. 构造 Repo 实例
@@ -15,6 +15,7 @@ use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 
 use crate::config::GuiStorageConfig;
+use crate::paths;
 use crate::storage::{
     migrations::Migrator,
     repository::{
@@ -59,8 +60,12 @@ impl StorageContext {
     }
 
     /// 从配置异步初始化 SQLite + 迁移 + Repos
-    pub async fn init(config: &GuiStorageConfig) -> anyhow::Result<Self> {
-        let path = resolve_db_path(&config.db_path)?;
+    ///
+    /// `path` 已由 [`GuiConfig::db_path`](crate::config::GuiConfig::db_path) 解析好（含全局
+    /// `cache_root`）—— 本层不认识 `cache_root`（见 `docs/planned-agent/gui-cache-root.md` §3.4）。
+    pub async fn init(config: &GuiStorageConfig, path: PathBuf) -> anyhow::Result<Self> {
+        // 父目录（即 `cache_root`）由宿主保证；SQLite 以 `mode=rwc` 自建文件
+        paths::ensure_parent(&path)?;
         let url = format!("sqlite://{}?mode=rwc", path.display());
 
         let mut opt = ConnectOptions::new(url);
@@ -86,25 +91,4 @@ impl StorageContext {
             flexible_run_history_repo: Arc::new(FlexibleRunHistoryRepo::new(db.clone())),
         })
     }
-}
-
-/// 解析 DB 文件路径：复用 config.rs try_load 的多候选模式
-fn resolve_db_path(configured: &str) -> anyhow::Result<PathBuf> {
-    let raw = std::env::var("PLANNED_AGENT_DB_PATH").unwrap_or_else(|_| configured.to_string());
-
-    let path = PathBuf::from(&raw);
-    let path = if path.is_relative() {
-        if let Ok(cwd) = std::env::current_dir() {
-            cwd.join(&path)
-        } else {
-            path
-        }
-    } else {
-        path
-    };
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    Ok(path)
 }

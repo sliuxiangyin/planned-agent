@@ -3,6 +3,7 @@
 //! 将 planned-agent-rag 的异步组件聚合为 RagContext，
 //! 供 Dioxus 组件通过 Context 消费。
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use planned_agent_rag::embedder::{Embedder, EmbedderFactory, EmbedderProvider};
@@ -25,16 +26,20 @@ impl RagContext {
     /// 从 RagConfig 异步初始化 RAG 组件
     ///
     /// 流程：打开向量存储 → 创建 Embedder → 组合为 Retriever
-    pub async fn init(config: &RagConfig) -> anyhow::Result<Self> {
+    ///
+    /// `store_path` 已由 [`GuiConfig::rag_store_path`](crate::config::GuiConfig::rag_store_path)
+    /// 解析好（含全局 `cache_root`，且是**绝对路径** —— PolarisDB 自己不解析 cwd）。
+    pub async fn init(config: &RagConfig, store_path: PathBuf) -> anyhow::Result<Self> {
         // 若无 API Key，跳过初始化
         if config.embedding_api_key.is_empty() {
             anyhow::bail!("RAG embedding_api_key 未配置，跳过初始化");
         }
 
         // 1. 打开 PolarisDB 向量存储（bge-m3 默认维度 1024）
-        let store = PolarisDbStore::open(&config.store.path, 1024).await?;
+        crate::paths::ensure_parent(&store_path)?;
+        let store = PolarisDbStore::open(&store_path.to_string_lossy(), 1024).await?;
         let store: Arc<dyn TraceStore> = Arc::new(store);
-        tracing::info!("RAG 向量存储已打开: {}", config.store.path);
+        tracing::info!("RAG 向量存储已打开: {}", store_path.display());
 
         // 2. 创建 Embedder（OpenAI 兼容 API）
         let provider = EmbedderProvider::OpenAI {

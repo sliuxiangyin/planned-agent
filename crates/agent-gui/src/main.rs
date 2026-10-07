@@ -4,6 +4,7 @@ mod components;
 mod config;
 mod context;
 mod pages;
+mod paths;
 mod services;
 mod shared;
 mod storage;

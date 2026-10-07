@@ -26,7 +26,9 @@ use planned_agent_tool_manager::ToolRegistry;
 /// 文件工具的 cap-std 沙箱根：**cwd + 用户主目录 + 系统临时目录**。
 ///
 /// 用户 2026-09-30 拍板放宽（原为仅 cwd）。各项理由：
-/// - `cwd`：保住「相对路径基于 cwd」的既有语义，也是默认 `output_cache_dir`（`./data/cache`）的落点；
+/// - `cwd`：保住「相对路径基于 cwd」的既有语义，也是默认 `cache_root`（`./data`）的落点 ——
+///   flexible 产出等默认都落在沙箱内；若把 `cache_root` 配到 cwd 之外，那些产出将不被本沙箱覆盖
+///   （见 `docs/planned-agent/gui-cache-root.md` §4 R-2）；
 /// - **用户主目录**：旧 `builtin_read_file` 能读任意绝对路径（桌面 / 下载 / 文档是常见用法），
 ///   收窄到沙箱后必须显式放行主目录，否则模型读不到用户文件；
 /// - 系统临时目录：spill / 中间产物可能落在 `%TEMP%` 之下。
