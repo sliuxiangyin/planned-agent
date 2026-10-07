@@ -17,6 +17,106 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
+impl ToolResult {
+    /// 把 `content` 解析成内容块序列（**借用视图**，零拷贝）。
+    ///
+    /// [`content`](Self::content) 是异构开放容器 —— 内置工具 / 子 agent 往里塞自定义
+    /// JSON，只有 `planned-agent-mcp-rmcp` 会产内容块。本方法把那一种 payload 的解析
+    /// 收敛到一处，消费方不必再手写 `block.get("data").and_then(Value::as_str)`。
+    ///
+    /// 返回 `None` = 这个 payload 不是内容块序列（自定义 JSON 的常态）。
+    pub fn content_blocks(&self) -> Option<Vec<ContentBlock<'_>>> {
+        parse_content_blocks(&self.content)
+    }
+
+    /// 把工具结果文本化，**图片块降级为 `[图片]` 占位**。
+    ///
+    /// - 不含图片的结果**原样返回**（`Value::String` 仍是 `Value::String`，逐字不变）；
+    /// - 含图片块时，图片块换成占位，其余块保留。
+    ///
+    /// 用途：只需要文本的消费路径（chat / ReAct）必须用它，绝不能直接 `to_string()`
+    /// —— 那会把 base64 当成文本灌进 LLM 上下文与 UI 事件。
+    /// 需要把图片落盘再交给模型的路径（flexible 单步循环）先落盘，再走这里。
+    pub fn sanitized_content(&self) -> Value {
+        let Some(blocks) = self.content_blocks() else {
+            return self.content.clone();
+        };
+        if !blocks
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Image { .. }))
+        {
+            return self.content.clone();
+        }
+        Value::Array(
+            blocks
+                .iter()
+                .map(|block| match block {
+                    ContentBlock::Image { .. } => Value::String("[图片]".to_string()),
+                    ContentBlock::Text(text) => Value::String((*text).to_string()),
+                    ContentBlock::Unknown(value) => (*value).clone(),
+                })
+                .collect(),
+        )
+    }
+}
+
+/// 内容块（**借用视图**）。
+///
+/// [`ToolResult::content`] 是 `Value`：它是异构开放容器，内容块只是它承载的一种
+/// payload。本枚举把那一种 payload 的解析收敛到一处。
+///
+/// **没有** `Resource` / `Audio` 变体：适配层（`planned-agent-mcp-rmcp` 的
+/// `convert_content`）已经把非 text/image 的块压成了占位文本，类型信息在那一步就丢了，
+/// 视图无法恢复。将来若适配层改为保留对象形态，再来加变体。
+///
+/// 故意**不**标 `#[non_exhaustive]`：这是同一个工作区内部的类型，加变体时就让编译器
+/// 把全部消费方点出来，而不是让它们静默走兵底分支。
+#[derive(Debug, Clone, Copy)]
+pub enum ContentBlock<'a> {
+    /// 文本块。裸字符串（适配层当前产出）与 `{"type":"text","text":…}` 对象都归这里。
+    Text(&'a str),
+    /// 图片块：`{"type":"image","mime_type":…,"data":"<base64>"}`。
+    Image { mime_type: &'a str, data: &'a str },
+    /// 认不出的块 —— 原样带出来，由消费方自行决定（通常 `to_string()` 兜底）。
+    Unknown(&'a Value),
+}
+
+/// 解析 `content` 为内容块序列（[`ToolResult::content_blocks`] 的自由函数版本）。
+///
+/// - `Value::String` → 单个 [`ContentBlock::Text`]（适配层已把多文本块 join 成一个字符串，
+///   与内置工具的纯文本结果形态相同，无需也无法区分）；
+/// - `Value::Array` → 逐块解析；
+/// - 其它（对象 / 数字 / `Null`）→ `None`，这些 payload 没有统一的块语义。
+pub fn parse_content_blocks(content: &Value) -> Option<Vec<ContentBlock<'_>>> {
+    match content {
+        Value::String(text) => Some(vec![ContentBlock::Text(text)]),
+        Value::Array(blocks) => Some(blocks.iter().map(parse_content_block).collect()),
+        _ => None,
+    }
+}
+
+fn parse_content_block(block: &Value) -> ContentBlock<'_> {
+    if let Some(text) = block.as_str() {
+        return ContentBlock::Text(text);
+    }
+    match block.get("type").and_then(Value::as_str) {
+        Some("image") => ContentBlock::Image {
+            mime_type: block
+                .get("mime_type")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            data: block.get("data").and_then(Value::as_str).unwrap_or_default(),
+        },
+        Some("text") => ContentBlock::Text(
+            block
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        ),
+        _ => ContentBlock::Unknown(block),
+    }
+}
+
 /// MCP 服务器配置（支持多个）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
@@ -137,5 +237,97 @@ impl ConnectionError {
             }
             _ => base,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn result(content: Value) -> ToolResult {
+        ToolResult {
+            call_id: "c".to_string(),
+            content,
+            is_error: false,
+        }
+    }
+
+    #[test]
+    fn plain_text_content_is_untouched() {
+        let result = result(Value::String("hello".to_string()));
+        assert_eq!(result.sanitized_content(), Value::String("hello".to_string()));
+    }
+
+    #[test]
+    fn structured_content_is_untouched() {
+        let content = json!({ "content": "hi", "lines": 3 });
+        let result = result(content.clone());
+        assert_eq!(result.sanitized_content(), content);
+    }
+
+    #[test]
+    fn image_blocks_become_placeholders_and_base64_disappears() {
+        let result = result(json!([
+            { "type": "text", "text": "shot taken" },
+            { "type": "image", "mime_type": "image/png", "data": "BIGBASE64" }
+        ]));
+
+        let sanitized = result.sanitized_content();
+        let blocks = sanitized.as_array().expect("应当是数组");
+        // 文本块被规范化成裸字符串（与适配层产出的线格式一致）—— 见 `ContentBlock::Text`。
+        assert_eq!(blocks[0], Value::String("shot taken".to_string()));
+        assert_eq!(blocks[1], Value::String("[图片]".to_string()));
+        assert!(
+            !sanitized.to_string().contains("BIGBASE64"),
+            "base64 不得残留：{sanitized}"
+        );
+    }
+
+    #[test]
+    fn array_without_images_is_untouched() {
+        let content = json!(["first", "second"]);
+        let result = result(content.clone());
+        assert_eq!(result.sanitized_content(), content);
+    }
+
+    #[test]
+    fn content_blocks_parses_text_and_image_and_unknown() {
+        let result = result(json!([
+            "bare text",
+            { "type": "text", "text": "object text" },
+            { "type": "image", "mime_type": "image/png", "data": "AAA" },
+            { "type": "something-new", "x": 1 }
+        ]));
+
+        let blocks = result.content_blocks().expect("数组应当能解析");
+        assert_eq!(blocks.len(), 4);
+        assert!(matches!(blocks[0], ContentBlock::Text("bare text")));
+        assert!(matches!(blocks[1], ContentBlock::Text("object text")));
+        assert!(matches!(
+            blocks[2],
+            ContentBlock::Image {
+                mime_type: "image/png",
+                data: "AAA"
+            }
+        ));
+        assert!(matches!(blocks[3], ContentBlock::Unknown(_)));
+    }
+
+    #[test]
+    fn content_blocks_treats_plain_string_as_single_text_block() {
+        let result = result(Value::String("hello".to_string()));
+        let blocks = result.content_blocks().expect("裸字符串也是文本块");
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(blocks[0], ContentBlock::Text("hello")));
+    }
+
+    #[test]
+    fn content_blocks_rejects_non_block_payloads() {
+        // 内置工具 / 子 agent 的自定义 JSON：不是块序列。
+        let structured = result(json!({ "stdout": "x", "exit_code": 0 }));
+        assert!(structured.content_blocks().is_none());
+        assert!(result(Value::Null).content_blocks().is_none());
+        assert!(result(json!(42)).content_blocks().is_none());
     }
 }

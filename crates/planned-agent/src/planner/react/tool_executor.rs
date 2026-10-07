@@ -246,10 +246,11 @@ pub(crate) async fn handle_generic_tool(
         }
     };
 
-    // 通过 ChunkStore 处理输出：大文本自动分片，小文本原样透传
-    let processed_output = chunk_store
-        .handle(outcome.result.content.clone(), tool_name)
-        .await?;
+    // 通过 ChunkStore 处理输出：大文本自动分片，小文本原样透传。
+    // 先 `sanitized_content()` 把图片块降级为占位 —— base64 既不该进 ChunkStore，
+    // 也不该随 `Observation.output` / `raw_output` 进 ReAct 提示词。
+    let sanitized = outcome.result.sanitized_content();
+    let processed_output = chunk_store.handle(sanitized.clone(), tool_name).await?;
 
     let error_msg = if outcome.result.is_error {
         Some(extract_error_content(&processed_output))
@@ -259,7 +260,7 @@ pub(crate) async fn handle_generic_tool(
 
     let raw_obs = Observation {
         output: processed_output,
-        raw_output: outcome.result.content,
+        raw_output: sanitized,
         is_complete: false,
         error: error_msg,
         duration_ms,

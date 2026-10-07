@@ -7,7 +7,7 @@ use std::process::Stdio;
 use planned_agent_core::{
     mcp::{types::{Tool, ToolResult, McpServerConfig, ConnectionStatus, ConnectionError}, McpClient},
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -95,27 +95,58 @@ impl McpClientImpl {
     }
     
     /// 转换工具结果
+    ///
+    /// **图片必须活下来**：`as_image()` 给出的 `data`(base64) / `mime_type` 原样保留，
+    /// 交由上层（flexible）落盘成文件 —— 见 `docs/planned-agent/image-recognition-tool.md` §4.2。
+    /// 只采信 `data` / `mime_type`，**绝不采信服务端返回的 `path` / `uri` 去读盘**。
     fn convert_tool_result(result: rmcp::model::CallToolResult) -> ToolResult {
-        let content = result.content.first()
-            .map(|c| {
-                // 根据内容类型转换
-                if let Some(text) = c.as_text() {
-                    Value::String(text.text.clone())
-                } else if c.as_image().is_some() {
-                    Value::String("[Image]".to_string())
-                } else if c.as_resource().is_some() {
-                    Value::String("[Resource]".to_string())
-                } else {
-                    Value::String("[Unknown content type]".to_string())
-                }
-            })
-            .unwrap_or(Value::Null);
-        
         ToolResult {
             call_id: String::new(), // MCP 不提供 call_id
-            content,
+            content: Self::convert_contents(&result.content),
             is_error: result.is_error.unwrap_or(false),
         }
+    }
+
+    /// MCP 内容块数组 → `Value`。
+    ///
+    /// - **全是文本块** → 拼成一个 `Value::String`：既保住「纯文本结果仍是字符串」的
+    ///   向后兼容，也不会让多块文本在下游 `tool_content` 的兜底分支里变成一坨 JSON 字面量；
+    /// - 其余（含图片 / resource / 未知块）→ 数组，元素形如
+    ///   `"文本块原文"` / `{"type":"image","mime_type":…,"data":"<base64>"}`。
+    ///
+    /// 修掉了旧的 `content.first()`：多块结果不再只活第一块。
+    fn convert_contents(contents: &[rmcp::model::Content]) -> Value {
+        let blocks: Vec<Value> = contents.iter().map(Self::convert_content).collect();
+        if !blocks.is_empty() && blocks.iter().all(Value::is_string) {
+            let joined = blocks
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Value::String(joined);
+        }
+        match blocks.as_slice() {
+            [] => Value::Null,
+            _ => Value::Array(blocks),
+        }
+    }
+
+    /// 单个 MCP 内容块 → `Value`。
+    fn convert_content(content: &rmcp::model::Content) -> Value {
+        if let Some(text) = content.as_text() {
+            return Value::String(text.text.clone());
+        }
+        if let Some(image) = content.as_image() {
+            return json!({
+                "type": "image",
+                "mime_type": image.mime_type,
+                "data": image.data,
+            });
+        }
+        if content.as_resource().is_some() {
+            return Value::String("[Resource]".to_string());
+        }
+        Value::String("[Unknown content type]".to_string())
     }
 
     /// 取出最近一次连接失败的结构化错误（不影响内部状态）
@@ -419,5 +450,74 @@ impl McpClient for McpClientImpl {
         }
         
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::model::{CallToolResult, Content};
+
+    fn convert(result: CallToolResult) -> ToolResult {
+        McpClientImpl::convert_tool_result(result)
+    }
+
+    fn image_block() -> Content {
+        Content::image("iVBORw0KGgo=", "image/png")
+    }
+
+    #[test]
+    fn plain_text_result_stays_a_string() {
+        let converted = convert(CallToolResult::success(vec![Content::text("hello")]));
+        assert_eq!(converted.content, Value::String("hello".to_string()));
+        assert!(!converted.is_error);
+    }
+
+    #[test]
+    fn image_block_keeps_base64_and_mime_type() {
+        let converted = convert(CallToolResult::success(vec![
+            Content::text("screenshot taken"),
+            image_block(),
+        ]));
+
+        let blocks = converted.content.as_array().expect("含图片应当是数组");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0], Value::String("screenshot taken".to_string()));
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["mime_type"], "image/png");
+        assert_eq!(blocks[1]["data"], "iVBORw0KGgo=");
+    }
+
+    #[test]
+    fn image_only_result_is_an_array() {
+        let converted = convert(CallToolResult::success(vec![image_block()]));
+        let blocks = converted.content.as_array().expect("单张图片也应是数组");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "image");
+    }
+
+    #[test]
+    fn multiple_text_blocks_are_joined_into_one_string() {
+        let converted = convert(CallToolResult::success(vec![
+            Content::text("first"),
+            Content::text("second"),
+        ]));
+        assert_eq!(
+            converted.content,
+            Value::String("first\nsecond".to_string()),
+            "多块纯文本应拼接成字符串，而不是 JSON 字面量"
+        );
+    }
+
+    #[test]
+    fn empty_content_is_null() {
+        let converted = convert(CallToolResult::success(vec![]));
+        assert_eq!(converted.content, Value::Null);
+    }
+
+    #[test]
+    fn error_flag_is_preserved() {
+        let converted = convert(CallToolResult::error(vec![Content::text("boom")]));
+        assert!(converted.is_error);
     }
 }

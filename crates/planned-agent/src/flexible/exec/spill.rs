@@ -91,6 +91,27 @@ pub(in crate::flexible::exec) async fn spill_text(
     }))
 }
 
+/// 二进制落盘（工具结果里的图片），与 [`spill_text`] 同一目录约定。
+///
+/// 没有阈值概念：图片要么整份存下来、要么不存 —— 截断的图片没有意义。
+/// 返回落盘路径；**IO 失败向上抛**，由调用方决定降级文案。
+pub(in crate::flexible::exec) async fn spill_bytes(
+    cache_dir: &Path,
+    run_dir: &str,
+    file_name: &str,
+    bytes: &[u8],
+) -> Result<PathBuf> {
+    let dir = cache_dir.join(run_dir);
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .with_context(|| format!("创建产出缓存目录失败：{}", dir.display()))?;
+    let path = dir.join(file_name);
+    tokio::fs::write(&path, bytes)
+        .await
+        .with_context(|| format!("写入缓存文件失败：{}", path.display()))?;
+    Ok(path)
+}
+
 /// 跨步产出落盘。
 ///
 /// 文件名用**步骤序号**而非 `result_reference` —— 后者来自模板 / LLM，

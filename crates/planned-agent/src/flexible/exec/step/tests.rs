@@ -688,6 +688,86 @@
         let _ = std::fs::remove_dir_all(&cache_dir);
     }
 
+    /// 含图片的工具结果：图片落盘、tool 消息里只有**绝对路径**。
+    ///
+    /// 覆盖两件事：① `mod.rs` 回灌点的类型分支确实认出了图片；② 脱敏不变量 ——
+    /// base64 既不进上下文，也不进 tracing 日志（设计稿 §4.4-1，风险最高的一项）。
+    #[tokio::test]
+    async fn image_tool_result_is_spilled_without_base64_in_message_or_logs() {
+        const PNG_BASE64: &str = "iVBORw0KGgo=";
+
+        let captured = CapturedLog::default();
+        let _guard = captured.install();
+
+        let ai = FakeAiClient::new(vec![
+            tool_response("call-1", "shot", json!({"full_page": true}), 100, 20),
+            text_response("已截图", 150, 10),
+        ]);
+        let (registry, _tool) = registry_with(
+            "shot",
+            json!([
+                "screenshot taken",
+                { "type": "image", "mime_type": "image/png", "data": PNG_BASE64 }
+            ]),
+            false,
+        );
+        let step_def = step("#E1");
+        let sink = RecordingSink::default();
+        let cache_dir = temp_cache_dir("image");
+
+        let result = run_step(
+            prompt::STEP_SYSTEM_PROMPT,
+            StepInput {
+                step: &step_def,
+                intent: "截图",
+                expected_output: "做完",
+                prior: &[],
+                tools: &[],
+                index: 1,
+                run_dir: "run-image-1",
+            },
+            &(ai.clone() as Arc<dyn AiClient>),
+            &registry,
+            &cfg_with_cache(MAX_ROUNDS, cache_dir.clone()),
+            &sink,
+            None,
+        )
+        .await;
+
+        assert_eq!(result.record.status, StepStatus::Done);
+
+        let tool_text = tool_content_of_request(&ai, 1);
+        assert!(tool_text.contains("screenshot taken"), "{tool_text}");
+        assert!(tool_text.contains("builtin_recognize_image"), "{tool_text}");
+        assert!(
+            !tool_text.contains(PNG_BASE64),
+            "base64 不得进上下文：{tool_text}"
+        );
+
+        // 图片落盘到 run 目录（文件名格式由 `image.rs` 的单测锁定，这里只验证存在）。
+        let spilled_dir = cache_dir.join("run-image-1");
+        assert!(spilled_dir.exists(), "应建目录 {}", spilled_dir.display());
+        let pngs = std::fs::read_dir(&spilled_dir)
+            .expect("读 run 目录")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "png")
+            })
+            .count();
+        assert_eq!(pngs, 1, "应落盘 1 张 png");
+
+        assert!(
+            !captured.text().contains(PNG_BASE64),
+            "base64 不得进日志：\n{}",
+            captured.text()
+        );
+
+        let _ = std::fs::remove_dir_all(&cache_dir);
+    }
+
     /// 落盘失败 → 告警并回退内联全文，且**该步仍然成功**
     /// （与跨步产出「IO 失败 → 该步 Failed」刻意不同，见设计稿 §2.7）。
     #[tokio::test]

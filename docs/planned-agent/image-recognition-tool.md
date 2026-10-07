@@ -1,6 +1,7 @@
 # 图片通路 + 内置 AI 识别工具
 
-> 状态：🚧 **阶段 2 已实施**（`builtin_recognize_image` 已落地并测试通过）；**阶段 1（MCP 图片通路）后续再接入**（用户 2026-10-07 决定）
+> 状态：✅ **阶段 1 + 阶段 2 均已实施**（MCP 图片通路 + `builtin_recognize_image` 内置工具，测试全绿）
+> 实施日期：2026-10-07
 > 相关：[`multimodal-image-input.md`](multimodal-image-input.md)（图片输入已通到 core + ai-openai 两层，GUI 无入口）
 > 决策来源：2026-10-07 讨论，三点已拍板（见 §6）
 > 目标场景：浏览器 MCP 截取验证码 → AI 读出字符 → 回填表单
@@ -70,14 +71,21 @@
 
 ### 4.1 接口契约：`ToolResult.content`
 
-`crates/core/src/mcp/types.rs:13-18` 的 `content: Value` 不变，只补约定：
+`crates/core/src/mcp/types.rs:13-18` 的 `content: Value` **字段类型不变**（理由见下），只补约定 + 一个借用视图：
 
-- **纯文本结果保持 `Value::String` 不变** —— 现有 `tool_content()` 对所有文本工具零影响（向后兼容，这条是硬要求）；
-- **含图片的结果**才改成数组：
+- **全部是文本块** → 仍是 `Value::String`（多块用 `\n` 拼接）—— `tool_content()` 对所有文本工具零影响，向后兼容是硬要求，已实现并有回归测试；
+- **其余（含图片 / resource）** → 数组。注意**文本块是裸字符串**、图片块才是对象：
   ```json
-  [ {"type":"text","text":"..."},
+  [ "文本块原文",
     {"type":"image","mime_type":"image/png","data":"<base64>"} ]
   ```
+  > 文本块刻意不写成 `{"type":"text","text":…}`：那样多块纯文本结果会从「只取第一块原文」变成「一坨 JSON」，是行为倒退。视图侧两种形态都认（`ContentBlock::Text`）。
+- 块语义的解析收敛在 `crates/core/src/mcp/types.rs` 的**借用视图** `ContentBlock` + `parse_content_blocks()`（唯一约定点）：消费方不再手写 `block.get("data").and_then(Value::as_str)`；
+- 只需要文本的消费方（chat / ReAct）走 `ToolResult::sanitized_content()`：**图片块降级为 `[图片]` 占位，不含图片的结果逐字不变**。
+
+**为什么 `content` 不直接改成枚举**（2026-10-07 讨论结论）：`content` 的真实语义是「任意工具 payload 的通用容器」—— `ToolResult` 是**所有**工具（MCP + 8 族内置 + 子 agent）的统一返回类型，其中只有 `mcp-rmcp` 一个生产者会产内容块（且已降级），其余全塞自定义 JSON（`{stdout,exit_code}` / `{matches,count}` / `Value::String`…）。字段枚举化就必然带 `Structured(Value)` 逃逸分支 —— 覆盖 90% 生产者、却要改 10+ 个消费点，类型安全只惠及 3 处。所以切法是把**块语义的解析**枚举化，而不是把**字段**枚举化：生产端与线格式零变化，磁盘 / 事件兼容性不受影响（落盘的是 `Message`，其 `MessageContent::ToolResult.content` 本就是 `String`）。
+
+`ContentBlock` 故意**不**标 `#[non_exhaustive]`：同一工作区内部类型，将来加变体（例如适配层改为保留 resource / audio 的对象形态）时让编译器点出全部消费方。
 - `is_error` / `call_id` 语义不变。
 
 > 不这么做就会踩新坑：数组被 `tool_content()` 的 `other.to_string()`（`render.rs:107-111`）直接序列化成一坨 JSON 塞进上下文。
@@ -86,33 +94,59 @@
 
 `crates/mcp-rmcp/src/client.rs::convert_tool_result`：
 
+已实施（`convert_tool_result` → `convert_contents` → `convert_content`）：
+
 - 遍历**整个** `result.content`（修掉 `first()`）；
 - 保留 image 块的 `data` / `mime_type`；
 - resource / 未知块保持现有的占位文本（`[Resource]` / `[Unknown content type]`）；
-- 只有图片块存在时才返回数组，否则维持现有单值行为。
+- 纯文本单块仍返回 `Value::String`，否则返回数组。
 
 **安全红线**：只采信服务端返回的 `data` 与 `mime_type`，**绝不采信它返回的 `path`/`uri` 去读盘**。
 
 ### 4.3 `flexible` 改动
 
-新增 `crates/planned-agent/src/flexible/exec/step/image.rs`（按 `AGENTS.md` §5：执行期新行为放小模块）：
+**职责划分**（2026-10-07 复核时调整）：**类型区分留在主流程，落盘下放给 `image.rs`**。
 
-- `materialize_images(content, cache_dir, run_dir, tag) -> (text_for_llm, Vec<PathBuf>, warnings)`
-  - 遍历数组：`text` 块拼文本；`image` 块 → 解码 base64 → **按 mime 反推扩展名**（只 `png/jpg/jpeg/webp/gif`，与 `client.rs:189` 的 `image_mime_of` 对齐，写错扩展名会让整个请求 Err）→ 落盘；
-  - 文件名约定 **`img-s<步>-r<轮次>-<序号>.<ext>`**，与既有 spill 的 `tool-s<step>-r<round>-<nth>.txt` 同构（`exec/spill.rs` 的 run 目录约定）；
-  - 返回的文本里只放**绝对路径**（`cache_dir` 可能是相对路径 —— `ExecutorConfig.cache_dir` 相对进程 cwd，见 `AGENTS.md` §7-10）。
+`exec/step/mod.rs` 的回灌点自己 `match` —— 「这一步的结果里有没有图片」是编排决策，必须在主流程一眼可见，不能藏在下游函数里：
 
-`exec/step/mod.rs` 的回灌点（`mod.rs:345-401`）：
+```rust
+let blocks = parse_content_blocks(&outcome.result.content);
+let content = match blocks.as_deref() {
+    // 含图片 → 落盘换路径（base64 由此出栈丢弃）
+    Some(blocks) if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. })) => {
+        image::render_with_images(blocks, &cfg.cache_dir, input.run_dir, &tag).await
+    }
+    // 其余（纯文本 / 自定义 JSON）→ 原渲染路径，语义逐字不变
+    _ => tool_content(&outcome.result.content),
+};
+```
 
-- `tool_content(&outcome.result.content)` 现在直接出文本 —— 改为先走 `materialize_images`；
-- **落盘失败 = 该步 `Failed`**（与跨步产出落盘一致，`AGENTS.md` §7-7）；图片解析失败可以退化为「告警 + 文本占位」，但要进 warning 通道（不静默）。
+**必须发生在 `output = %content` 与 `messages.push` 之前**（否则 base64 进日志）。
+
+`crates/planned-agent/src/flexible/exec/step/image.rs`（**新增**，按 `AGENTS.md` §5：执行期新行为放小模块）只负责落盘与拼装：
+
+- `render_with_images(blocks: &[ContentBlock<'_>], cache_dir, run_dir, tag) -> String`
+  - 收的是**类型化视图**（`ContentBlock`），不再碰 `Value`，也无权决定「要不要走这条路」；
+  - 文本块拼原文，图片块经 `materialize` 落盘后换成**绝对路径**清单；
+  - 落盘路径：`<cache_dir>/<run_dir>/img-<tag>-<nth>.<ext>`，其中 `tag = s<步>-r<轮>-c<第几次工具调用>`；文件名只含数字/字母，**不含 LLM 给的任何字符串** → 无目录穿越；
+  - 扩展名按 mime 反推，只认 `png/jpg/jpeg/webp/gif`（与 `ai-openai::image_mime_of` 对齐，写错会让整个请求 Err）；不支持的 mime 直接给「格式不支持」提示，**不落盘**；
+  - 三道上限：单张 20 MB（`MAX_IMAGE_BYTES`，与 ai-openai / `builtin_recognize_image` 一致）、单次最多 8 张（`MAX_IMAGES_PER_RESULT`）、单次总字节 64 MB（`MAX_TOTAL_BYTES_PER_RESULT`）；超限的那张只给提示、不落盘；
+  - **解码前先按 base64 长度预筛**（`len > 额度/3*4 + 8` 即拒），避免把超大 payload 整份解进内存；
+  - 路径用 `std::path::absolute` 绝对化（`ExecutorConfig.cache_dir` 可能是相对路径）。
+
+**落盘失败不判该步 `Failed`**（与本节初版设计相反，实施时改的）：工具**已经执行完**，落盘失败只是图片没留下来；失败原因写进回灌文本，模型可以重新调用工具取一张新图 —— 判 `Failed` 反而丢掉这次工具调用的信息。这与「跨步产出落盘失败」不同：那里失败等于后续步骤拿不到输入，这里模型能自适应。
 
 ### 4.4 硬不变量（must-not-break）
 
-1. **base64 不得进入**：`messages` 的任何 tool 消息文本、`tracing` 日志（尤其 `mod.rs:350-357` 那条 `output = %content` 的 WARN、`exec/executor/logging.rs::log_output`）、`PlanRunEvent`、`PlanRunReport`。落盘后**立即丢弃** base64。
-2. **纯文本工具行为逐字不变**（回归基线：`cargo test -p planned-agent --lib flexible::` = 112）。
-3. **绝对路径**：落盘后给 LLM 的路径必须是绝对路径（两个 MCP server 的 cwd 可能不同）。
-4. 图片文件大小与张数需要上限（复用/新增常量），避免多轮循环里无限落盘。
+1. **base64 不得进入**：`messages` 的任何 tool 消息文本、`tracing` 日志（尤其 `mod.rs` 里那条 `output = %content` 的 WARN、`exec/executor/logging.rs::log_output`）、`PlanRunEvent`、`PlanRunReport`。落盘后**立即丢弃** base64（`materialize` 里解码出的 `bytes` 只活在该函数作用域）。
+2. **纯文本工具行为逐字不变**（回归基线：`cargo test -p planned-agent --lib flexible::`，实施后 = 121）。
+3. **绝对路径**：落盘后给 LLM 的路径必须是绝对路径（沙箱根 `flexible_output_dir()` 是绝对路径）。
+4. **同一个 `ToolResult` 的所有消费方都要脱敏**。图片块进入 `Value` 之后，除 `flexible` 走落盘外，还有三条「只要文本」的路径，全部改用 `ToolResult::sanitized_content()`（图片 → `[图片]` 占位）：
+   - `flexible/exec/step/mod.rs`（走 `image.rs` 落盘，天然无图片块进上下文）
+   - `chat/driver/round/handlers.rs` → 工具历史 + `ChatEvent::ToolExecuted`
+   - `planner/react/tool_executor.rs` → `ChunkStore` + `Observation.raw_output`（后者会进 ReAct 提示词）
+   > 这三处 `sanitized_content()` 对**不含图片**的结果是逐字不变的克隆，所以 chat / ReAct 的既有行为**零回归**。不做这一步，改完 `mcp-rmcp` 反而会让 chat/ReAct 收到裸 base64 —— 比改之前的 `[Image]` 更糟。
+5. 落盘上限三道（单张 20 MB / 单次 8 张 / 单次总 64 MB），超限只给提示不落盘；**但落下来的文件没有清理机制**，与 spill 产物一样依赖后续 GC。
 
 ---
 
@@ -229,18 +263,22 @@ let tools = ToolsContext::init(docs_dir, ai.manager.default() /* Result */)?;
 
 ## 8. 影响面清单
 
-**阶段 1（后续再接入）**
+**阶段 1（✅ 已实施）**
 
-- `crates/mcp-rmcp/src/client.rs`（`convert_tool_result`）
-- `crates/planned-agent/src/flexible/exec/step/mod.rs`（回灌点 `:345-401`）
-- `crates/planned-agent/src/flexible/exec/step/image.rs`（**新增**）
-- `crates/planned-agent/src/flexible/exec/step/render.rs`（`tool_content` 分流）
-- 可能：`exec/executor/config.rs`（图片相关上限常量）
+- `crates/mcp-rmcp/src/client.rs`（`convert_tool_result` → `convert_contents` / `convert_content`；+6 单测）
+- `crates/core/src/mcp/types.rs`（`ToolResult::sanitized_content` + 借用视图 `ContentBlock` / `parse_content_blocks`；+6 单测）
+- `crates/planned-agent/src/flexible/exec/step/image.rs`（**新增**；+6 单测）
+- `crates/planned-agent/src/flexible/exec/step/mod.rs`（回灌点接线 + `mod image;`）
+- `crates/planned-agent/src/flexible/exec/spill.rs`（新增 `spill_bytes`，二进制落盘）
+- `crates/planned-agent/src/chat/driver/round/handlers.rs`、`crates/planned-agent/src/planner/react/tool_executor.rs`（改用 `sanitized_content`，防 base64 进历史 / 事件 / ReAct 提示词）
+- `crates/planned-agent/Cargo.toml`（`base64` 依赖、`tempfile` dev-dependency）
+
+> `render.rs` 的 `tool_content` **未改** —— 它还被 `describe_tool_args`（入参渲染）复用，改语义会误伤；分流放在 `image.rs`。
 
 **阶段 2（✅ 已实施）**
 
 - `crates/tool-manager/src/builtin/vision_tools.rs`（**新增**，含 8 个单测）+ `builtin/mod.rs`（挂载）
-- `crates/core/src/mcp/types.rs`（仅在需要类型化时；`Value` 通常够）
+- `crates/core/src/mcp/types.rs`（**阶段 1 才动的** —— 视图 `ContentBlock` / `parse_content_blocks` 与 `sanitized_content`；阶段 2 未改）
 - `crates/agent-gui/src/context/tools/mod.rs`（`init` 增参 + 注册第 8 个 provider）
 - `crates/agent-gui/src/boot.rs:78`（调用点传 `Arc<dyn AiClient>`）
 - 分类已定 `Utility`（已核实现状下不会被 `"all"` 剔除）→ **不动** `core/src/tool_registry/types.rs` 与 `registry.rs::map_categories`，也不新增 `Vision` 分类
@@ -256,12 +294,23 @@ let tools = ToolsContext::init(docs_dir, ai.manager.default() /* Result */)?;
 
 | 层 | 用例 |
 |---|---|
-| `mcp-rmcp` | 单 image 块保留 data/mime；text+image 多块都保留；纯文本仍返回 `String`（回归）；resource/未知块占位不变 |
-| `flexible/exec/step` | 图片结果落盘到 `<cache_dir>/<run_dir>/img-s1-r1-0.png`；tool 消息文本**不含 base64**、含绝对路径；mime→扩展名映射覆盖 5 种；落盘失败 → 该步 `Failed`；纯文本路径行为不变（95 例基线不破） |
+| `mcp-rmcp` | ✅ 6 例：单 image 块保留 data/mime；text+image 多块都保留；仅图片也是数组；多块纯文本拼接成一个 `String`（不再只活第一块、也不退化成 JSON 字面量）；空 content → `Null`；`is_error` 保留；纯文本仍返回 `String`（回归） |
+| `core::mcp::types` | ✅ 6 例：纯文本 / 结构化结果的 `sanitized_content()` 逐字不变；图片块 → `[图片]` 且 base64 不残留；无图片数组不变；`content_blocks()` 解析 Text/Image/Unknown、裸字符串视为单文本块、自定义 JSON → `None` |
+| `flexible/exec/step/image` | ✅ 7 例：图片落盘 + 文本里**无 base64**、含**绝对路径** + 提示用 `builtin_recognize_image`；多图各自成文件；不支持的 mime 不落盘；坏 base64 不 panic；裸字符串文本块原文直出；张数超限不落盘；超大 base64 解码前即被拒 |
+| `flexible/exec/step`（回灌点集成） | ✅ 1 例：假工具返回含图片结果 → `run_step` 全程跑通，tool 消息里只有绝对路径、无 base64，且 **tracing 日志里也无 base64**；run 目录落盘 1 张 png。纯文本路径行为不变由既有的 `spill_threshold_*` / `spill_failure_*` 用例守着 |
 | `tool-manager` | ✅ **已实施**（10 个用例）：路径越界 → `path_outside_allowed`；不存在 → `file_not_found`；指向目录 → `invalid_arguments`；非图片内容 → `unsupported_image_type`；伪装扩展名也按**内容**判定；成功路径断言 `ImageSource::Url` 的 `data:image/png;base64,` 前缀 + `tools` 为空；空回复 → `empty_result`；超长 → 截断；工具注册态（名字 + `Utility`）。桩 `FakeAiClient` 写在用例模块内 |
 | 基线 | `cargo test -p planned-agent --lib flexible::`（112）、`cargo test -p planned-agent-tool-manager --lib`（108）、`cargo test -p planned-agent-gui --bins`（97） |
 
-**实测（阶段 2 实施后）**：`planned-agent-tool-manager --lib` → **108 passed / 0 failed**（新增 10 个 `builtin::vision_tools::tests`）；`planned-agent-gui --bins` → **97 passed / 0 failed**；`planned-agent --lib flexible::` → **112 passed / 0 failed**（无回归）；`planned-agent-tool-manager --test cap_std_contract` → 4 passed。
+**实测（阶段 1 实施后，2026-10-07）**：
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test -p planned-agent --lib flexible::` | **121 passed / 0 failed**（112 基线 + 9 新增，无回归） |
+| `cargo test -p planned-agent-mcp-rmcp --lib` | **15 passed**（新增 6 例） |
+| `cargo test -p planned-agent-core --lib` | **26 passed**（新增 6 例） |
+| `cargo test -p planned-agent-tool-manager --lib` | **108 passed**（阶段 2 的 10 例） |
+| `cargo test -p planned-agent-gui --bins` | **97 passed** |
+| `cargo test -p planned-agent-tool-manager --test cap_std_contract` | 4 passed |
 
 ---
 
@@ -272,3 +321,5 @@ let tools = ToolsContext::init(docs_dir, ai.manager.default() /* Result */)?;
 3. **provider 不支持视觉** → 400；错误信息要能指向「这个 provider 不支持图片」。
 4. **落盘目录生命周期**：run 目录目前无人清理（与 spill 产物相同），图片会长期堆积，需要后续 GC 策略。
 5. **明文落盘**：截图可能含会话/个人信息，落盘即明文 —— 需与用户确认可接受，或后续加密/清理。
+6. **模型可能忽略图片**：图片不进主模型上下文，模型只看到路径 —— 若它不主动调 `builtin_recognize_image`，图就白落了。缓解：回灌文本里直接点名该工具（已实现）+ 工具 description 写清用途。
+7. **落盘失败不判该步失败**（实施时定的，见 §4.3）：好处是模型能自适应重取，代价是「图真丢了」时该步仍算成功 —— 回灌文本里的「保存失败」是被发现的唯一线索。

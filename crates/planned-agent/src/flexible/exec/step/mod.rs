@@ -11,6 +11,7 @@ use planned_agent_core::ai::types::{
     ChatCompletionRequest, MessageRole, ToolDefinition,
 };
 use planned_agent_core::ai::AiClient;
+use planned_agent_core::mcp::types::{parse_content_blocks, ContentBlock};
 use planned_agent_tool_manager::ToolRegistry;
 use serde_json::Value;
 use tokio::sync::watch;
@@ -344,7 +345,27 @@ async fn run_step_with_prompt(
             );
             let (tool_output, is_error) = match registry.call_tool(&tool_name, arguments).await {
                 Ok(outcome) => {
-                    let content = tool_content(&outcome.result.content);
+                    // 工具结果进 messages 的文本。**类型区分在这里**（不下放给 image 模块）：
+                    // 含图片块 → 落盘，base64 就地丢弃，进上下文 / 日志的只有文本 + 绝对路径；
+                    // 其余（纯文本 / 自定义 JSON）→ 原渲染路径，语义逐字不变。
+                    // 必须在下面的 `output = %content` 与 `messages.push` 之前完成。
+                    let blocks = parse_content_blocks(&outcome.result.content);
+                    let content = match blocks.as_deref() {
+                        Some(blocks)
+                            if blocks
+                                .iter()
+                                .any(|block| matches!(block, ContentBlock::Image { .. })) =>
+                        {
+                            image::render_with_images(
+                                blocks,
+                                &cfg.cache_dir,
+                                input.run_dir,
+                                &format!("s{}-r{rounds}-c{nth}", input.index),
+                            )
+                            .await
+                        }
+                        _ => tool_content(&outcome.result.content),
+                    };
                     if outcome.result.is_error {
                         // 工具报错不一定让该步失败（结果会回灌给 LLM 继续决策），但必须留痕
                         tracing::warn!(
@@ -449,6 +470,7 @@ async fn run_step_with_prompt(
     }
 }
 
+mod image;
 mod llm;
 mod render;
 
