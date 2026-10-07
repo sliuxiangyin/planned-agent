@@ -75,8 +75,14 @@ pub async fn bootstrap(
     // 5. Tool Registry（同步；MCP 延后注入）
     on_progress("tools");
     let docs_dir = config.prompt_manager.prompt_dir.join("docs");
-    let tools = ToolsContext::init(docs_dir)
-        .map_err(|e| vec![("工具注册中心".to_string(), e.to_string())])?;
+    // 视觉识别工具（builtin_recognize_image）：客户端复用默认 provider（未配置则跳过注册），
+    // 允许读取的图片目录 = cache 产出区（见 docs/planned-agent/image-recognition-tool.md §5.4）。
+    let tools = ToolsContext::init(
+        docs_dir,
+        ai.manager.default().ok(),
+        config.flexible_output_dir(),
+    )
+    .map_err(|e| vec![("工具注册中心".to_string(), e.to_string())])?;
 
     // 把 MCP 工具统一注册进 ToolRegistry（唯一入口，避免重复注册）
     tools.set_mcp_manager(mcp.manager.clone());

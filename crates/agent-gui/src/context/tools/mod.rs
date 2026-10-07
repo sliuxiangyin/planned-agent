@@ -1,7 +1,7 @@
 //! 工具注册表 GUI 适配层
 //!
 //! 设计要点：
-//! - `init()` **不依赖** McpContext，只注册 6 个内置 provider
+//! - `init()` **不依赖** McpContext，只注册内置 provider
 //! - McpManager 由 `app()` 在 MCP 就绪后通过 `set_mcp_manager()` 延后注入
 //! - ToolRegistry 内部已用 `RwLock<Option<...>>`，天然支持延后设置与将来替换
 //! - **不新增任何占位/扩展 API**——按需再设计
@@ -13,13 +13,15 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use planned_agent_core::ai::AiClient;
 use planned_agent_core::mcp::types::{Tool, ToolResult};
 use planned_agent_core::tool_registry::{ToolCategory, ToolExecutor};
 use planned_agent_mcp_rmcp::McpManager;
 use planned_agent_tool_manager::builtin::{
     ai_tools::AiToolsProvider, data_tools::DataToolsProvider, doc_tools::DocToolsProvider,
     filesystem::FilesystemProvider, system_tools::SystemToolsProvider,
-    text_tools::TextToolsProvider, web_tools::WebToolsProvider,
+    text_tools::TextToolsProvider, vision_tools::VisionToolsProvider,
+    web_tools::WebToolsProvider,
 };
 use planned_agent_tool_manager::ToolRegistry;
 
@@ -69,10 +71,17 @@ impl PartialEq for ToolsContext {
 }
 
 impl ToolsContext {
-    /// 同步初始化：构造 ToolRegistry + 注册 7 个内置 provider
+    /// 同步初始化：构造 ToolRegistry + 注册内置 provider
+    ///
+    /// `vision_ai` 为 `None`（未配置 AI provider）时跳过 `builtin_recognize_image`；
+    /// `vision_root` 是该工具允许读取图片的根目录（宿主传 cache 产出区）。
     ///
     /// 此时 `mcp_manager` 为 None；MCP 工具由后续 `set_mcp_manager` 触发注入。
-    pub fn init(docs_dir: PathBuf) -> anyhow::Result<Self> {
+    pub fn init(
+        docs_dir: PathBuf,
+        vision_ai: Option<Arc<dyn AiClient>>,
+        vision_root: PathBuf,
+    ) -> anyhow::Result<Self> {
         let registry = ToolRegistry::new();
 
         // 内置 provider（顺序无功能影响，仅日志可读性）。
@@ -86,6 +95,20 @@ impl ToolsContext {
         registry.register_builtin_provider(&AiToolsProvider);
         registry.register_builtin_provider(&WebToolsProvider);
         registry.register_builtin_provider(&DocToolsProvider::new(docs_dir));
+
+        // 视觉识别工具（builtin_recognize_image）：宿主注入 AI 客户端 + 允许读取的图片目录。
+        // 未配置任何 AI provider 时跳过注册 —— 留一个必然报错的工具不如不注册
+        // （`docs/planned-agent/image-recognition-tool.md` §5.3）。
+        match vision_ai {
+            Some(ai) => match VisionToolsProvider::new(ai, &vision_root) {
+                Ok(provider) => registry.register_builtin_provider(&provider),
+                // 视觉工具是可选增强：初始化失败不该把整个启动打成错误页。
+                Err(error) => {
+                    tracing::warn!("builtin_recognize_image 注册失败（已跳过）：{error:#}");
+                }
+            },
+            None => tracing::warn!("未配置 AI provider，跳过 builtin_recognize_image 注册"),
+        }
 
         // 注册 UI 交互工具 `request_user_action`（前端拦截，不实际执行）
         registry.register_custom_tool(
