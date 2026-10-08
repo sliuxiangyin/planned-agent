@@ -330,6 +330,11 @@ pub fn PlanLeftPanel(
             _ => "header-chip--status--pending",
         })
         .unwrap_or("header-chip--status--pending");
+    // 计划分类（技能 / 场景）：由计划步定稿，展示在顶栏；未分类（或旧模板无该字段）时不显示。
+    let plan_category_label = ready_template
+        .as_ref()
+        .and_then(|template| template.category)
+        .map(|category| category.label().to_string());
 
     rsx! {
         document::Stylesheet { href: LEFT_PANEL_CSS }
@@ -349,6 +354,13 @@ pub fn PlanLeftPanel(
                     span {
                         class: "header-chip header-chip--status {status_chip_class}",
                         "{plan_status_label}"
+                    }
+                    // ②b 分类 chip（技能 / 场景；未分类时不渲染）
+                    if let Some(category) = plan_category_label.clone() {
+                        span {
+                            class: "header-chip header-chip--category",
+                            "{category}"
+                        }
                     }
                     // ③ 更多操作下拉菜单
                     DropdownMenu {

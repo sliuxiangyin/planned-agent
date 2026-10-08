@@ -47,6 +47,7 @@ pub use exec::executor::{
 };
 pub use exec::recipe::{recipes_from_report, shape_arguments, StepToolRecipe, ToolCallShape};
 pub use exec::report::{CallUsage, PlanRunReport, StepRunRecord, StepStatus, ToolCallRecord};
+pub use plan::category::PlanCategory;
 pub use plan::output_schema::{OutputKind, OutputSchema};
 pub use plan::params::{render_step_expected_output, render_step_intent, PlanRunParams};
 pub use plan::placeholder::{

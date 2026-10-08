@@ -7,6 +7,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::category::PlanCategory;
+
 /// 灵活计划模板（落库形态）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlexiblePlanTemplate {
@@ -26,6 +28,13 @@ pub struct FlexiblePlanTemplate {
     /// **必须带 `#[serde(default)]`**：早于输出步落库的模板 JSON 没有这个字段。
     #[serde(default)]
     pub output_schema: Option<Value>,
+    /// 计划分类（技能 / 场景）：这个计划属于哪门技能 / 面向哪种介质。
+    ///
+    /// **必须带 `#[serde(default)]`**：早于本字段落库的模板 JSON 没有它 ⇒ `None` ⇒
+    /// 执行期不加规范段（行为与引入分类之前**逐字一致**）。
+    /// 未知取值由 `PlanCategory` 的 `#[serde(other)]` 兜成 `Other`（同样不加段）。
+    #[serde(default)]
+    pub category: Option<PlanCategory>,
 }
 
 /// 一个参数的定义（对应 `inputs[]` 的一项）。
@@ -99,6 +108,26 @@ mod tests {
         }
       ]
     }"##;
+
+    /// 旧落库 JSON 没有 `category` ⇒ `None`（向后兼容；执行期行为不变）。
+    #[test]
+    fn missing_category_defaults_to_none() {
+        let tpl = FlexiblePlanTemplate::from_json(SAMPLE).expect("样例应能解析");
+        assert_eq!(tpl.category, None);
+    }
+
+    /// 有 `category` 时正常解析；未知取值落到 `Other`（容错，不报错）。
+    #[test]
+    fn parses_category_when_present() {
+        let tpl = FlexiblePlanTemplate::from_json(r#"{"task":"t","steps":[],"category":"File"}"#)
+            .expect("应能解析");
+        assert_eq!(tpl.category, Some(PlanCategory::File));
+
+        let tpl =
+            FlexiblePlanTemplate::from_json(r#"{"task":"t","steps":[],"category":"SomethingNew"}"#)
+                .expect("应能解析");
+        assert_eq!(tpl.category, Some(PlanCategory::Other));
+    }
 
     #[test]
     fn parses_real_saved_template() {

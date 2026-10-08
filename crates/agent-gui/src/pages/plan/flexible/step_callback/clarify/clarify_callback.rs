@@ -34,8 +34,9 @@ pub(super) const OK_STATUS: &str = "task_defined";
 const NEXT_STEP: &str = "task_defined";
 /// 定稿时要登记的产物 key（值取输出 JSON 中的同名字段）。
 const PRODUCTS: &[&str] = &["task_definition"];
-/// 定稿时要清除（置 `null`）的下游产物 —— 需求变了，下游的计划骨架、参数化结果与输出契约一律作废。
-const CLEAR: &[&str] = &["steps", "inputs", "output_schema"];
+/// 定稿时要清除（置 `null`）的下游产物 —— 需求变了，下游的计划骨架、计划分类、参数化结果与
+/// 输出契约一律作废。
+const CLEAR: &[&str] = &["steps", "category", "inputs", "output_schema"];
 
 /// `flexible_clarify` 的定稿登记回调。
 pub(super) struct ClarifyCallback {
@@ -109,12 +110,16 @@ mod tests {
         let patch = build_patch(AGENT, &parsed, PRODUCTS, CLEAR);
         let mut keys: Vec<&str> = patch.keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["inputs", "output_schema", "steps", "task_definition"]);
+        assert_eq!(
+            keys,
+            ["category", "inputs", "output_schema", "steps", "task_definition"]
+        );
         assert_eq!(
             patch["task_definition"],
             serde_json::json!({ "task": "建目录" })
         );
         assert!(patch["steps"].is_null(), "需求变了，计划骨架应作废");
+        assert!(patch["category"].is_null(), "需求变了，计划分类应作废");
         assert!(patch["inputs"].is_null(), "需求变了，参数化结果应作废");
         assert!(patch["output_schema"].is_null(), "需求变了，输出契约应作废");
         assert_eq!(NEXT_STEP, "task_defined");

@@ -21,6 +21,7 @@
     /// 两步模板：第二步依赖第一步的 `#E1`，且 `intent` 含 `${path}` 占位符。
     fn two_step_template() -> FlexiblePlanTemplate {
         FlexiblePlanTemplate {
+            category: None,
             output_schema: None,
             task: "维护文件".to_string(),
             inputs: vec![PlanInput {
@@ -54,6 +55,7 @@
             text_response("文件末尾已新增一行（index=8）", 30, 3),
         ]);
         let template = FlexiblePlanTemplate {
+            category: None,
             output_schema: Some(serde_json::json!({
                 "kind": "bool",
                 "goal": "向 ${path} 末尾追加一行",
@@ -191,6 +193,7 @@
     async fn missing_param_in_expected_output_fails_step_before_llm() {
         let ai = FakeAiClient::new(vec![]);
         let template = FlexiblePlanTemplate {
+            category: None,
             output_schema: None,
             task: "维护文件".to_string(),
             inputs: vec![PlanInput {
@@ -231,6 +234,7 @@
     #[test]
     fn dependency_issues_cover_missing_self_and_forward_refs() {
         let template = FlexiblePlanTemplate {
+            category: None,
             output_schema: None,
             task: "t".to_string(),
             inputs: vec![],
@@ -274,6 +278,7 @@
     async fn bad_dependency_warns_but_does_not_block() {
         let ai = FakeAiClient::new(vec![text_response("产出", 10, 1)]);
         let template = FlexiblePlanTemplate {
+            category: None,
             output_schema: None,
             task: "t".to_string(),
             inputs: vec![],
@@ -432,6 +437,7 @@
     /// 单步模板（B1 用例不需要步骤间的依赖关系）。
     fn one_step_template() -> FlexiblePlanTemplate {
         FlexiblePlanTemplate {
+            category: None,
             output_schema: None,
             task: "单步任务".to_string(),
             inputs: vec![],
@@ -764,6 +770,7 @@
             text_response("整理完成", 1, 1),
         ]);
         let template = FlexiblePlanTemplate {
+            category: None,
             output_schema: Some(serde_json::json!({
                 "kind": "bool",
                 "goal": "整理",

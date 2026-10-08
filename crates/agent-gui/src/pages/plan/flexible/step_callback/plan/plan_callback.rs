@@ -28,7 +28,9 @@ const NEXT_STEP: &str = "planned";
 /// 定稿时要登记的产物 key（值取输出 JSON 中的同名字段）。
 ///
 /// - `steps`：粗粒度步骤骨架（子目标 + 依赖 + 期望产出），供参数化步注入后就地占位。
-const PRODUCTS: &[&str] = &["steps"];
+/// - `category`：计划分类（技能 / 场景）；执行期据此追加该技能的作业规范段
+///   （见 `docs/planned-agent/flexible-plan-category.md`）。与 `steps` 一起定稿、一起重做。
+const PRODUCTS: &[&str] = &["steps", "category"];
 /// 定稿时要清除（置 `null`）的下游产物。
 ///
 /// 参数化步产出的 `inputs` 与输出定义步产出的 `output_schema` 都依赖本步的 `steps`：
@@ -102,6 +104,7 @@ mod tests {
     fn commits_steps_and_clears_downstream_inputs() {
         let parsed = serde_json::json!({
             "status": "planned",
+            "category": "File",
             "steps": [
                 {
                     "result_reference": "#E1",
@@ -114,10 +117,11 @@ mod tests {
         let patch = build_patch(AGENT, &parsed, PRODUCTS, CLEAR);
         let mut keys: Vec<&str> = patch.keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["inputs", "output_schema", "steps"]);
+        assert_eq!(keys, ["category", "inputs", "output_schema", "steps"]);
         assert!(patch["inputs"].is_null(), "下游 inputs 应被清除");
         assert!(patch["output_schema"].is_null(), "下游输出契约应被清除");
         assert_eq!(patch["steps"][0]["result_reference"], "#E1");
+        assert_eq!(patch["category"], "File");
         assert_eq!(NEXT_STEP, "planned");
         assert_eq!(OK_STATUS, "planned");
     }

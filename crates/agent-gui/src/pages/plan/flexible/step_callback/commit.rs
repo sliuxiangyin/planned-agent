@@ -100,13 +100,16 @@ pub(crate) fn hand_off(call: &SubAgentCall<'_>) -> ResultDecision {
     }
 }
 
-/// 从 `flexible_state.products`（JSON 文本）组装落库 payload：`{ task, inputs, steps, output_schema }`。
+/// 从 `flexible_state.products`（JSON 文本）组装落库 payload：
+/// `{ task, inputs, steps, output_schema, category }`。
 ///
 /// - `task` ← `task_definition.task`（需求澄清定稿产物）
 /// - `inputs` ← `inputs`（参数化产出的参数表；缺失视为空表）
 /// - `steps` ← `steps`（参数化后的步骤骨架，可变值已写成 `${name}`）
 /// - `output_schema` ← `output_schema`（输出定义定稿的输出契约）。**缺失或 `null` 一律落 `null`** ——
 ///   用户跳过输出定义、或选了「现在还定不了」，都是合法情况，不得报错；非 `null` 时必须是对象。
+/// - `category` ← `category`（计划步定稿的计划分类 / 技能）。**缺失或 `null` 一律落 `null`**（= 不分类）；
+///   非 `null` 时必须是字符串；未知取值由执行期 `PlanCategory` 的 `#[serde(other)]` 兜成 `Other`。
 ///
 /// 落库前校验 `steps` 里的 `${name}` 都能在 `inputs` 中找到同名定义：未定义即报错，
 /// 不静默留空 —— 否则「参数漏定义」会被伪装成「本来就没有参数」。
@@ -155,6 +158,18 @@ pub(crate) fn build_payload(products: &str) -> Result<String, String> {
         _ => (Value::Null, None),
     };
 
+    // 计划分类可选：缺失 / `null` 落 `null`（= 不分类，不加规范段）；非空时必须是字符串。
+    // 未知取值（如将来新增的分类名）不在此拦，交由执行期 `PlanCategory` 的 `#[serde(other)]` 兜成 `Other`。
+    let category = match obj.get("category") {
+        Some(category) if !category.is_null() => {
+            if !category.is_string() {
+                return Err("category 必须是字符串或 null".to_string());
+            }
+            category.clone()
+        }
+        _ => Value::Null,
+    };
+
     // 占位符校验同时覆盖 `steps` 与 `output_schema` 的文本字段
     placeholder::validate(steps, schema_for_placeholders, &inputs)?;
 
@@ -163,6 +178,7 @@ pub(crate) fn build_payload(products: &str) -> Result<String, String> {
         "inputs": inputs,
         "steps": steps,
         "output_schema": output_schema,
+        "category": category,
     })
     .to_string())
 }
@@ -227,6 +243,51 @@ mod tests {
         assert_eq!(v["inputs"][0]["name"], "file_path");
         assert_eq!(v["steps"][0]["intent"], "读取 ${file_path}");
         assert!(v["output_schema"].is_null(), "无输出定义 → null");
+    }
+
+    /// `category` 可选：缺失 / `null` ⇒ `null`（不分类）；给了就原样落；非字符串报错。
+    #[test]
+    fn payload_carries_optional_category() {
+        let with_category = |category: Value| {
+            json!({
+                "task_definition": { "task": "t" },
+                "steps": [{
+                    "result_reference": "#E1",
+                    "intent": "做事",
+                    "expected_output": "结果",
+                    "dependencies": [],
+                }],
+                "category": category,
+            })
+            .to_string()
+        };
+
+        let v: Value =
+            serde_json::from_str(&build_payload(&with_category(json!("File"))).unwrap()).unwrap();
+        assert_eq!(v["category"], "File");
+
+        let v: Value =
+            serde_json::from_str(&build_payload(&with_category(Value::Null)).unwrap()).unwrap();
+        assert!(v["category"].is_null(), "null → 不分类");
+
+        assert!(
+            build_payload(&with_category(json!({ "bad": 1 }))).is_err(),
+            "非字符串应被拒"
+        );
+
+        // 完全缺该字段 ⇒ 同样落 `null`
+        let no_key = json!({
+            "task_definition": { "task": "t" },
+            "steps": [{
+                "result_reference": "#E1",
+                "intent": "做事",
+                "expected_output": "结果",
+                "dependencies": [],
+            }],
+        })
+        .to_string();
+        let v: Value = serde_json::from_str(&build_payload(&no_key).unwrap()).unwrap();
+        assert!(v["category"].is_null(), "缺字段 → 不分类");
     }
 
     /// `inputs` 缺失 ⇒ 空表（「本来就没有参数」，不是错误）。

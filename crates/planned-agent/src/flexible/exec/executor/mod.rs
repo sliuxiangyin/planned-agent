@@ -80,7 +80,7 @@ impl FlexibleExecutor {
 
         // 整次执行只算一次 system prompt，每步复用：同一次执行内每步字符串完全一致，
         // 使「环境段」成为可命中的 provider 前缀缓存（见 `prompt::step_system_prompt`）。
-        let system_prompt = prompt::step_system_prompt(environment);
+        let system_prompt = prompt::step_system_prompt(environment, template.category);
         let started = Instant::now();
         sink.emit(PlanRunEvent::RunStarted {
             total_steps: template.steps.len(),

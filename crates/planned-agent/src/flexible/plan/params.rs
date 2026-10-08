@@ -122,6 +122,7 @@ mod tests {
     /// 样例模板：两个有默认值的参数 + 一个无默认值的参数。
     fn sample_template() -> FlexiblePlanTemplate {
         FlexiblePlanTemplate {
+            category: None,
             output_schema: None,
             task: "维护日志".to_string(),
             inputs: vec![

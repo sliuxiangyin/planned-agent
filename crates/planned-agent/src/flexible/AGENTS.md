@@ -6,7 +6,7 @@
 
 ## 0. 一句话
 
-`flexible/` 是**灵活模式的执行内核**：把落库的**灵活计划模板**（`{ task, inputs, steps, output_schema }`）
+`flexible/` 是**灵活模式的执行内核**：把落库的**灵活计划模板**（`{ task, inputs, steps, output_schema, category }`）
 连同本次运行参数跑起来 —— 逐步执行、大产出落盘、按输出契约整理最终结果，
 再把**进度事件**与**执行报告**交给宿主。
 
@@ -55,7 +55,8 @@
 
 | 文件 | 放什么 | 主要类型 / 函数 |
 |---|---|---|
-| `plan/template.rs` | 模板强类型，对应 `plans_flexible_sessions.parameterized_task` 列 | `FlexiblePlanTemplate{task,inputs,steps,output_schema}`(:12)、`PlanInput`(:33)、`PlanStep`(:46)、`from_json`(:60) |
+| `plan/template.rs` | 模板强类型，对应 `plans_flexible_sessions.parameterized_task` 列 | `FlexiblePlanTemplate{task,inputs,steps,output_schema,category}`(:12)、`PlanInput`(:33)、`PlanStep`(:46)、`from_json`(:60) |
+| `plan/category.rs` | **计划分类（技能/场景）的唯一定义处**（执行期据此拼规则段） | `PlanCategory{Browser,File,Research,Dev,Device,Other}`、`ALL`、`as_str`、`label`、`from_name` |
 | `plan/output_schema.rs` | **输出契约的唯一定义处**（保存校验 / 执行期整理 / GUI 展示都走这里） | `OutputKind`(:19，`ALL` 6 值 :36)、`OutputSchema`(:83)、`OutputSchema::parse`(:102) |
 | `plan/placeholder.rs` | `${name}` 的收集 / 校验 / 替换 | `PLACEHOLDER_FIELDS`(:17)、`collect_placeholders`(:26)、`collect_from_steps`(:48)、`collect_from_schema`(:72)、`validate`(:93)、`render`(:126)、`render_lenient`(:154) |
 | `plan/params.rs` | 本次运行的参数值表 + 步骤 `intent`/`expected_output` 展开 | `PlanRunParams`(:20)、`from_template`(:34)、`render_step_intent`(:77)、`render_step_expected_output`(:92) |
@@ -75,7 +76,11 @@
 | `exec/step/mod.rs` | **单步执行**：一次「LLM ⇄ 工具」循环 | `OUTPUT_MAX_CHARS = 8_000`(:31)、`StepInput`(:34)、`StepRunResult`(:53)、`run_step`(:64)、`run_output_resolve`(:81) |
 | `exec/step/llm.rs` | 单次 LLM 调用：超时 / 重试 / 取消 | `is_cancelled`(:12)、`wait_cancel`(:20)、`with_timeout`(:39)、`request_llm`(:58) |
 | `exec/step/render.rs` | 消息与入参的渲染 / 摘要 | `tool_message`(:23)、`describe_arguments`(:57，全量 800)、`describe_tool_args`(:73，`$` 行 120)、`truncate_chars`(:116)、`summarize`(:123) |
-| `exec/prompt.rs` | 内置提示词常量（**私有模块**，`exec/mod.rs:11`） | `STEP_SYSTEM_PROMPT`(:12)、`step_system_prompt`(:38)、`OUTPUT_RESOLVE_SYSTEM_PROMPT`(:134)、`build_step_task`(:147)、`build_output_contract_text`(:172) |
+| `exec/prompt/mod.rs` | 提示词子模块的统一出口（**私有模块**，`exec/mod.rs:11`） | `pub(crate) use` 转出下列项；调用方仍写 `exec::prompt::X` |
+| `exec/prompt/system.rs` | 两个 system prompt 基准 + 单步 system prompt 组装 | `STEP_SYSTEM_PROMPT`、`step_system_prompt`（尾部依次拼「运行环境段 + 技能规范段」）、`OUTPUT_RESOLVE_SYSTEM_PROMPT` |
+| `exec/prompt/environment.rs` | 「运行环境」段渲染（宿主事实 + 编码风险） | `render_environment_into`、`render_available`、`encoding_hint` |
+| `exec/prompt/skills.rs` | **各技能（`PlanCategory`）的作业规范段** —— 加技能只动这里 | `category_rule_section`、`BROWSER_RULES` / `FILE_RULES` / `RESEARCH_RULES` / `DEV_RULES` / `DEVICE_RULES` |
+| `exec/prompt/task.rs` | 单步 user 文本 + 输出契约文本 | `build_step_task`、`build_output_contract_text`、`kind_label` |
 | `exec/event.rs` | 进度事件（唯一对外进度通道） | `PlanRunEvent`(:12)、`PlanRunSink`(:55)、`ChannelSink`(:63)、`NullSink`(:83) |
 | `exec/report.rs` | 执行报告 | `StepStatus`(:11)、`CallUsage`(:24)、`ToolCallRecord`(:40)、`StepRunRecord`(:51)、`PlanRunReport`(:108) |
 
@@ -108,7 +113,7 @@ RunRequest { session_id, template, params, client, config, environment }   run_s
 RunServiceCore::run 常驻循环 → RunLoop::start → FlexibleExecutor::run
    │                                   run_service/core.rs:65/:109, exec/executor/mod.rs:65
    │ ① 依赖校验（只警告）                                   executor/prior.rs:19
-   │ ② system prompt 整次只算一次                           exec/prompt.rs:38
+   │ ② system prompt（+ 环境段 + 分类规范段）整次只算一次   exec/prompt/system.rs
    │ ③ 每步：展开 ${} → StepStarted → collect_prior → run_step
    │                                                     executor/mod.rs:108-256
    │ ④ 产出超阈值落盘                                      exec/spill.rs:98
@@ -161,7 +166,7 @@ UI 边填边预览用 `render_lenient`（保留占位符 + 回报 missing，纯�
 **⑦ 测试**：内联 `#[cfg(test)] mod tests`；体量大的用同目录 `tests.rs`
 （`exec/executor/tests.rs`、`exec/step/tests.rs`，经 `mod tests;` 挂载）。**测试桩只放 `testing.rs`。**
 
-**⑧ 提示词不走 `prompt-manager`**：执行器自带常量（`exec/prompt.rs:1-3`），
+**⑧ 提示词不走 `prompt-manager`**：执行器自带常量（`exec/prompt/mod.rs:1-3`），
 宿主无需为执行器加载任何 prompt 文件。
 
 **⑨ 默认值常量**（`exec/executor/config.rs`）：`max_rounds_per_step = 50`、`DEFAULT_CACHE_DIR = "./data/cache"`、
@@ -173,13 +178,14 @@ UI 边填边预览用 `render_lenient`（保留占位符 + 回报 missing，纯�
 | 你想加 | 放哪 | 附带要求 |
 |---|---|---|
 | 模板新字段 | `plan/template.rs` | **必须** `#[serde(default)]`；同步 agent-gui 的保存校验与面板展示 |
+| 计划分类新取值 / 规范段 | `plan/category.rs`（枚举）+ `exec/prompt/skills.rs`（规范段常量） | 同步 GUI 的 `flexible_plan.toml` 分类清单与 `build_payload` 搬运 |
 | 输出契约新 `kind` / 新字段 | `plan/output_schema.rs`（唯一定义处） | 同步 `OutputKind::ALL`、`uses_fields`、GUI 同名字段 |
 | 占位符语义变化 | `plan/placeholder.rs` | **同步 GUI 镜像实现（见 §7-⑫）** |
 | 执行期新行为 | `exec/executor/` 下**新建小模块** | 保持「总编排只在 `mod.rs`」（config/resolve/prior/tools 就是这么拆的；`spill` 因 executor 与 step 共用，提升到了 `exec/` 层） |
 | 新的进度事件 | `exec/event.rs` | 同步 `run_service/state.rs::apply_event`（**穷尽 match，无 `_` 分支**）与快照字段 |
 | 报告新指标 | `exec/report.rs` | 可选字段加 `#[serde(default)]` |
 | 宿主新查询 / 命令 | `run_service/types.rs` + `service.rs` + `core.rs` | 启动走命令队列；查询 / 订阅 / 取消走 `RunStore` |
-| 执行器提示词 | `exec/prompt.rs` 常量 | 不要引入 prompt 文件依赖 |
+| 执行器提示词 | `exec/prompt/` 下的常量（`system` / `environment` / `task` / `skills`） | 不要引入 prompt 文件依赖 |
 | 新测试桩 | `testing.rs` | 不加新的 public 测试模块 |
 
 ## 6. 怎么跑测试
@@ -190,10 +196,7 @@ cargo test -p planned-agent --test lib_api        # 只验 pub use 对外路径�
 cargo test -p planned-agent-gui --bins            # 宿主侧（消费方）
 ```
 
-用例分布（实测 `#[test]` + `#[tokio::test]` 共 95）：`exec/prompt.rs` 10、`exec/report.rs` 2、
-`exec/executor/tests.rs` 21、`exec/step/tests.rs` 9、`plan/output_schema.rs` 6、`plan/params.rs` 7、
-`plan/placeholder.rs` 10、`plan/template.rs` 5、`run_service/core.rs` 8、`run_service/state.rs` 6、
-`run_service/store.rs` 11。
+用例分布：实测 **133**（`cargo test -p planned-agent --lib flexible::`；数字随开发漂移，**以命令输出为准**）。
 
 ⚠️ **既有 baseline 失败，不是本目录的锅**：`cargo test -p planned-agent`（不带过滤）有
 **3 个 `planner::coarse::llm_planner` 用例**失败，原因是运行时找不到 prompt `planning/coarse_plan`
@@ -242,9 +245,9 @@ cargo test -p planned-agent-gui --bins            # 宿主侧（消费方）
     （只有定义、`mod.rs:51` re-export 与测试；真正的校验发生在 GUI 保存路径）。看到「没人用」是正常的，**别删**。
 14. **`plan/params.rs` 有个乱码注释、且文件行尾 CRLF/LF 混用** —— 编辑时用定向替换，
     **不要整文件重写**，否则 diff 会炸。
-15. **环境段的位置是刻意的**：`step_system_prompt(Some(env))` 只在**尾部**追加固定内容
-    （为了命中 provider 前缀缓存），`None` 时逐字返回基准串（`exec/prompt.rs:26-46`）；
-    整次执行只算一次、每步复用。
+15. **环境段 / 分类段的位置是刻意的**：`step_system_prompt(env, category)` 只在**尾部**依次追加
+    「运行环境段 + 技能规范段」（为了命中 provider 前缀缓存），两者都 `None` 时逐字返回基准串
+    （`exec/prompt/system.rs`）；整次执行只算一次、每步复用。
 
 ## 8. 设计稿在哪（`docs/planned-agent/`）
 
@@ -256,6 +259,7 @@ cargo test -p planned-agent-gui --bins            # 宿主侧（消费方）
 | `flexible-step-tool-output-spill.md` | 单步内工具输出「落盘 + 句柄」（只做不内联；chat 侧同类问题待做） | ✅ 已按稿实施 |
 | `flexible-output-step.md` | 新增「输出定义」步（`output_schema` 的来源） | ⚠️ 设计稿（未实施，落点在 GUI/prompts 侧） |
 | `flexible-output-followups.md` | 面板展示 `output_schema` 与本次结果 | ✅ 已实施（GUI 侧） |
+| `flexible-plan-category.md` | 计划分类（技能/场景）→ 按类型拼规则提示词段 | ✅ 已实施 |
 | `flexible-execution-audit.md` | 一次真实执行日志的只读诊断 | 📋 待逐条拍板 |
 | `flexible-execution-hardening.md` | 加固设计（A/B/C/D 共 16 项） | 📋 待确认后才动代码 |
 | `flexible-execution-improvements.md` | 少走弯路：per-step 指导字段 / 工具选择反哺 | 📋 设计待审 |
