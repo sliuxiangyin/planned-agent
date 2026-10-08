@@ -76,6 +76,15 @@ pub struct RuntimeEnvironment {
     ///
     /// **默认不进 prompt**：含用户名等路径信息，属「外发」隐私（见设计稿 §5.2.5）。
     pub working_dir: Option<String>,
+    /// 宿主指定的**产出目录**：工具的落盘产出（截图 / 导出 / 保存）都该落在这里。
+    ///
+    /// **不是探测结果**：`detect*` 一律填 `None`，由宿主构造后用 [`Self::with_output_dir`]
+    /// 注入（与 `notes` 同为「宿主补充的事实」）。
+    ///
+    /// **默认进 prompt**（与 `working_dir` 相反）：模型必须知道产出落哪，否则写出的文件
+    /// 下游工具（沙箱根 = 该目录）读不到，只能靠来回搬运。见设计稿 §5.2.5 的例外说明。
+    #[serde(default)]
+    pub output_dir: Option<String>,
     /// 人工补充的其它事实（如「目标目录只读」「本机只有 python」）。
     pub notes: Option<String>,
     /// 探测时刻（RFC3339）；**只给 UI 看，不进 prompt**。
@@ -106,9 +115,19 @@ impl RuntimeEnvironment {
             working_dir: std::env::current_dir()
                 .ok()
                 .map(|p| p.to_string_lossy().to_string()),
+            output_dir: None,
             notes: None,
             probed_at: None,
         }
+    }
+
+    /// 注入**产出目录**（宿主侧用；`detect*` 不填此项）。
+    ///
+    /// 链式写法让调用点在「取快照那一刻」补上宿主配置派生的值，不必让 `core`
+    /// 认识 GUI 的 `cache_root`：`env.snapshot().with_output_dir(app.flexible_output_dir())`。
+    pub fn with_output_dir(mut self, dir: impl AsRef<Path>) -> Self {
+        self.output_dir = Some(dir.as_ref().to_string_lossy().into_owned());
+        self
     }
 }
 

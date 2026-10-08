@@ -143,8 +143,10 @@ pub struct RunRequest {
 // ② flexible/prompt.rs  新增（"接收者自己根据环境生成"——符合 core/host 划定的边界）
 pub fn step_system_prompt(env: Option<&RuntimeEnvironment>) -> Cow<'static, str>;
 //   None        ⇒ Cow::Borrowed(STEP_SYSTEM_PROMPT)   ← 零分配，既有断言不变
-//   Some(env)   ⇒ 在 STEP_SYSTEM_PROMPT 尾部拼"运行环境段"（平台 / shell / 可用命令 / 平台命令语法提示）
+//   Some(env)   ⇒ 在 STEP_SYSTEM_PROMPT 尾部拼"运行环境段"（平台 / shell / 可用命令 / 产出目录 / 平台命令语法提示）
 //   ⚠️ 段内**不含** working_dir / probed_at（外发隐私，见 core/host 的字段注释）
+//      唯一例外是 output_dir（产出目录）：同样含路径，但**刻意外发** —— 模型不知道产出落哪，
+//      写出的文件下游工具（沙箱根 = 该目录）就读不到（2026-10-08 补，见 flexible-execution-improvements.md §5.2.5）
 
 // ③ flexible/executor.rs  构造时算**一次** `step_system_prompt`，存 `Cow`，每步复用
 //    —— 同一次执行内每步 system 完全相同，以命中 provider 的前缀缓存。

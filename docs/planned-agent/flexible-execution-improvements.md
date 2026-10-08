@@ -305,11 +305,12 @@ pub(crate) fn step_system_prompt(env: Option<&RuntimeEnvironment>) -> Cow<'stati
 
 #### 5.2.5 隐私（**必须定**，见 Q12 / Q14）
 
-`working_dir` / `notes` / `shell` 里的路径**会随 prompt 发给 LLM provider**（如 `C:\Users\<用户名>\...`）：
+`working_dir` / `output_dir` / `notes` / `shell` 里的路径**会随 prompt 发给 LLM provider**（如 `C:\Users\<用户名>\...`）：
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `working_dir` | **不注入** | 需要时宿主显式打开（或只给目录名） |
+| `output_dir` | **注入**（唯一例外） | 同为路径，但**刻意外发**：模型不知道产出落哪，写出的文件下游工具（沙箱根 = 该目录的上一层）就读不到，只能靠 `Copy-Item` / base64 来回搬运。**分两段拼**：宿主用 `with_output_dir()` 在取快照那一刻给**会话段**（= `config.cache_dir`），执行器再补**本次执行段**（`run-*`，与 spill 同目录）；`detect*` 一律留空（2026-10-08 补，动机见 `gui-cache-root.md` §3.4） |
 | `notes` | 空 | UI 需提示「会发送给模型服务商」，**不要写凭据** |
 | `shell` / `console_encoding` | 注入 | 通常不含隐私（`powershell` / `UTF-8`） |
 

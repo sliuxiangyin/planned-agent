@@ -19,6 +19,8 @@ pub(crate) const STEP_SYSTEM_PROMPT: &str = "\
 规则：
 - 需要外部数据或产生副作用时，调用提供的工具完成任务；不要凭空编造工具输出。
 - 工具参数必须来自「本次子目标」「期望产出」或「前序步骤结果」，禁止臆造路径、URL、关键词。
+- **落盘产出**（截图 / 导出 / 保存文件）一律放进「运行环境」段给出的**产出目录**下，并且**显式给出文件名**；
+  不显式命名的产出会落到别处，后续步骤与下游工具都读不到。
 - 给你的内容不是正文、而是**文件路径**时（会注明「未全文注入」——「前序步骤结果」段与工具返回都可能是这样），
   按你的需要**选用其中一个**读回工具即可，**两者不是必须配合的两步**：
   - 已经知道要读哪一段、或想直接看全文（包括「还没想好要找什么」）→ 用 `builtin_read_file_lines`
@@ -114,6 +116,7 @@ mod tests {
                 missing: vec!["go".to_string()],
             },
             working_dir: Some("C:\\secret-dir".to_string()),
+            output_dir: Some("C:\\out-dir".to_string()),
             notes: None,
             probed_at: Some("2026-01-01T00:00:00Z".to_string()),
         };
@@ -135,6 +138,12 @@ mod tests {
         assert!(prompt.contains("命令输出按 UTF-8 解码"), "{prompt}");
         // 「怎么调用工具」不占常驻 prompt（属于工具 description）
         assert!(!prompt.contains("builtin_execute_command"), "{prompt}");
+        // 产出目录**刻意注入**（与 working_dir 相反）：模型得知道产出落哪，
+        // 否则下游工具（沙箱根 = 该目录）读不到
+        assert!(
+            prompt.contains("产出目录（工具的落盘产出都放这里）：C:\\out-dir"),
+            "{prompt}"
+        );
         // 隐私：工作目录、探测时刻不得外发
         assert!(!prompt.contains("secret-dir"), "working_dir 不应进 prompt");
         assert!(!prompt.contains("2026-01-01"), "probed_at 不应进 prompt");
@@ -152,11 +161,18 @@ mod tests {
             console_encoding: None,
             executables: Default::default(),
             working_dir: None,
+            output_dir: None,
             notes: None,
             probed_at: None,
         };
         let first = step_system_prompt(Some(&env), None);
         assert_eq!(first, step_system_prompt(Some(&env), None));
+        // 未注入产出目录 ⇒ 该行整行省略（注意基准 prompt 里本就有「产出目录」这个词，
+        // 故断言的是**渲染行**而不是词）
+        assert!(
+            !first.contains("产出目录（工具的落盘产出都放这里）"),
+            "{first}"
+        );
         // shell 为 None：不写 shell 名，也不输出编码风险行（无从判断是哪家的编码行为）
         assert!(!first.contains("执行命令的 shell"), "{first}");
         assert!(!first.contains("命令输出按 UTF-8 解码"), "{first}");
@@ -177,6 +193,7 @@ mod tests {
             console_encoding: None,
             executables: Default::default(),
             working_dir: None,
+            output_dir: None,
             notes: None,
             probed_at: None,
         };
@@ -211,5 +228,20 @@ mod tests {
         let first = step_system_prompt(None, Some(PlanCategory::Browser));
         assert_eq!(step_system_prompt(None, Some(PlanCategory::Browser)), first);
         assert_ne!(step_system_prompt(None, Some(PlanCategory::Dev)), first);
+    }
+
+    /// 回归锁：**落盘纪律在全局基准里**（对所有计划类型生效，不靠技能段），
+    /// 且**指向环境段给出的产出目录** —— 写死具体路径会随 `cache_root` 配置漂移。
+    #[test]
+    fn step_prompt_pins_output_location_to_environment_section() {
+        assert!(STEP_SYSTEM_PROMPT.contains("产出目录"), "{STEP_SYSTEM_PROMPT}");
+        assert!(
+            STEP_SYSTEM_PROMPT.contains("显式给出文件名"),
+            "{STEP_SYSTEM_PROMPT}"
+        );
+        assert!(
+            !STEP_SYSTEM_PROMPT.contains("data/cache"),
+            "路径必须动态来自环境段，不得写死: {STEP_SYSTEM_PROMPT}"
+        );
     }
 }

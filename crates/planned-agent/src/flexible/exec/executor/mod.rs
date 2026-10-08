@@ -56,6 +56,22 @@ impl FlexibleExecutor {
         Self { ai, tools, cfg }
     }
 
+    /// 把环境段的**产出目录**补上本次执行段（`run-*`）。
+    ///
+    /// 宿主注入的是**会话级**目录（`<cache_root>/<session_id>`，由 `GuiConfig` 派生），
+    /// 而「本次执行的产出」还要再分一层 —— 补后与 spill 落点（`cache_dir/<run_dir>`）
+    /// **同目录**，同一个计划跑多次才不会互相覆盖。
+    ///
+    /// 宿主没给产出目录时**原样返回**（不凭空造一个，也不改其它字段）。
+    fn with_run_dir(env: &RuntimeEnvironment, run_dir: &str) -> RuntimeEnvironment {
+        match env.output_dir.as_deref() {
+            Some(dir) if !dir.trim().is_empty() => {
+                env.clone().with_output_dir(std::path::Path::new(dir).join(run_dir))
+            }
+            _ => env.clone(),
+        }
+    }
+
     /// 顺序执行整个模板，返回执行报告。
     ///
     /// - 单步失败不抛错：该步记 `Failed`，其后步骤记 `Skipped`，报告 `success = false`；
@@ -78,9 +94,23 @@ impl FlexibleExecutor {
             tracing::warn!(issue = %issue, "计划依赖校验未通过（该步会拿不到前序数据）");
         }
 
+        // 本次执行的产出目录名**先取**：环境段的「产出目录」要用它补上执行段（见下），落盘也用它。
+        // 含毫秒时间戳 + 进程内序号，保证每次执行唯一。
+        let run_dir = new_run_dir_name();
         // 整次执行只算一次 system prompt，每步复用：同一次执行内每步字符串完全一致，
         // 使「环境段」成为可命中的 provider 前缀缓存（见 `prompt::step_system_prompt`）。
-        let system_prompt = prompt::step_system_prompt(environment, template.category);
+        //
+        // 产出目录**补上本次执行段**：模型写出的产出因此与 spill 落点同目录，
+        // 同一个计划跑多次也不会互相覆盖（见 `docs/planned-agent/gui-cache-root.md` §3.4）。
+        let run_env = environment.map(|env| Self::with_run_dir(env, &run_dir));
+        let system_prompt = prompt::step_system_prompt(run_env.as_ref(), template.category);
+        // 产出目录得能**直接写**：提前建出来（原先的懒建会让模型在父目录不存在时写失败）。
+        // 建不出来只 warn —— 落盘自带失败处理（该步 `Failed`），不在拼 prompt 处阻断整次执行。
+        if let Some(dir) = run_env.as_ref().and_then(|env| env.output_dir.as_deref()) {
+            if let Err(error) = std::fs::create_dir_all(dir) {
+                tracing::warn!(dir = %dir, %error, "产出目录创建失败（模型写产出可能失败）");
+            }
+        }
         let started = Instant::now();
         sink.emit(PlanRunEvent::RunStarted {
             total_steps: template.steps.len(),
@@ -101,8 +131,6 @@ impl FlexibleExecutor {
         );
 
         let tools = self.tool_definitions();
-        // 本次执行的产出缓存目录名（懒建：只有真要落盘时才 create_dir_all）。
-        let run_dir = new_run_dir_name();
         let mut store: HashMap<String, StoredOutput> = HashMap::new();
         let mut records: Vec<StepRunRecord> = Vec::with_capacity(template.steps.len());
 

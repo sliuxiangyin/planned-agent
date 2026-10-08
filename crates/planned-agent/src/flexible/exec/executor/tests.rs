@@ -46,6 +46,30 @@
         }
     }
 
+    /// 环境段的产出目录要**补上本次执行段**（`run-*`）：补后与 spill 落点同目录，
+    /// 同一个计划跑多次才不会互相覆盖；宿主没给产出目录时不凭空造。
+    #[test]
+    fn with_run_dir_appends_run_segment() {
+        let base = std::env::temp_dir().join("planned-agent-session-1");
+        let env = RuntimeEnvironment::detect_host().with_output_dir(&base);
+
+        let patched = FlexibleExecutor::with_run_dir(&env, "run-123-0");
+        let expected = base.join("run-123-0");
+        assert_eq!(
+            patched.output_dir.as_deref(),
+            Some(expected.to_string_lossy().as_ref()),
+            "产出目录应补上执行段"
+        );
+
+        let bare = RuntimeEnvironment::detect_host();
+        assert!(
+            FlexibleExecutor::with_run_dir(&bare, "run-123-0")
+                .output_dir
+                .is_none(),
+            "宿主没给产出目录时不应凭空造一个"
+        );
+    }
+
     /// 有契约（`bool`）→ 追加一个整理步，结果取它的输出；契约渲染进请求，且**不带工具**。
     #[tokio::test]
     async fn output_contract_appends_resolve_step_and_returns_result() {

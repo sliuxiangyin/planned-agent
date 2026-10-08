@@ -89,6 +89,11 @@ pub fn start_run_with_template(
     // 先算配置（要用 `session_id` 拼缓存目录 —— 执行器不认识会话概念），
     // 再把 `session_id` move 进请求。
     let config = executor_config_for(&session_id);
+    // 产出目录 = 执行器自己的落盘根（已含会话段）。执行器在拼 system prompt 时再补上
+    // 「本次执行」的 `run-*` 段 → 模型看到的产出目录与 spill 落点**完全同目录**，
+    // 同一个计划跑多次也不会互相覆盖。builtin 图片工具族的沙箱根是它的上一层
+    // （`flexible_output_dir()`），所以照样能读（见 `docs/planned-agent/gui-cache-root.md` §3.4）。
+    let output_dir = config.cache_dir.clone();
 
     service.start(RunRequest {
         session_id,
@@ -98,7 +103,7 @@ pub fn start_run_with_template(
         config,
         // 在**组装请求的这一刻**取环境：`snapshot()` 读的是信号的当下值。
         // 刷新只影响此后新发起的执行；正在跑的那次用它自己启动时的快照。
-        environment: Some(environment.snapshot()),
+        environment: Some(environment.snapshot().with_output_dir(output_dir)),
     });
     Ok(())
 }

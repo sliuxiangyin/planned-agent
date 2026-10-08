@@ -1,6 +1,6 @@
 //! 往 system prompt 尾部追加「运行环境」段。
 //!
-//! 只陈述宿主事实（os / 路径分隔符 / 行尾 / shell / 可用命令 / 编码风险 / 其它说明），
+//! 只陈述宿主事实（os / 路径分隔符 / 行尾 / shell / 可用命令 / 产出目录 / 编码风险 / 其它说明），
 //! 用于消灭「环境不确定 → 反复试探」这类弯路。事实由 `core::host` 提供，这里只负责组织成文本。
 
 use planned_agent_core::host::{RuntimeEnvironment, DEFAULT_PROBE_NAMES};
@@ -10,11 +10,22 @@ use planned_agent_core::host::{RuntimeEnvironment, DEFAULT_PROBE_NAMES};
 /// **不写** `working_dir` / `probed_at`：前者含用户名等路径信息（会随 prompt 发给
 /// provider），后者与执行无关。
 ///
+/// **唯一例外是 `output_dir`（产出目录）**：它同样含路径，但**刻意注入** —— 模型不知道
+/// 产出落哪就会写到别处，而下游工具（如 `builtin_recognize_image` / `builtin_solve_captcha`）
+/// 的沙箱根正是该目录，落错位置只能靠来回搬运。见设计稿 §5.2.5 的例外说明。
+///
 /// **不写**缺失命令清单：可用项本身就是完整信息 —— 没列出来的自然没有，
 /// 把「探测范围」写进标题即可。
 /// **不写**「怎么调用工具」：那属于工具契约，见 `builtin_execute_command` 的 description。
 pub(super) fn render_environment_into(env: &RuntimeEnvironment, out: &mut String) {
     out.push_str("\n## 运行环境（事实，直接采用，不要试探确认）\n");
+
+    // 产出目录**排在最前**：它是「写产出该落哪」的行动依据，比平台事实更直接决定下一步动作。
+    if let Some(dir) = env.output_dir.as_deref().filter(|s| !s.trim().is_empty()) {
+        out.push_str("- 产出目录（工具的落盘产出都放这里）：");
+        out.push_str(dir.trim());
+        out.push('\n');
+    }
 
     out.push_str("- 操作系统：");
     out.push_str(&env.os);
@@ -90,6 +101,34 @@ fn encoding_hint(shell: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 产出目录：注入则渲染在**环境段最前**，未注入则整行省略。
+    ///
+    /// 与 `working_dir` 的对照很关键 —— 同为路径，一个刻意外发、一个刻意不外发。
+    #[test]
+    fn output_dir_line_only_when_injected() {
+        let env = RuntimeEnvironment::detect_host();
+
+        let mut out = String::new();
+        render_environment_into(&env, &mut out);
+        assert!(!out.contains("产出目录"), "未注入时不该出现该行: {out}");
+        // 对照：`working_dir` 有值（`detect_host` 探的就是 cwd）却不渲染
+        if let Some(dir) = env.working_dir.as_deref() {
+            assert!(!out.contains(dir), "working_dir 不应进 prompt: {out}");
+        }
+
+        let env = env.with_output_dir(std::path::Path::new("D:\\cache"));
+        let mut out = String::new();
+        render_environment_into(&env, &mut out);
+        assert!(
+            out.contains("产出目录（工具的落盘产出都放这里）：D:\\cache"),
+            "{out}"
+        );
+        // 排在平台事实之前：它是「写产出该落哪」的行动依据
+        let dir_at = out.find("产出目录").expect("应渲染");
+        let os_at = out.find("操作系统").expect("应渲染");
+        assert!(dir_at < os_at, "产出目录应排在操作系统之前: {out}");
+    }
 
     #[test]
     fn render_available_strips_duplicated_command_name_from_version() {

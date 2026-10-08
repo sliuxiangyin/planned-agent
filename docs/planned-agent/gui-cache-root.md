@@ -76,6 +76,13 @@ pub cache_root: String,
 第三条是**故意**的：只有它能让「用户 `config.toml` 里残留的旧值」不被双重嵌套。
 没有它，旧值 `./data/kv_store` 会变成 `<cwd>/data/data/kv_store`，而且解析时还会 `create_dir_all` 把它**静默建出来**，表现成「数据凭空消失、多出一个嵌套目录」。这是一个必须挡掉的坑，详见 §4 R-1。
 
+**出口一律归一化**（2026-10-08 补）：`paths::normalize` 去掉 `.` 组件、按词法消解 `..`
+（`PathBuf::join` 不做这件事 —— 不归一化时 `absolutize("./data")` 给出 `<cwd>\./data`，
+于是 `flexible_output_dir()` 成了 `...\agent-gui\./data\cache`，与别处算出的同一目录**字符串不等**，
+还会被拼进 prompt 让模型照抄）。归一化后四个派生点 + 「外发给模型的产出目录」形态一致。
+不用 `canonicalize` 的理由：它要求路径**已存在**（配置目录启动时常常还没建），
+且 Windows 上会加上 `\\?\` 前缀，把路径变成另一种形态。
+
 ### 3.4 统一解析函数
 
 新增 `crates/agent-gui/src/paths.rs`（替代 `kv.rs` / `storage.rs` 里两份重复实现）：
@@ -122,6 +129,31 @@ pub fn flexible_output_dir(&self) -> PathBuf;  // **不含**会话段
   GUI 不 `chdir`，与现状行为等价，只是更显式；
 - env 覆盖后**不再拼根**（`PLANNED_AGENT_CACHE_PATH=D:\x` 就是最终路径）；
 - 配置里保留用户原值（`cache.path` 仍是 `kv_store`），日志/展示不失真 —— 这也是没选「加载后归一化」方案的原因。
+
+**产出目录还要「告诉模型」**（2026-10-08 补）：`flexible_output_dir()` 同时是**下游工具的沙箱根**
+（`builtin_recognize_image` / `builtin_solve_captcha` 建 `FilesystemService` 用的 root），
+而浏览器 MCP 的落盘默认在**它自己的 workspace root** —— 没有 roots 上报时 = MCP server 进程的 cwd
+（即 `cargo run` 所在目录）。两者**不是同一个目录**，模型就会用 `Copy-Item` / base64 来回搬运。
+
+对齐办法**不是写死路径**，而是把它作为**环境段的一行**动态外发。路径**分两段拼、各管各的**：
+
+```
+宿主（会话段）   services/run_service.rs：snapshot().with_output_dir(config.cache_dir)  // = <根>/<session_id>
+执行器（执行段） exec/executor/mod.rs：with_run_dir(env, "run-<millis>-<seq>")           // 与 spill 落点同目录
+  → step_system_prompt(env, category) → prompt/environment.rs 渲染「产出目录：<path>」
+  → STEP_SYSTEM_PROMPT 的全局纪律：落盘产出 → 产出目录 + 显式命名
+```
+
+于是「**纪律在全局基准、路径在环境段**」：改 `cache_root` 只需改配置，不必动任何 prompt 文案。
+
+产出目录**按「会话 → 本次执行」两级隔离**：宿主拼会话段（执行器不认识会话概念），
+执行器补 `run-*` 段 —— 与 spill 落点**同一目录**，所以模型写出的产出和
+`cache_dir/<run_dir>/tool-s*.txt` 挨在一起，**同一个计划跑多次也不会互相覆盖**。
+执行器在拼 prompt 前会 `create_dir_all` 该目录（原先是懒建，模型可能在父目录不存在时写失败）；
+builtin 图片工具族的沙箱根是它的**上一层**，所以照样能读。
+
+`output_dir` 是环境段里**唯一刻意外发的路径**（与 `working_dir` 相反），理由见
+`flexible-execution-improvements.md` §5.2.5。
 
 ### 3.5 默认落点变化
 

@@ -13,6 +13,7 @@ const BROWSER_RULES: &str = "\
 ## 计划类型：浏览器自动化（作业规范）
 - 页面内容与元素状态以工具实际返回为准，不得凭 URL、惯例或经验臆测页面结构。
 - 采集到的内容先落盘再分析，不要在一次回答里既抓又分析又输出。
+- 需要读入的路径（上传文件、加载脚本）照原位给，不要先搬进产出目录。
 - 涉及登录态 / 分页 / 弹窗时，先确认当前处于目标页面状态再执行下一步。
 - 需要人工介入（验证码、扫码、短信）时如实报告并停下，不伪造成功、不跳过。
 ";
@@ -82,5 +83,18 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `Browser` 段只留**浏览器特有**的那半条纪律（读入路径别搬）；**产出的落盘位置是全局纪律**
+    /// —— 在 `STEP_SYSTEM_PROMPT`（纪律）+ 环境段的「产出目录」（路径）里，见 `system.rs`
+    /// 的 `step_prompt_pins_output_location_to_environment_section`。
+    #[test]
+    fn browser_rules_keep_input_paths_in_place() {
+        let section = category_rule_section(PlanCategory::Browser).expect("Browser 应有规范段");
+        assert!(section.contains("照原位给"), "{section}");
+        assert!(
+            !section.contains("data/cache"),
+            "路径不得写死在分类段里（应来自环境段）：{section}"
+        );
     }
 }
