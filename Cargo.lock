@@ -6076,6 +6076,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "planned-agent-testkit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "config 0.13.4",
+ "planned-agent-ai-manager",
+ "planned-agent-core",
+ "planned-agent-tool-manager",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "planned-agent-tool-manager"
 version = "0.1.0"
 dependencies = [

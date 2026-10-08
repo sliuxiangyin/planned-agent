@@ -16,7 +16,7 @@
 
 代码实现：`planned-agent` crate 的 `flexible/`（灵活执行器）、`chat/`（对话与子 agent）、以及 `core::planner`（Coarse / ReAct / RePlanner）。
 
-## 1. workspace 分层（11 个 crate）
+## 1. workspace 分层（12 个 crate）
 
 依赖**只能自上而下**，这是硬约束。下表按层排列（`crates/*/Cargo.toml` 逐个核对）：
 
@@ -33,6 +33,7 @@
 | L2 | `crates/ai-manager` → `planned-agent-ai-manager` | 多 AI 提供商客户端管理 | core, ai-openai | `docs/ai-manager.md` |
 | L3 | `crates/planned-agent` → `planned-agent` (lib `planned_agent`) | **Plan-and-Execute 流水线** + `flexible` / `chat` 模块 | core, ai-openai, ai-manager, mcp-rmcp, prompt-manager, tool-manager, rag | `docs/planned-agent.md`、`docs/planned-agent/` |
 | L4 | `crates/agent-gui` → `planned-agent-gui` | **Dioxus 0.7 桌面客户端**（唯一消费 `planned-agent` 的 crate） | core, ai-manager, mcp-rmcp, prompt-manager, tool-manager, rag, planned-agent | `docs/agent-gui-storage.md` |
+| L4 | `crates/testkit` → `planned-agent-testkit` | **集成测试脚手架**：真实 AI + 真实工具，单独测一个工具（`publish = false`，**不被任何产品 crate 依赖**） | core, ai-manager, tool-manager | `docs/planned-agent/testkit.md` |
 
 **枢纽**：`planned-agent-core` 被 **7 个** crate 依赖 —— 改它的公开 API 前先全仓 grep 用法（细节见 `crates/core/AGENTS.md`）。
 
@@ -59,6 +60,7 @@
 | 完整流水线编排 | `crates/planned-agent`（lib 顶层） |
 | 宿主环境探测（os / 可用命令） | `core::host` |
 | 桌面 UI | `crates/agent-gui`（入口 `src/main.rs:54`） |
+| **真实 AI / 工具的集成测试** | `crates/testkit`（设计见 `docs/planned-agent/testkit.md`） |
 | 向量检索 | `crates/rag` |
 | 通用小工具函数 | `crates/util` |
 
@@ -82,6 +84,10 @@ cargo test  --workspace              # ⚠️ 目前会挂住，勿直接用（�
 # 桌面 GUI
 cd crates\agent-gui; cargo run
 cargo test -p planned-agent-gui --bins   # GUI 侧测试
+
+# 真实 AI + 真实工具的集成测试（crates/testkit）
+cargo test -p planned-agent-testkit                  # 默认：不触网、不要密钥
+cargo test -p planned-agent-testkit -- --ignored     # 真实调用（需先建 crates/testkit/config.toml）
 ```
 
 ## 5. 已知的坑（别踩 / 别误判）
@@ -91,4 +97,5 @@ cargo test -p planned-agent-gui --bins   # GUI 侧测试
 - ⚠️ **根 `README.md` 的 CLI 用法已过时**：它写的 `cargo run -- "..."` 不成立 —— `planned-agent` 现在是纯 lib，全仓**唯一**的 `fn main` 在 `crates/agent-gui/src/main.rs`。
 - ⚠️ **根 `examples/` 不被 cargo 构建**：`examples/`（`mcp_tools.rs` / `prompt_manager.rs` / `stream_chat.rs`）不在任何 crate 目录下，根目录又不是 package，`cargo build` 不会碰它们 —— 但它们 `use` 真实 crate API，改动 API 时仍要注意。
 - ℹ️ `planned-agent-util` 目前**没有任何 crate 依赖它**（孤儿 crate）。往里加东西前先确认真的有人要用。
+- ℹ️ `crates/testkit` 的真实 AI 测试**默认被 `#[ignore]`**（`cargo test -p planned-agent-testkit` 不触网）。要跑真实调用：从 `crates/testkit/config.toml.example` 复制出 `config.toml` 并填入密钥，再带 `-- --ignored`。它 `publish = false` 且**不被任何产品 crate 依赖**。
 - ℹ️ 全仓**没有 CI、没有 `build.rs`、没有 `[[bin]]`**（bin 由 package 名默认推出）。

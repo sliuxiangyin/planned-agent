@@ -11,6 +11,7 @@ members = [
     "crates/planned-agent",
     "crates/rag",
     "crates/agent-gui",
+    "crates/testkit",
 ]
 resolver = "2"
 

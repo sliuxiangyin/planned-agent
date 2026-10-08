@@ -522,18 +522,12 @@ impl OpenAiClient {
         let mut chat_request = builder.build()?;
         
         // 设置思考模式参数
+        //
+        // ⚠️ 这里**只**发标准的 `reasoning_effort`。以前还额外往 `metadata` 里塞了一个
+        // 非标准的 `thinking:{type:"enabled"}`，MiniMax 这类严格校验的提供商会直接 400
+        // （`invalid params, Mismatch type string with value object ... thinking ...`）。
         if let Some(thinking_config) = &self.config.thinking_config {
             if thinking_config.enabled {
-                // 设置思考模式开关
-                let thinking = serde_json::json!({
-                    "type": "enabled"
-                });
-                
-                // 使用 metadata 字段传递 thinking 参数
-                chat_request.metadata = Some(serde_json::json!({
-                    "thinking": thinking
-                }).into());
-                
                 // 设置思考强度
                 let effort = thinking_config.effort.as_deref().unwrap_or("high");
                 let reasoning_effort = match effort {

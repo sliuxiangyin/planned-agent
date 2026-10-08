@@ -610,7 +610,7 @@ async fn solve_captcha(
     let images = vec![(mime.to_string(), bytes)];
 
     // ⑥ 阶段一：判断题型。**独立一次调用** —— 只问「哪一类」，不求解。
-    let classify_raw = match call_backend(
+    let (classify_raw, classify_ms) = match call_backend(
         backend,
         SolveRequest {
             kind,
@@ -623,7 +623,7 @@ async fn solve_captcha(
     )
     .await
     {
-        Ok(raw) => raw,
+        Ok(value) => value,
         Err(result) => return result,
     };
     let Some(variant) = parse_variant(&classify_raw) else {
@@ -641,6 +641,7 @@ async fn solve_captcha(
             bytes = image_len,
             raw = %truncate_for_log(classify_raw.trim()),
             raw_chars = classify_raw.trim().chars().count(),
+            classify_ms,
             duration_ms = started.elapsed().as_millis() as u64,
             "验证码题型无法判定"
         );
@@ -652,7 +653,7 @@ async fn solve_captcha(
     // 开发期守卫：策略声明要几张图、图集就该有几张。**加类型时最容易漏的一处**。
     // 当前只有单图策略故恒真；真到多图类型时这里要升级成运行时校验并返回 `invalid_arguments`。
     debug_assert_eq!(images.len(), strategy.expected_images);
-    let solve_raw = match call_backend(
+    let (solve_raw, solve_ms) = match call_backend(
         backend,
         SolveRequest {
             kind,
@@ -665,7 +666,7 @@ async fn solve_captcha(
     )
     .await
     {
-        Ok(raw) => raw,
+        Ok(value) => value,
         Err(result) => return result,
     };
 
@@ -697,6 +698,8 @@ async fn solve_captcha(
         raw = %truncate_for_log(solve_raw.trim()),
         raw_chars = solve_raw.trim().chars().count(),
         readable,
+        classify_ms,
+        solve_ms,
         duration_ms = started.elapsed().as_millis() as u64,
         "验证码求解完毕"
     );
@@ -706,7 +709,9 @@ async fn solve_captcha(
 
 /// 调一次后端：内置超时兜底 + 失败日志（按 `stage` 区分 classify / solve）。
 ///
-/// 返回 `Err(ToolResult)` 表示已构造好对外结果（超时 / 后端失败），调用方直接 `return`。
+/// 返回 `Err(ToolResult)` 表示已构造好对外结果（超时 / 后端失败），调用方直接 `return`；
+/// 成功时返回 `(原始答复, 本阶段耗时毫秒)` —— 两阶段耗时分开记，才能看出瓶颈在"判定"还是"求解"
+/// （只记总耗时会拿不到这个区分）。
 ///
 /// 外层时限是**兜底**：任何后端（含将来的第三方 API）都必须有时限，否则一次挂起会拖死整个
 /// 步骤 —— flexible 的 `llm_timeout` 管不到工具内部这次调用。**每个阶段各有一份时限**。
@@ -716,9 +721,12 @@ async fn call_backend(
     stage: &'static str,
     path_str: &str,
     started: Instant,
-) -> std::result::Result<String, ToolResult> {
-    match tokio::time::timeout(Duration::from_secs(SOLVE_TIMEOUT_SECS), backend.solve(request)).await
-    {
+) -> std::result::Result<(String, u64), ToolResult> {
+    let stage_started = Instant::now();
+    let outcome =
+        tokio::time::timeout(Duration::from_secs(SOLVE_TIMEOUT_SECS), backend.solve(request)).await;
+    let stage_ms = stage_started.elapsed().as_millis() as u64;
+    match outcome {
         Err(_) | Ok(Err(BackendError::Timeout)) => {
             // 超时是最该被看见的一种失败（步骤会被它拖满整整一分钟），单独记一条
             tracing::warn!(
@@ -727,6 +735,7 @@ async fn call_backend(
                 backend = backend.name(),
                 path = %path_str,
                 stage,
+                stage_ms,
                 duration_ms = started.elapsed().as_millis() as u64,
                 "验证码求解超时"
             );
@@ -742,12 +751,13 @@ async fn call_backend(
                 backend = backend.name(),
                 path = %path_str,
                 stage,
+                stage_ms,
                 error = %format!("{error:#}"),
                 "验证码求解调用后端失败"
             );
             Err(failure("backend_failed", format!("{error:#}")))
         }
-        Ok(Ok(raw)) => Ok(raw),
+        Ok(Ok(raw)) => Ok((raw, stage_ms)),
     }
 }
 

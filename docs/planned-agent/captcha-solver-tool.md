@@ -549,3 +549,52 @@ pub trait CaptchaBackend: Send + Sync {
 | `cargo check -p planned-agent-gui` | 通过（下游装配处不受影响；仅既有 warning） |
 
 三条提示词定稿与 §12.6 逐字一致。
+
+---
+
+## 13. 实测耗时与稳定性（2026-10-08，MiniMax-M3）
+
+用 `crates/testkit` 的 `captcha_real_ai` 测：**真实 AI**、同一张 `tests/fixtures/captcha.png`、
+MiniMax-M3。审计日志现在**分开记** `classify_ms` / `solve_ms`，正是为了看清瓶颈在哪一段。
+
+| 轮次 | `classify_ms` | `solve_ms` | 总 | 判定 | 结果 |
+|---|---|---|---|---|---|
+| 1 | 1727 | 3251 | 4980 | `calc` | ✅ `59` |
+| 2 | **60005**（超时兜底触发） | — | 60006 | — | ⚠️ `is_error:"timeout"` |
+| 3 | 9932 | 2725 | 12659 | `char` | ❌ `UNREADABLE` → `readable:false` |
+| 4 | 3993 | — | 3994 | 判不出 | `readable:false` |
+| 5 | 1148 | — | 1148 | 判不出 | `readable:false` |
+
+（1~2 与 3~5 是两次运行，同一份配置、同一张图。）
+
+### 13.1 三条结论
+
+1. **关不掉思考。** MiniMax 的 M 系列在**服务端**硬性拒绝关闭思考 —— 传 `thinking:{type:"disabled"}` /
+   `effort:"none"` 直接 400（文档原文：「深度思考不支持关闭……请调低 `effort` 档位」），唯一可调的
+   是 `reasoning_effort: low|medium|high|xhigh|max`。而且**实测降档也没用**：调到 `low` 后耗时
+   4411ms / 8921ms（两次里一次还判不出题型），并不比默认档（3512ms）快。
+   **这条路走不通**：`thinking_config` 保持 `enabled = false`（= 本仓库**不发**任何思考参数，走
+   服务端默认档）。
+2. **瓶颈是服务端抖动，不是「两阶段」这个结构。** 同一模型、同一张图，总耗时 **1.1s ~ 60s（50×）**。
+   `classify` 是主要不稳定源（1.1s ~ 60s，含一次卡满超时），`solve` 相对稳定（2.7 ~ 3.3s）。
+   所以「关思考」与「合并两阶段」都治不了本：前者做不到，后者只省一次往返、抖动照旧。
+3. **阶段一的误判是当前最大的正确性风险，且已经实测到了**（正是 §12.9 第 3 条那条「窄缝」）：
+   5 次里只有 1 次判成 `calc`（正确），1 次判成 `char`（→ 阶段二必然读不出），3 次判不出。
+   `variant` 字段让这个比例**可观测** —— 这正是当初把「判断」独立成一次调用的价值。
+   提醒：除了 `variant="-"`，还要留意「判成 `char` 但求解返回 `UNREADABLE`」这个组合。
+
+### 13.2 顺带修掉的一个真 bug（`ai-openai`）
+
+`crates/ai-openai/src/client.rs` 原来在 `thinking_config.enabled == true` 时会往请求的 `metadata`
+里塞一个**非标准**字段 `thinking:{type:"enabled"}` —— MiniMax 严格校验，直接 400
+（`invalid params, Mismatch type string with value object ... thinking ...`）。已删掉那段，只保留
+标准的 `reasoning_effort`。也就是说：**在这个修复之前，`enabled = true` 对 MiniMax 完全不可用**
+（本次是被 §13 的实测撞出来的）。
+
+### 13.3 下一步（不在本次范围）
+
+- 换**更稳**的多模态模型（当前模型在同一张图上判定都不稳定，更像**能力**问题，不是提示词问题）；
+- 或阶段一判不出 / 判错时**退回单阶段通用求解**（换一条通用提示词再试一次）；
+- 或收紧 `CLASSIFY_PROMPT`（但 5 次里 3 次「判不出」更像能力上限，提示词收益有限）。
+
+**不变量**：无论选哪条，对外的 `{"kind":"text","text":…,"readable":…}` 与错误码都不动（§12.2 的 D1+D5）。

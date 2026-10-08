@@ -1,0 +1,21 @@
+# testkit 的**独立**配置 —— 不要与仓库根的 config.toml 共用。
+#
+# 用法：把本文件复制为同目录的 config.toml 并填入真实密钥。
+#
+# 该 config.toml 已被根 .gitignore 忽略（`config.toml` 这条规则匹配任意层级），
+# 所以密钥不会进版本库；本 .example 文件才是进库的模板。
+#
+# 格式与 GUI 的 config.toml 一致（同一个 AiProviderConfig），但 testkit 只读
+# `ai_providers` 这一段，cache / rag 等其余段落不需要写。
+#
+# 换模型 / 换兼容 OpenAI 协议的服务：改 model 与 base_url 即可（DeepSeek 等）。
+
+[[ai_providers]]
+name = "testkit"
+provider = "openai"
+api_key = "sk-替换成你的真实密钥"
+model = "gpt-4o"
+max_tokens = 2048
+temperature = 0.0
+base_url = "https://api.openai.com/v1"
+is_default = true
