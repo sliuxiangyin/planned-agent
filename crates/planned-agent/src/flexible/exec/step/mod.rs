@@ -13,7 +13,6 @@ use planned_agent_core::ai::types::{
 use planned_agent_core::ai::AiClient;
 use planned_agent_core::mcp::types::{parse_content_blocks, ContentBlock};
 use planned_agent_tool_manager::ToolRegistry;
-use serde_json::Value;
 use tokio::sync::watch;
 
 use super::event::{PlanRunEvent, PlanRunSink};
@@ -100,6 +99,36 @@ pub(crate) async fn run_output_resolve(
         cancel,
     )
     .await
+}
+
+/// 拼「工具结果的文本部分 + 图片落盘说明」。
+///
+/// 文案在这里（而不是 `image.rs`）：它是**回灌提示**的一部分，属于编排；`image.rs`
+/// 只负责吐出「每张图存到了哪」。
+///
+/// 两条措辞纪律：
+/// - **不点名工具**：写死 `builtin_recognize_image` 会在该工具没注册 / 将来改名时变成
+///   幻觉源；模型从工具表自己就能对上（description 里写明了「读取一张本地图片」）。
+/// - **不预设用途**：只说「用它看、按本步意图说明要看什么」——「识别验证码」只是图片用途
+///   之一（还可能是看布局、提取表格）。本步意图已经在 user 消息里，不重复注入。
+fn join_text_and_image_notes(text: &str, notes: &[String]) -> String {
+    // 真实调用点受 `match` 守卫保护（含图片 ⇒ `notes` 非空），这一支只为让本函数
+    // 作为「拼接器」自身完备、可脱离执行链路单测。
+    if notes.is_empty() {
+        return text.to_string();
+    }
+    let mut rendered = text.to_string();
+    if !rendered.is_empty() {
+        rendered.push_str("\n\n");
+    }
+    rendered.push_str(&format!(
+        "（工具返回了 {} 张图片，内容未注入上下文，已保存为本地文件：\n{}\n\n\
+         需要查看图片内容时，用能读取本地图片的工具打开上述路径，\
+         并按本步骤的意图说明要看什么。）",
+        notes.len(),
+        notes.join("\n")
+    ));
+    rendered
 }
 
 /// 工具输出进 messages 的那一份：超过阈值就落盘，改用「文件 + 预览」引用。
@@ -351,18 +380,27 @@ async fn run_step_with_prompt(
                     // 必须在下面的 `output = %content` 与 `messages.push` 之前完成。
                     let blocks = parse_content_blocks(&outcome.result.content);
                     let content = match blocks.as_deref() {
+                        // 含图片：图片落盘成文件，进上下文只有文本 + 绝对路径。
+                        // 文本部分**必须**从块里取 —— 不能走下面的 `tool_content`，
+                        // 它会把含 base64 的数组序列化成 JSON。
                         Some(blocks)
                             if blocks
                                 .iter()
                                 .any(|block| matches!(block, ContentBlock::Image { .. })) =>
                         {
-                            image::render_with_images(
+                            let notes = image::spill_images(
                                 blocks,
                                 &cfg.cache_dir,
                                 input.run_dir,
                                 &format!("s{}-r{rounds}-c{nth}", input.index),
                             )
-                            .await
+                            .await;
+                            let text = blocks
+                                .iter()
+                                .filter_map(ContentBlock::text)
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            join_text_and_image_notes(&text, &notes)
                         }
                         _ => tool_content(&outcome.result.content),
                     };

@@ -152,7 +152,7 @@ pub(super) async fn execute_backend_tool_call<
 
     let (is_error, content) = match &outcome {
         // `sanitized_content()`：含图片的结果降级为 `[图片]` 占位 —— 绝不把 base64 当文本
-        // 写进历史 / UI 事件（图片块约定见 `core::mcp::types::is_image_block`）。
+        // 写进历史 / UI 事件（图片块的形状约定见 `core::mcp::types::ContentBlock`）。
         Ok(o) => (o.result.is_error, o.result.sanitized_content()),
         Err(e) => {
             if state.is_cancelled_effective() {

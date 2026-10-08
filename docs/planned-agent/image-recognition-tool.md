@@ -105,16 +105,20 @@
 
 ### 4.3 `flexible` 改动
 
-**职责划分**（2026-10-07 复核时调整）：**类型区分留在主流程，落盘下放给 `image.rs`**。
+**职责划分**（2026-10-07 两次复核后定型）：**决策在主流程，落盘与校验在 `image.rs`，文案在回灌点**。
 
 `exec/step/mod.rs` 的回灌点自己 `match` —— 「这一步的结果里有没有图片」是编排决策，必须在主流程一眼可见，不能藏在下游函数里：
 
 ```rust
 let blocks = parse_content_blocks(&outcome.result.content);
 let content = match blocks.as_deref() {
-    // 含图片 → 落盘换路径（base64 由此出栈丢弃）
+    // 含图片：图片落盘换路径，文本块从视图取原文。
+    // 文本部分**必须**从块里取 —— 不能走下面的 `tool_content`，
+    // 它会把含 base64 的数组序列化成 JSON。
     Some(blocks) if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. })) => {
-        image::render_with_images(blocks, &cfg.cache_dir, input.run_dir, &tag).await
+        let notes = image::spill_images(blocks, &cfg.cache_dir, input.run_dir, &tag).await;
+        let text = blocks.iter().filter_map(ContentBlock::text).collect::<Vec<_>>().join("\n");
+        join_text_and_image_notes(&text, &notes)
     }
     // 其余（纯文本 / 自定义 JSON）→ 原渲染路径，语义逐字不变
     _ => tool_content(&outcome.result.content),
@@ -123,23 +127,29 @@ let content = match blocks.as_deref() {
 
 **必须发生在 `output = %content` 与 `messages.push` 之前**（否则 base64 进日志）。
 
-`crates/planned-agent/src/flexible/exec/step/image.rs`（**新增**，按 `AGENTS.md` §5：执行期新行为放小模块）只负责落盘与拼装：
+`crates/planned-agent/src/flexible/exec/step/image.rs`（**新增**，按 `AGENTS.md` §5：执行期新行为放小模块）**只做一件事：把图片块落盘、返回说明**：
 
-- `render_with_images(blocks: &[ContentBlock<'_>], cache_dir, run_dir, tag) -> String`
-  - 收的是**类型化视图**（`ContentBlock`），不再碰 `Value`，也无权决定「要不要走这条路」；
-  - 文本块拼原文，图片块经 `materialize` 落盘后换成**绝对路径**清单；
+- `spill_images(blocks: &[ContentBlock<'_>], cache_dir, run_dir, tag) -> Vec<String>`
+  - 收的是**类型化视图**（`ContentBlock`），不碰 `Value`；非图片块 `continue` 掉 → 模块内**没有任何类型判断**（它不决定「要不要走这条路」，也不渲染文本块 —— 后者归 `render::tool_content` 与回灌点）；
+  - 返回**每张图一条**的说明（绝对路径 + mime + 字节数）；被上限 / 校验拒掉的也各占一条，故 `notes.len()` = 实际处理的图片张数；
   - 落盘路径：`<cache_dir>/<run_dir>/img-<tag>-<nth>.<ext>`，其中 `tag = s<步>-r<轮>-c<第几次工具调用>`；文件名只含数字/字母，**不含 LLM 给的任何字符串** → 无目录穿越；
-  - 扩展名按 mime 反推，只认 `png/jpg/jpeg/webp/gif`（与 `ai-openai::image_mime_of` 对齐，写错会让整个请求 Err）；不支持的 mime 直接给「格式不支持」提示，**不落盘**；
-  - 三道上限：单张 20 MB（`MAX_IMAGE_BYTES`，与 ai-openai / `builtin_recognize_image` 一致）、单次最多 8 张（`MAX_IMAGES_PER_RESULT`）、单次总字节 64 MB（`MAX_TOTAL_BYTES_PER_RESULT`）；超限的那张只给提示、不落盘；
+  - 扩展名按 mime 反推，只认 `png/jpg/jpeg/webp/gif`（与 `ai-openai::image_mime_of` 对齐，写错会让整个请求 Err）；不支持的 mime 直接给「格式不支持」说明，**不落盘**；
+  - 三道上限：单张 20 MB（`MAX_IMAGE_BYTES`，与 ai-openai / `builtin_recognize_image` 一致）、单次最多 8 张（`MAX_IMAGES_PER_RESULT`）、单次总字节 64 MB（`MAX_TOTAL_BYTES_PER_RESULT`）；超限的那张只给说明、不落盘；
   - **解码前先按 base64 长度预筛**（`len > 额度/3*4 + 8` 即拒），避免把超大 payload 整份解进内存；
   - 路径用 `std::path::absolute` 绝对化（`ExecutorConfig.cache_dir` 可能是相对路径）。
+
+回灌文案（「已保存为本地文件：… 需要查看图片内容时，用能读取本地图片的工具打开上述路径，并按本步骤的意图说明要看什么。」那段）在 `mod.rs::join_text_and_image_notes` —— 它是**给模型的提示**，属于编排，不进 `image.rs`。
+
+**两条措辞纪律**（2026-10-07 定，理由见 §5.1）：**不点名工具**（工具没注册 / 改名时点名即幻觉源）、**不预设用途**（「识别验证码」只是图片用途之一，还可能是看布局、提取表格）。
+
+`ContentBlock::text()`（`core`）：`Text` 给原文、`Image` 给 `None`、`Unknown` 给 JSON 字面量 —— 供回灌点一行取完文本部分（免得到处写三变体 `match`）。
 
 **落盘失败不判该步 `Failed`**（与本节初版设计相反，实施时改的）：工具**已经执行完**，落盘失败只是图片没留下来；失败原因写进回灌文本，模型可以重新调用工具取一张新图 —— 判 `Failed` 反而丢掉这次工具调用的信息。这与「跨步产出落盘失败」不同：那里失败等于后续步骤拿不到输入，这里模型能自适应。
 
 ### 4.4 硬不变量（must-not-break）
 
 1. **base64 不得进入**：`messages` 的任何 tool 消息文本、`tracing` 日志（尤其 `mod.rs` 里那条 `output = %content` 的 WARN、`exec/executor/logging.rs::log_output`）、`PlanRunEvent`、`PlanRunReport`。落盘后**立即丢弃** base64（`materialize` 里解码出的 `bytes` 只活在该函数作用域）。
-2. **纯文本工具行为逐字不变**（回归基线：`cargo test -p planned-agent --lib flexible::`，实施后 = 121）。
+2. **纯文本工具行为逐字不变**（回归基线：`cargo test -p planned-agent --lib flexible::`，实施后 = 122）。
 3. **绝对路径**：落盘后给 LLM 的路径必须是绝对路径（沙箱根 `flexible_output_dir()` 是绝对路径）。
 4. **同一个 `ToolResult` 的所有消费方都要脱敏**。图片块进入 `Value` 之后，除 `flexible` 走落盘外，还有三条「只要文本」的路径，全部改用 `ToolResult::sanitized_content()`（图片 → `[图片]` 占位）：
    - `flexible/exec/step/mod.rs`（走 `image.rs` 落盘，天然无图片块进上下文）
@@ -158,17 +168,24 @@ let content = match blocks.as_deref() {
 
 ```
 name:        builtin_recognize_image
-description: 用 AI 识别图片内容并返回文本（适合读取验证码、二维码、截图中的文字）。
-             图片必须是本机已存在的文件路径（通常来自上一个工具的输出）。
+description: 用 AI 读取一张本地图片的内容并返回文本。读什么由 instruction 决定
+             （读出图中的字符、判断界面状态与布局、提取表格数据）。
+             path 必须是本机已存在的图片文件路径，通常来自上一个工具的输出。
 input_schema:
-  path        string  (required)  本地图片绝对路径
-  instruction string  (optional)  识别要求，缺省为「读取图片中的文字，只输出结果」
+  path        string  (required)  本地图片文件路径（png / jpg / jpeg / webp / gif）
+  instruction string  (required)  要看什么；按当前步骤的意图填写
 ```
 
 设计意图（写进 description，不改 prompt 文件）：
 
 - 明确「输入是**路径**不是图片数据」——避免 LLM 尝试传 base64；
-- 明确「只输出结果」——工具内部提示词固定，返回短文本。
+- **工具不预设用途**（2026-10-07 定）：`instruction` **必填**，「这张图要看什么」由**当前步骤的意图**决定。
+  原先的「缺省读字 + description 写死验证码/二维码」把工具窄化成了 OCR —— 换成「检查登录页布局是否错乱」这类意图时，默认值会把答案压成一段文字（工具其实答得了，是默认值在拽它）。
+  漏传 `instruction` → `invalid_arguments`（可自愈：模型看到错误会补），且校验**在读盘之前**，不浪费 IO。
+- 工具定位记为「**图 → 文本**」：不返回图片数据，也不做**多图对比**（需未来加 `paths`）。
+
+> 这条链上的三处「预设用途」是一起改的：回灌文案（§4.3）、本工具的 description、`instruction` 默认值。
+> 只改一处无效 —— 另两处仍会把模型拽向 OCR。
 
 ### 5.2 分类：**`Utility`**（已拍板）
 
@@ -296,19 +313,19 @@ let tools = ToolsContext::init(docs_dir, ai.manager.default() /* Result */)?;
 |---|---|
 | `mcp-rmcp` | ✅ 6 例：单 image 块保留 data/mime；text+image 多块都保留；仅图片也是数组；多块纯文本拼接成一个 `String`（不再只活第一块、也不退化成 JSON 字面量）；空 content → `Null`；`is_error` 保留；纯文本仍返回 `String`（回归） |
 | `core::mcp::types` | ✅ 6 例：纯文本 / 结构化结果的 `sanitized_content()` 逐字不变；图片块 → `[图片]` 且 base64 不残留；无图片数组不变；`content_blocks()` 解析 Text/Image/Unknown、裸字符串视为单文本块、自定义 JSON → `None` |
-| `flexible/exec/step/image` | ✅ 7 例：图片落盘 + 文本里**无 base64**、含**绝对路径** + 提示用 `builtin_recognize_image`；多图各自成文件；不支持的 mime 不落盘；坏 base64 不 panic；裸字符串文本块原文直出；张数超限不落盘；超大 base64 解码前即被拒 |
-| `flexible/exec/step`（回灌点集成） | ✅ 1 例：假工具返回含图片结果 → `run_step` 全程跑通，tool 消息里只有绝对路径、无 base64，且 **tracing 日志里也无 base64**；run 目录落盘 1 张 png。纯文本路径行为不变由既有的 `spill_threshold_*` / `spill_failure_*` 用例守着 |
-| `tool-manager` | ✅ **已实施**（10 个用例）：路径越界 → `path_outside_allowed`；不存在 → `file_not_found`；指向目录 → `invalid_arguments`；非图片内容 → `unsupported_image_type`；伪装扩展名也按**内容**判定；成功路径断言 `ImageSource::Url` 的 `data:image/png;base64,` 前缀 + `tools` 为空；空回复 → `empty_result`；超长 → 截断；工具注册态（名字 + `Utility`）。桩 `FakeAiClient` 写在用例模块内 |
-| 基线 | `cargo test -p planned-agent --lib flexible::`（112）、`cargo test -p planned-agent-tool-manager --lib`（108）、`cargo test -p planned-agent-gui --bins`（97） |
+| `flexible/exec/step/image` | ✅ 8 例：`spill_images` 把图片落盘并返回说明（**无 base64**、含**绝对路径**）；多图各自成文件；不支持的 mime 不落盘；坏 base64 不 panic；非图片块一概不理（不落盘、不建目录）；张数超限不落盘；超大 base64 解码前即被拒；mime→扩展名映射覆盖 ai-openai 白名单 |
+| `flexible/exec/step`（回灌点） | ✅ 2 例：① 集成：假工具返回含图片结果 → `run_step` 全程跑通，tool 消息里只有绝对路径、无 base64，且 **tracing 日志里也无 base64**，run 目录落盘 1 张 png；② `join_text_and_image_notes` 纯函数：无说明时原文一字不动、有说明时拼接、文本为空时无前导空行。纯文本路径行为不变由既有的 `spill_threshold_*` / `spill_failure_*` 用例守着 |
+| `tool-manager` | ✅ 11 例：**`instruction` 缺失 / 空白 → `invalid_arguments` 且不发 AI 调用**；路径越界 → `path_outside_allowed`；不存在 → `file_not_found`；指向目录 → `invalid_arguments`；非图片内容 → `unsupported_image_type`；伪装扩展名也按**内容**判定；成功路径断言 `ImageSource::Url` 的 `data:image/png;base64,` 前缀 + `tools` 为空；`instruction` 原样进 user 消息第一段；空回复 → `empty_result`；超长 → 截断；注册态（名字 + `Utility` + schema 里 `instruction` 进 `required`）。桩 `FakeAiClient` 写在用例模块内 |
+| 基线 | `cargo test -p planned-agent --lib flexible::`（122）、`cargo test -p planned-agent-tool-manager --lib`（109）、`cargo test -p planned-agent-gui --bins`（97） |
 
-**实测（阶段 1 实施后，2026-10-07）**：
+**实测（阶段 1 + 阶段 2 实施后，2026-10-07）**：
 
 | 命令 | 结果 |
 |---|---|
-| `cargo test -p planned-agent --lib flexible::` | **121 passed / 0 failed**（112 基线 + 9 新增，无回归） |
-| `cargo test -p planned-agent-mcp-rmcp --lib` | **15 passed**（新增 6 例） |
-| `cargo test -p planned-agent-core --lib` | **26 passed**（新增 6 例） |
-| `cargo test -p planned-agent-tool-manager --lib` | **108 passed**（阶段 2 的 10 例） |
+| `cargo test -p planned-agent --lib flexible::` | **122 passed / 0 failed** |
+| `cargo test -p planned-agent-mcp-rmcp --lib` | **15 passed** |
+| `cargo test -p planned-agent-core --lib` | **27 passed** |
+| `cargo test -p planned-agent-tool-manager --lib` | **109 passed** |
 | `cargo test -p planned-agent-gui --bins` | **97 passed** |
 | `cargo test -p planned-agent-tool-manager --test cap_std_contract` | 4 passed |
 
@@ -321,5 +338,6 @@ let tools = ToolsContext::init(docs_dir, ai.manager.default() /* Result */)?;
 3. **provider 不支持视觉** → 400；错误信息要能指向「这个 provider 不支持图片」。
 4. **落盘目录生命周期**：run 目录目前无人清理（与 spill 产物相同），图片会长期堆积，需要后续 GC 策略。
 5. **明文落盘**：截图可能含会话/个人信息，落盘即明文 —— 需与用户确认可接受，或后续加密/清理。
-6. **模型可能忽略图片**：图片不进主模型上下文，模型只看到路径 —— 若它不主动调 `builtin_recognize_image`，图就白落了。缓解：回灌文本里直接点名该工具（已实现）+ 工具 description 写清用途。
-7. **落盘失败不判该步失败**（实施时定的，见 §4.3）：好处是模型能自适应重取，代价是「图真丢了」时该步仍算成功 —— 回灌文本里的「保存失败」是被发现的唯一线索。
+6. **模型可能忽略图片**：图片不进主模型上下文，模型只看到路径 —— 若它不主动调用看图工具，图就白落了。缓解：工具 description 里写明「读取一张本地图片」（模型从工具表能对上）+ 回灌文案说明「需要查看时用能读图片的工具」。⚠️ **不可**改用「回灌文本点名工具」——工具没注册 / 将来改名时，点名就是幻觉源（2026-10-07 已把这个旧缓解推翻）。
+7. **`instruction` 必填的代价**：弱模型可能漏传 → 多一次往返（`invalid_arguments` 可自愈）。这是刻意的取舍：让「图片用来干嘛」由**步骤意图**决定，而不是由工具的默认值替它决定。
+8. **落盘失败不判该步失败**（实施时定的，见 §4.3）：好处是模型能自适应重取，代价是「图真丢了」时该步仍算成功 —— 回灌文本里的「保存失败」是被发现的唯一线索。

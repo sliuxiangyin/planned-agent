@@ -3,8 +3,12 @@
 //! 依据 `docs/planned-agent/image-recognition-tool.md` §4.3。
 //!
 //! **契约**：base64 绝不进入 messages / 日志 / 事件 / 报告 —— 落盘后立即丢弃，
-//! 进上下文的只有一句短路径提示。图片由 `builtin_recognize_image`（或任何接受
-//! 路径的工具）按需读取；**执行器的主模型不需要具备视觉能力**。
+//! 进上下文的只有一句短路径提示。图片由**任何接受路径的看图工具**按需读取；回灌文案
+//! 刻意不点名具体工具（没注册 / 改名时点名即幻觉源）。**执行器的主模型不需要视觉能力**。
+//!
+//! **职责**：本模块只做一件事 —— 把图片块落盘、返回说明。它**不**决定
+//! 「要不要走这条路」（那是 `mod.rs` 回灌点的 `match`），也**不**渲染文本块
+//! （那是 `render::tool_content` 与回灌点的活）。
 
 use std::path::Path;
 
@@ -39,61 +43,46 @@ fn extension_for_mime(mime: &str) -> Option<&'static str> {
     }
 }
 
-/// 把**含图片块**的工具结果渲染成进 messages 的文本：文本块照常拼接，图片块落盘后
-/// 换成其**绝对路径**清单（base64 就地丢弃）。
+/// 把结果里的图片块落盘，返回给模型看的说明清单（绝对路径 + 类型 + 字节数）。
 ///
-/// 「这一步的工具结果里到底有没有图片」由调用方（`mod.rs` 的回灌点）用 `match` 判定；
-/// 本函数只管落盘与拼装，不决定要不要走这条路。
+/// **只认图片块**：非图片块 `continue` 掉，不看、不管 —— 文本渲染与「要不要走这条路」
+/// 都由调用方（`mod.rs` 回灌点）负责。
 ///
-/// 路径必须绝对：`builtin_recognize_image` 的沙箱根是宿主的 cache 产出区（绝对路径），
-/// 相对路径过不了校验。
+/// 清单长度 = 实际处理的图片张数（含被上限 / 校验拒掉的，它们也各占一条说明），
+/// 调用方用它拼提示。路径必须绝对：看图工具的沙箱根是宿主的 cache 产出区
+/// （绝对路径），相对路径过不了校验。
 ///
 /// 落盘失败**不**判该步失败（对比跨步产出落盘的严格语义）：工具已经执行完了，
-/// 失败原因会写进提示，模型可以重新调用工具取一张新图。
-pub(crate) async fn render_with_images(
+/// 失败原因会写进说明，模型可以重新调用工具取一张新图。
+pub(crate) async fn spill_images(
     blocks: &[ContentBlock<'_>],
     cache_dir: &Path,
     run_dir: &str,
     tag: &str,
-) -> String {
-    let mut texts: Vec<String> = Vec::new();
+) -> Vec<String> {
     let mut notes: Vec<String> = Vec::new();
     let mut nth = 0usize;
     let mut budget = MAX_TOTAL_BYTES_PER_RESULT;
 
     for block in blocks.iter().copied() {
-        match block {
-            ContentBlock::Image { mime_type, data } => {
-                let ordinal = nth + 1;
-                if nth >= MAX_IMAGES_PER_RESULT {
-                    notes.push(format!(
-                        "- 第 {ordinal} 张图片：超过单次 {MAX_IMAGES_PER_RESULT} 张上限，未保存"
-                    ));
-                } else {
-                    let (note, written) =
-                        materialize(mime_type, data, cache_dir, run_dir, tag, nth, budget).await;
-                    budget = budget.saturating_sub(written);
-                    notes.push(note);
-                }
-                nth += 1;
-            }
-            ContentBlock::Text(text) => texts.push(text.to_string()),
-            ContentBlock::Unknown(value) => texts.push(value.to_string()),
+        let ContentBlock::Image { mime_type, data } = block else {
+            continue;
+        };
+        let ordinal = nth + 1;
+        if nth >= MAX_IMAGES_PER_RESULT {
+            notes.push(format!(
+                "- 第 {ordinal} 张图片：超过单次 {MAX_IMAGES_PER_RESULT} 张上限，未保存"
+            ));
+        } else {
+            let (note, written) =
+                materialize(mime_type, data, cache_dir, run_dir, tag, nth, budget).await;
+            budget = budget.saturating_sub(written);
+            notes.push(note);
         }
+        nth += 1;
     }
 
-    let mut rendered = texts.join("\n");
-    if !notes.is_empty() {
-        if !rendered.is_empty() {
-            rendered.push_str("\n\n");
-        }
-        rendered.push_str(&format!(
-            "（工具返回了 {nth} 张图片，图片内容未注入上下文，已保存为本地文件；\
-             需要识别时用 builtin_recognize_image 传 path：）\n{}",
-            notes.join("\n")
-        ));
-    }
-    rendered
+    notes
 }
 
 /// 单张图片落盘：`<cache_dir>/<run_dir>/img-<tag>-<nth>.<ext>`。
@@ -190,38 +179,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn images_are_spilled_and_replaced_by_absolute_paths() {
+    async fn images_are_spilled_and_returned_as_absolute_paths() {
         let cache = tempfile::tempdir().expect("临时目录");
         let content = json!([{ "type": "text", "text": "shot taken" }, png_block()]);
 
-        let rendered = render_with_images(&view(&content), cache.path(), "run-1", "s1-r2-c0").await;
+        let notes = spill_images(&view(&content), cache.path(), "run-1", "s1-r2-c0").await;
 
-        assert!(
-            rendered.contains("shot taken"),
-            "文本块要取原文、不能是 JSON 字面量：{rendered}"
-        );
-        assert!(!rendered.contains("\"type\""), "不应退化成 JSON 字面量：{rendered}");
-        assert!(
-            !rendered.contains(PNG_BASE64),
-            "base64 不得出现在进上下文的文本里：{rendered}"
-        );
-        assert!(
-            rendered.contains("builtin_recognize_image"),
-            "要告诉模型怎么用这张图：{rendered}"
-        );
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        let note = &notes[0];
+        assert!(!note.contains(PNG_BASE64), "说明里不得出现 base64：{note}");
+        assert!(note.contains("image/png"), "{note}");
 
         let spilled = cache.path().join("run-1").join("img-s1-r2-c0-0.png");
         assert!(
             spilled.exists(),
-            "图片应落盘到 {}；实际渲染：{rendered}",
+            "图片应落盘到 {}；实际说明：{notes:?}",
             spilled.display()
         );
-        assert_eq!(std::fs::read(&spilled).expect("读回"), [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        assert_eq!(
+            std::fs::read(&spilled).expect("读回"),
+            [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]
+        );
 
         let expected = std::path::absolute(&spilled).expect("绝对化");
         assert!(
-            rendered.contains(&expected.display().to_string()),
-            "路径必须是绝对路径：{rendered}"
+            note.contains(&expected.display().to_string()),
+            "路径必须是绝对路径：{note}"
         );
     }
 
@@ -230,15 +213,16 @@ mod tests {
         let cache = tempfile::tempdir().expect("临时目录");
         let content = json!([png_block(), png_block()]);
 
-        let rendered = render_with_images(&view(&content), cache.path(), "run-2", "s2-r0-c0").await;
+        let notes = spill_images(&view(&content), cache.path(), "run-2", "s2-r0-c0").await;
 
+        assert_eq!(notes.len(), 2, "{notes:?}");
         assert!(
             cache.path().join("run-2").join("img-s2-r0-c0-0.png").exists(),
-            "实际渲染：{rendered}"
+            "实际说明：{notes:?}"
         );
         assert!(
             cache.path().join("run-2").join("img-s2-r0-c0-1.png").exists(),
-            "实际渲染：{rendered}"
+            "实际说明：{notes:?}"
         );
     }
 
@@ -247,9 +231,10 @@ mod tests {
         let cache = tempfile::tempdir().expect("临时目录");
         let content = json!([{ "type": "image", "mime_type": "image/bmp", "data": PNG_BASE64 }]);
 
-        let rendered = render_with_images(&view(&content), cache.path(), "run-3", "s3-r0-0").await;
+        let notes = spill_images(&view(&content), cache.path(), "run-3", "s3-r0-0").await;
 
-        assert!(rendered.contains("不支持"), "{rendered}");
+        assert_eq!(notes.len(), 1, "被拒的图也要占一条说明：{notes:?}");
+        assert!(notes[0].contains("不支持"), "{notes:?}");
         assert!(!cache.path().join("run-3").exists(), "不应创建目录");
     }
 
@@ -259,20 +244,21 @@ mod tests {
         let content =
             json!([{ "type": "image", "mime_type": "image/png", "data": "!!!not-base64!!!" }]);
 
-        let rendered = render_with_images(&view(&content), cache.path(), "run-4", "s4-r0-0").await;
+        let notes = spill_images(&view(&content), cache.path(), "run-4", "s4-r0-0").await;
 
-        assert!(rendered.contains("解码失败"), "{rendered}");
+        assert!(notes[0].contains("解码失败"), "{notes:?}");
     }
 
     #[tokio::test]
-    async fn bare_string_text_block_is_kept_verbatim() {
+    async fn non_image_blocks_are_ignored() {
         let cache = tempfile::tempdir().expect("临时目录");
-        let content = json!(["plain text", png_block()]);
+        // 文本块与认不出的块都不该让本模块做任何事 —— 它们归渲染方管。
+        let content = json!(["plain text", { "type": "something-new", "x": 1 }]);
 
-        let rendered = render_with_images(&view(&content), cache.path(), "run-5", "s5-r0-c0").await;
+        let notes = spill_images(&view(&content), cache.path(), "run-5", "s5-r0-c0").await;
 
-        assert!(rendered.starts_with("plain text"), "{rendered}");
-        assert!(cache.path().join("run-5").join("img-s5-r0-c0-0.png").exists());
+        assert!(notes.is_empty(), "{notes:?}");
+        assert!(!cache.path().join("run-5").exists(), "不应创建目录");
     }
 
     #[tokio::test]
@@ -281,9 +267,9 @@ mod tests {
         // 多给一张，验证超出的那张既不落盘也不 panic。
         let content = Value::Array((0..=MAX_IMAGES_PER_RESULT).map(|_| png_block()).collect());
 
-        let rendered =
-            render_with_images(&view(&content), cache.path(), "run-6", "s6-r0-c0").await;
+        let notes = spill_images(&view(&content), cache.path(), "run-6", "s6-r0-c0").await;
 
+        assert_eq!(notes.len(), MAX_IMAGES_PER_RESULT + 1, "{notes:?}");
         let dir = cache.path().join("run-6");
         assert!(dir.join("img-s6-r0-c0-0.png").exists());
         assert!(
@@ -291,7 +277,7 @@ mod tests {
                 .exists(),
             "第 {MAX_IMAGES_PER_RESULT} 张之后不应落盘"
         );
-        assert!(rendered.contains("超过单次"), "{rendered}");
+        assert!(notes.last().expect("末条").contains("超过单次"), "{notes:?}");
     }
 
     #[tokio::test]
@@ -301,9 +287,9 @@ mod tests {
         let huge = "A".repeat((MAX_IMAGE_BYTES / 3 * 4 + 16) as usize);
         let content = json!([{ "type": "image", "mime_type": "image/png", "data": huge }]);
 
-        let rendered = render_with_images(&view(&content), cache.path(), "run-7", "s7-r0-c0").await;
+        let notes = spill_images(&view(&content), cache.path(), "run-7", "s7-r0-c0").await;
 
-        assert!(rendered.contains("超过本次可落盘额度"), "{rendered}");
+        assert!(notes[0].contains("超过本次可落盘额度"), "{notes:?}");
         assert!(!cache.path().join("run-7").exists(), "不应创建目录");
     }
 

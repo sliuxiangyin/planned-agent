@@ -6,7 +6,7 @@
     };
     use crate::flexible::{ExecutorConfig, StepStatus};
     use planned_agent_core::tool_registry::ToolCategory;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     const MAX_ROUNDS: usize = 5;
 
@@ -688,6 +688,22 @@
         let _ = std::fs::remove_dir_all(&cache_dir);
     }
 
+    #[test]
+    fn image_notes_are_appended_to_tool_text() {
+        // 无说明 → 原文一字不动（纯文本路径的行为不变）
+        assert_eq!(join_text_and_image_notes("done", &[]), "done");
+
+        let notes = vec!["- D:\\cache\\img-s1-r0-c0-0.png（image/png，8 字节）".to_string()];
+        let rendered = join_text_and_image_notes("screenshot taken", &notes);
+        assert!(rendered.starts_with("screenshot taken\n\n"), "{rendered}");
+        assert!(rendered.contains("需要查看图片内容时"), "{rendered}");
+        assert!(rendered.contains("img-s1-r0-c0-0.png"), "{rendered}");
+
+        // 文本为空时不该出现前导空行
+        let only_image = join_text_and_image_notes("", &notes);
+        assert!(only_image.starts_with("（工具返回了 1 张图片"), "{only_image}");
+    }
+
     /// 含图片的工具结果：图片落盘、tool 消息里只有**绝对路径**。
     ///
     /// 覆盖两件事：① `mod.rs` 回灌点的类型分支确实认出了图片；② 脱敏不变量 ——
@@ -738,7 +754,11 @@
 
         let tool_text = tool_content_of_request(&ai, 1);
         assert!(tool_text.contains("screenshot taken"), "{tool_text}");
-        assert!(tool_text.contains("builtin_recognize_image"), "{tool_text}");
+        assert!(tool_text.contains("需要查看图片内容时"), "{tool_text}");
+        assert!(
+            !tool_text.contains("builtin_recognize_image"),
+            "回灌文案不点名工具（没注册 / 改名时会变幻觉源）：{tool_text}"
+        );
         assert!(
             !tool_text.contains(PNG_BASE64),
             "base64 不得进上下文：{tool_text}"

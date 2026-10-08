@@ -3,7 +3,10 @@
 //! 设计依据：`docs/planned-agent/image-recognition-tool.md`。
 //!
 //! 边界：
-//! - **只做「图 → 文本」**，不返回图片数据、不做版面/颜色理解；
+//! - **只做「图 → 文本」**：不返回图片数据，也不做多图对比；
+//! - **不预设用途**：返回什么完全由调用方给的 `instruction` 决定（读出字符 / 描述界面状态
+//!   与布局 / 提取表格…）——「这张图要看什么」属于**当前步骤的意图**，不属于工具，
+//!   所以 `instruction` 是**必填**参数；
 //! - 读盘**必须经过 filesystem 工具族的 cap-std 沙箱句柄**（[`FilesystemService`]）：
 //!   只用 `resolve` 校验再让适配层按字符串路径读盘会留下 TOCTOU 窗口
 //!   （中间目录被换成指向沙箱外的链接即可逃逸）；
@@ -36,15 +39,13 @@ use super::filesystem::support::{failure, tool_result};
 /// （`crates/planned-agent/src/flexible/exec/executor/config.rs:47-57`）。
 const RECOGNIZE_TIMEOUT_SECS: u64 = 60;
 
-/// 识别结果上限：验证码 / 二维码这类结果应当很短，超长说明模型跑偏。
+/// 结果长度上限：**防模型跑偏成长篇大论**（本工具是「图 → 一小段文本」，不该把整页 OCR
+/// 全文搬进上下文）。刻意不按某一种用途定（「读字符」与「描述布局」的合理长度差很多）。
 const MAX_RESULT_CHARS: usize = 4_000;
 
 /// 图片字节上限，与 ai-openai 的 `MAX_IMAGE_BYTES` 对齐
 /// （`crates/ai-openai/src/client.rs:186`）—— 提前拦，错误码才可控。
 const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
-
-/// 缺省识别指令。
-const DEFAULT_INSTRUCTION: &str = "读取图片中的文字，只输出识别结果，不要解释。";
 
 /// 允许发给模型的图片 MIME。按**内容嗅探**判定（不看扩展名）——
 /// 与 ai-openai 的 `image_mime_of` 白名单等价（`client.rs:189`）。
@@ -79,7 +80,9 @@ impl BuiltinToolProvider for VisionToolsProvider {
         vec![(
             Tool {
                 name: "builtin_recognize_image".to_string(),
-                description: "用 AI 识别一张本地图片并返回文本（读取验证码、二维码、截图中的文字等）。\
+                description: "用 AI 读取一张本地图片的内容并返回文本。读什么由 `instruction` 决定\
+                    （例如读出图中的字符、判断界面状态与布局、提取表格数据）。\
+                    **验证码请用 builtin_solve_captcha**（验证码专用，返回结构化结果）。\
                     path 必须是本机已存在的图片文件路径，通常来自上一个工具的输出。"
                     .to_string(),
                 input_schema: json!({
@@ -91,10 +94,10 @@ impl BuiltinToolProvider for VisionToolsProvider {
                         },
                         "instruction": {
                             "type": "string",
-                            "description": "识别要求；缺省为「读取图片中的文字，只输出识别结果」"
+                            "description": "要看什么；按当前步骤的意图填写，例如「读出图中验证码框内的 4 个字符」「判断页面布局是否错乱」"
                         }
                     },
-                    "required": ["path"]
+                    "required": ["path", "instruction"]
                 }),
             },
             // 归 Utility 的理由与注意点见设计稿 §5.2。
@@ -154,6 +157,19 @@ async fn recognize_image(
     else {
         return failure("invalid_arguments", "path 必须是非空字符串");
     };
+    // `instruction` 必填：**工具不预设用途** —— 「这张图要看什么」由当前步骤的意图决定，
+    // 由调用方自己写。参数校验先于一切 IO（缺参数不必先去读盘 / 嗅探格式）。
+    let Some(instruction) = arguments
+        .get("instruction")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return failure(
+            "invalid_arguments",
+            "instruction 必须是非空字符串（说明这张图要看什么，例如「读出图中验证码框内的 4 个字符」）",
+        );
+    };
     let path = Path::new(path_str);
 
     // ① 路径校验：越界即拒（安全边界见设计稿 §5.4）。
@@ -201,13 +217,6 @@ async fn recognize_image(
             format!("不支持的图片格式「{mime}」（支持：{}）", SUPPORTED_MIME.join(" / ")),
         );
     }
-
-    let instruction = arguments
-        .get("instruction")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(DEFAULT_INSTRUCTION);
 
     let request = ChatCompletionRequest {
         model: ai.model_name().to_string(),
@@ -322,6 +331,9 @@ mod tests {
 
     /// PNG 魔数（`infer` 据此判定 `image/png`）。
     const PNG_HEADER: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+    /// 测试用的 `instruction`：**必填**参数，内容随意（除非该用例本身在验证措辞）。
+    const INSTRUCTION: &str = "读出图中的字符";
 
     /// 只实现 `chat_completion` 的桩：记录收到的请求，回固定文本。
     struct FakeAiClient {
@@ -438,6 +450,11 @@ mod tests {
             provider.executor().supported_tools(),
             vec!["builtin_recognize_image".to_string()]
         );
+        // `instruction` 必填是本工具的**契约**（工具不预设用途）：schema 里必须进 required。
+        assert_eq!(
+            tools[0].0.input_schema["required"],
+            json!(["path", "instruction"])
+        );
     }
 
     #[tokio::test]
@@ -447,6 +464,34 @@ mod tests {
         let result = run(&provider, json!({})).await;
         assert!(result.is_error);
         assert_eq!(result.content["error"], "invalid_arguments");
+        // path 与 instruction 共用同一个错误码，只断码锁不住「path 优先」——必须看文案。
+        assert!(
+            result.content["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("path"),
+            "path 缺失应当先于 instruction 被报出来：{result:?}"
+        );
+    }
+
+    /// `instruction` 必填：缺了就在**读盘之前**拒掉，不发起 AI 调用。
+    #[tokio::test]
+    async fn missing_instruction_is_invalid_arguments() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let (provider, ai) = provider_in(dir.path(), "x");
+        let target = write_png(dir.path(), "captcha.png");
+
+        let result = run(&provider, json!({ "path": target })).await;
+
+        assert!(result.is_error);
+        assert_eq!(result.content["error"], "invalid_arguments");
+        assert_eq!(ai.calls(), 0, "缺 instruction 时不应发起 AI 调用");
+
+        // 空白串等同缺失。
+        let blank = run(&provider, json!({ "path": target, "instruction": "   " })).await;
+        assert!(blank.is_error);
+        assert_eq!(blank.content["error"], "invalid_arguments");
+        assert_eq!(ai.calls(), 0);
     }
 
     #[tokio::test]
@@ -457,7 +502,7 @@ mod tests {
         let target = dir.path().join("fake.png");
         std::fs::write(&target, b"not an image at all").expect("写文件");
 
-        let result = run(&provider, json!({ "path": target })).await;
+        let result = run(&provider, json!({ "path": target, "instruction": INSTRUCTION })).await;
         assert!(result.is_error);
         assert_eq!(result.content["error"], "unsupported_image_type");
         assert_eq!(ai.calls(), 0, "格式不支持时不应发起 AI 调用");
@@ -469,7 +514,7 @@ mod tests {
         let (provider, ai) = provider_in(dir.path(), "x");
         let target = dir.path().join("ghost.png");
 
-        let result = run(&provider, json!({ "path": target })).await;
+        let result = run(&provider, json!({ "path": target, "instruction": INSTRUCTION })).await;
         assert!(result.is_error);
         assert_eq!(result.content["error"], "file_not_found");
         assert_eq!(ai.calls(), 0);
@@ -482,7 +527,7 @@ mod tests {
         let nested = dir.path().join("nested");
         std::fs::create_dir(&nested).expect("建目录");
 
-        let result = run(&provider, json!({ "path": nested })).await;
+        let result = run(&provider, json!({ "path": nested, "instruction": INSTRUCTION })).await;
         assert!(result.is_error);
         assert_eq!(result.content["error"], "invalid_arguments");
         assert_eq!(ai.calls(), 0);
@@ -496,7 +541,7 @@ mod tests {
         let target = outside.path().join("captcha.png");
         std::fs::write(&target, PNG_HEADER).expect("写文件");
 
-        let result = run(&provider, json!({ "path": target })).await;
+        let result = run(&provider, json!({ "path": target, "instruction": INSTRUCTION })).await;
         assert!(result.is_error);
         assert_eq!(result.content["error"], "path_outside_allowed");
         assert_eq!(ai.calls(), 0, "越界路径不应发起 AI 调用");
@@ -508,7 +553,7 @@ mod tests {
         let (provider, ai) = provider_in(dir.path(), "  4F7K\n");
         let target = write_png(dir.path(), "captcha.png");
 
-        let result = run(&provider, json!({ "path": target })).await;
+        let result = run(&provider, json!({ "path": target, "instruction": INSTRUCTION })).await;
 
         assert!(!result.is_error, "成功结果不应是 is_error：{result:?}");
         assert_eq!(result.content, Value::String("4F7K".to_string()));
@@ -539,8 +584,9 @@ mod tests {
         }
     }
 
+    /// 调用方给的 `instruction` 原样进 user 消息第一段（工具不预设用途）。
     #[tokio::test]
-    async fn custom_instruction_replaces_default() {
+    async fn instruction_reaches_the_model_verbatim() {
         let dir = tempfile::tempdir().expect("临时目录");
         let (provider, ai) = provider_in(dir.path(), "ok");
         let target = write_png(dir.path(), "code.png");
@@ -567,7 +613,7 @@ mod tests {
         let (provider, _ai) = provider_in(dir.path(), "   ");
         let target = write_png(dir.path(), "blank.png");
 
-        let result = run(&provider, json!({ "path": target })).await;
+        let result = run(&provider, json!({ "path": target, "instruction": INSTRUCTION })).await;
         assert!(result.is_error);
         assert_eq!(result.content["error"], "empty_result");
     }
@@ -578,7 +624,7 @@ mod tests {
         let (provider, _ai) = provider_in(dir.path(), &"识".repeat(MAX_RESULT_CHARS + 50));
         let target = write_png(dir.path(), "long.png");
 
-        let result = run(&provider, json!({ "path": target })).await;
+        let result = run(&provider, json!({ "path": target, "instruction": INSTRUCTION })).await;
         assert!(!result.is_error);
         assert_eq!(
             result.content.as_str().expect("文本结果").chars().count(),

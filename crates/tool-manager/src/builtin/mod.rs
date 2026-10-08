@@ -4,6 +4,7 @@ pub mod system_tools;
 pub mod data_tools;
 pub mod ai_tools;
 pub mod vision_tools;
+pub mod captcha_tools;
 pub mod web_tools;
 pub mod doc_tools;
 

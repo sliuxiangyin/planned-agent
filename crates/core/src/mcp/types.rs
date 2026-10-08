@@ -81,6 +81,21 @@ pub enum ContentBlock<'a> {
     Unknown(&'a Value),
 }
 
+impl<'a> ContentBlock<'a> {
+    /// 文本化：`Text` 给原文；`Image` 给 `None`（图片由调用方另行处理）；
+    /// `Unknown` 给 JSON 字面量（认不出的块至少不丢信息）。
+    ///
+    /// 与 [`ToolResult::sanitized_content`] 的分工：那个产**给纯文本消费方的安全副本**
+    /// （图片一律降级成 `[图片]` 占位），这里只是「取文本部分」，图片交回调用方决定。
+    pub fn text(&self) -> Option<String> {
+        match self {
+            ContentBlock::Text(text) => Some((*text).to_string()),
+            ContentBlock::Image { .. } => None,
+            ContentBlock::Unknown(value) => Some(value.to_string()),
+        }
+    }
+}
+
 /// 解析 `content` 为内容块序列（[`ToolResult::content_blocks`] 的自由函数版本）。
 ///
 /// - `Value::String` → 单个 [`ContentBlock::Text`]（适配层已把多文本块 join 成一个字符串，
@@ -320,6 +335,26 @@ mod tests {
         let blocks = result.content_blocks().expect("裸字符串也是文本块");
         assert_eq!(blocks.len(), 1);
         assert!(matches!(blocks[0], ContentBlock::Text("hello")));
+    }
+
+    #[test]
+    fn text_skips_images_and_keeps_unknown() {
+        let result = result(json!([
+            "bare",
+            { "type": "image", "mime_type": "image/png", "data": "AAA" },
+            { "type": "new-kind", "x": 1 }
+        ]));
+
+        let texts = result
+            .content_blocks()
+            .expect("数组应当能解析")
+            .into_iter()
+            .filter_map(|block| block.text())
+            .collect::<Vec<_>>();
+
+        assert_eq!(texts.len(), 2, "图片块不给文本：{texts:?}");
+        assert_eq!(texts[0], "bare");
+        assert!(texts[1].contains("new-kind"), "{}", texts[1]);
     }
 
     #[test]
