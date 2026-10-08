@@ -281,6 +281,16 @@ impl<PM: PromptManager + Send + Sync + 'static> ChatService<PM> {
         self.state.config.lock().unwrap().run_id = run_id;
     }
 
+    /// 设置「每轮临时上下文」来源（见 `ChatConfig::per_round_context`）。
+    ///
+    /// 供「构造后再装配」用：`with_store` 建成后、`start_driver` 前调用即可。
+    ///
+    /// 注：当前生产装配只走 `ChatConfig.per_round_context` 字段（见 GUI 的
+    /// `chat_service_factory`），本方法是**预留 API**，暂无调用点。
+    pub fn set_per_round_context(&self, ctx: Option<super::PerRoundContext>) {
+        self.state.config.lock().unwrap().per_round_context = ctx;
+    }
+
     pub fn reset_session(&self) -> Result<()> {
         self.state
             .cmd_tx

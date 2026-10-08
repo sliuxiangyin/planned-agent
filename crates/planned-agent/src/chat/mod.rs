@@ -52,7 +52,10 @@ pub(crate) mod tools;
 #[cfg(test)]
 mod tests;
 
-pub use service::{ChatConfig, ChatEvent, ChatService, SendTicket, SubscriptionGuard, SubscriptionId, SystemPrompt};
+pub use service::{
+    ChatConfig, ChatEvent, ChatService, PerRoundContext, PerRoundContextSource, SendTicket,
+    SubscriptionGuard, SubscriptionId, SystemPrompt,
+};
 pub use sub_agent::{
     BeforeDecision, ChatSubAgentSession, PreludeOutcome, ResultDecision, SubAgentBeforeCallback,
     SubAgentCall, SubAgentCallContext, SubAgentChainPrelude, SubAgentResultCallback,

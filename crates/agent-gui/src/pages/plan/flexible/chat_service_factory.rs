@@ -11,15 +11,17 @@
 
 use std::sync::Arc;
 
-use planned_agent::chat::{ChatConfig, SystemPrompt};
+use planned_agent::chat::{ChatConfig, PerRoundContext, SystemPrompt};
 use planned_agent::ChatService;
 use planned_agent_core::prompt::{PromptContext as PromptTemplateContext, PromptManager};
 use planned_agent_prompt_manager::FilePromptManager;
 use serde_json::json;
 
 use crate::context::{AiContext, PromptContext, StorageContext, ToolsContext};
+use crate::services::plans_flexible_service::PlansFlexibleService;
 
 use super::chat_flexible_message_storage::ChatMessageStore;
+use super::state_context::FlexibleStateContext;
 
 /// 协调器 system prompt 模板名（与 PromptManager 中的注册名一致）。
 const FLEXIBLE_GLOBAL_SYSTEM_PROMPT: &str = "flexible/flexible_global_system";
@@ -40,6 +42,18 @@ pub(crate) async fn new_chat_service(
     tools: Arc<ToolsContext>,
     prompt: Arc<PromptContext>,
 ) -> anyhow::Result<ChatSvc> {
+    // ── 每轮状态注入来源（必须在 `plan_id` / `session_id` 被 move 之前构造）──
+    // 协调器的档位由系统直取、每轮注入，不靠 LLM 主动查（见
+    // docs/planned-agent/flexible-coordinator-state-injection.md）。
+    let state_context = FlexibleStateContext::new(
+        plan_id.clone(),
+        session_id.clone(),
+        Arc::new(PlansFlexibleService::new(
+            storage.plans_flexible_sessions_repo(),
+            storage.flexible_state_repo(),
+        )),
+    );
+
     let repo = storage.chat_message_repo();
     let store = ChatMessageStore::new(plan_id, session_id.clone(), repo);
 
@@ -60,6 +74,8 @@ pub(crate) async fn new_chat_service(
         prompt.manager.clone(),
         ChatConfig {
             system_prompt: Some(SystemPrompt::Rendered(coordinator_system_prompt)),
+            // 每轮把本会话真实状态注入协调器上下文（临时 system 消息，不写 history）。
+            per_round_context: Some(PerRoundContext::new(state_context)),
             // 协调器仅做状态机调度，不执行业务：工具层只暴露全部 step 子 agent（含修订）
             // + flexible_state（只读）+ request_user_action，杜绝误调业务 / 其它子 agent 工具。
             allowed_tools: Some(vec![

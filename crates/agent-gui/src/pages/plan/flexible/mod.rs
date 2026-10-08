@@ -12,6 +12,7 @@ pub(crate) mod page;
 pub(crate) mod placeholder;
 pub(crate) mod session_boot;
 pub(crate) mod session_host;
+pub(crate) mod state_context;
 pub(crate) mod step_callback;
 pub(crate) mod tool;
 

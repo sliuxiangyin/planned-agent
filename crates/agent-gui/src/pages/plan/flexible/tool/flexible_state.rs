@@ -11,6 +11,7 @@ use planned_agent_core::tool_registry::ToolExecutor;
 
 use crate::services::plans_flexible_service::PlansFlexibleService;
 
+use super::super::state_context::step_meaning;
 use super::{error_result, read_session_id};
 
 /// `flexible_state` 执行器：读取当前会话的流程中间状态（只读）。
@@ -87,27 +88,36 @@ impl FlexibleStateExecutor {
 pub fn flexible_state_tool() -> Tool {
     Tool {
         name: "flexible_state".into(),
-        description: "读取当前会话的灵活模式流程状态（只读）。\n\
+        description: format!(
+            "读取当前会话的灵活模式流程状态（只读）。\n\
              \n\
-             用途：协调器在用户要求「直接执行 / 跳到某一步骤」时，读取当前已推进到哪一步、\n\
-             各步骤产物是否齐备，据此前置判断；也在需求澄清前读取「任务基线」。\n\
+             用途：需要查看**产物内容**（某一步怎么写、参数表等）时读取本会话的流程状态与各步产物；\n\
+             仅判断「推进到哪一步 / 产物是否齐备」时**不需要**调用 —— 该状态已由系统每轮自动注入到你的上下文。\n\
              状态（current_step + products）由各 step 子 agent 的完成回调自动登记，本工具只读、不写入。\n\
              \n\
              session_id（必填）：本会话的 session ID，原样照抄 system prompt「会话上下文」中给出的值，\n\
              不得改写、不得省略。\n\
              \n\
-             返回：{ loaded, current_step, products }；该会话尚无记录时 loaded=false、current_step=none、products={}。\n\
+             返回：{{ loaded, current_step, products }}；该会话尚无记录时 loaded=false、current_step=none、products={{}}。\n\
              \n\
              products 的 key（均为 string，存原始文本/JSON）：task_definition（需求澄清定稿的\n\
              需求基线）、steps + category（计划步定稿的粗粒度步骤骨架 + 计划分类）、inputs + steps（参数化定稿：参数表 + 占位后的步骤骨架）、\n\
              output_schema（输出定义定稿的输出契约；用户选「定不了」或跳过该步时不存在）。\n\
              \n\
              current_step 档位（顺序 none→task_defined→planned→parameterized→output_defined→saved）：\n\
-             - task_defined    = 需求澄清已定稿（可执行计划步）\n\
-             - planned         = 计划步已定稿（可执行参数化步）\n\
-             - parameterized   = 参数化已定稿（可执行输出定义步；也可跳过输出定义直接落库）\n\
-             - output_defined  = 输出定义已定稿（可执行 flexible_save 落库）\n\
-             - saved           = flexible_save 已落库".into(),
+             - none            = {none}\n\
+             - task_defined    = {task_defined}\n\
+             - planned         = {planned}\n\
+             - parameterized   = {parameterized}\n\
+             - output_defined  = {output_defined}\n\
+             - saved           = {saved}",
+            none = step_meaning("none"),
+            task_defined = step_meaning("task_defined"),
+            planned = step_meaning("planned"),
+            parameterized = step_meaning("parameterized"),
+            output_defined = step_meaning("output_defined"),
+            saved = step_meaning("saved"),
+        ),
         input_schema: json!({
             "type": "object",
             "properties": {

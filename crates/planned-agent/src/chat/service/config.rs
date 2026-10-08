@@ -4,6 +4,49 @@
 //! 字段与 v1 [`crate::chat::ChatConfig`] 保持一致（不含任何子 agent 概念），
 //! 通过 [`ChatConfig::default`] 获得保守默认后按需修改。
 
+use std::sync::Arc;
+
+use async_trait::async_trait;
+
+/// 每轮请求前现算的「临时上下文」来源。
+///
+/// 由宿主实现（如 GUI 的灵活模式现读 `flexible_state`），driver 在**每轮**组请求时调用
+/// [`render`](PerRoundContextSource::render)，把返回文本作为一条**临时 system 消息**插入
+/// 本轮请求 —— **不写入 history**，故不落库、不出现在 UI，也不会随轮次累积或在历史里陈旧化。
+#[async_trait]
+pub trait PerRoundContextSource: Send + Sync {
+    /// 返回本轮要注入的文本；`None` 表示本轮不注入。
+    ///
+    /// 注入是**增强项、不是对话的前置条件**：实现方读不到数据时应记日志并返回 `None`
+    /// （让本轮照常进行），而不是把错误抛上来中断对话。
+    async fn render(&self) -> Option<String>;
+}
+
+/// [`PerRoundContextSource`] 的持有者（由 [`ChatConfig`] 持有）。
+///
+/// 包一层 newtype 是为了让 `ChatConfig` 继续 `derive(Clone)` 并手写 `Debug`
+/// —— trait 对象本身不满足 `Debug`。
+#[derive(Clone)]
+pub struct PerRoundContext(Arc<dyn PerRoundContextSource>);
+
+impl PerRoundContext {
+    /// 包装一个来源。
+    pub fn new(source: impl PerRoundContextSource + 'static) -> Self {
+        Self(Arc::new(source))
+    }
+
+    /// 取内部来源（driver 用，crate 内可见）。
+    pub(crate) fn source(&self) -> &Arc<dyn PerRoundContextSource> {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for PerRoundContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PerRoundContext(..)")
+    }
+}
+
 /// system prompt 的来源：模板路径或已渲染好的字符串，二者互不耦合。
 #[derive(Debug, Clone)]
 pub enum SystemPrompt {
@@ -77,6 +120,13 @@ pub struct ChatConfig {
     /// 的 task 文本；其中子 agent 用不到的**控制字段**（如宿主会话标识）可在此列出，
     /// 避免泄漏进子 agent 上下文。默认空（不减任何参数，保持既有行为）。
     pub hidden_args: Vec<String>,
+    /// 每轮请求前现算的「临时上下文」来源（见 [`PerRoundContextSource`]）。
+    ///
+    /// 返回文本作为一条**临时 system 消息**注入**本轮请求**：不写 history —— 所以它每轮都是
+    /// 最新的，也不会像 tool 结果那样留在历史里变成过时信息（历史里的旧快照是幻觉的燃料）。
+    ///
+    /// `None`（默认）：不注入，行为与以前完全一致。
+    pub per_round_context: Option<PerRoundContext>,
 }
 
 impl Default for ChatConfig {
@@ -93,6 +143,7 @@ impl Default for ChatConfig {
             allowed_tools: None,
             run_id: None,
             hidden_args: Vec::new(),
+            per_round_context: None,
         }
     }
 }
@@ -101,5 +152,35 @@ impl ChatConfig {
     /// 创建默认配置（`max_tool_rounds=10`，其余 `None`/`true`）。
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 默认**不注入** —— 这是"对既有使用方零影响"的硬保证：只有显式设置了
+    /// `per_round_context` 的会话（当前仅灵活模式协调器）才会多出一条临时 system 消息，
+    /// 其余（普通 chat / 子 agent / testkit）的请求与以前逐字节一致。
+    #[test]
+    fn default_has_no_per_round_context() {
+        assert!(ChatConfig::default().per_round_context.is_none());
+    }
+
+    /// `Debug` 是手写实现、只打占位符：来源里可能持有 service 与会话 ID，不应外泄到日志。
+    #[test]
+    fn debug_does_not_expose_source() {
+        struct Dummy;
+
+        #[async_trait]
+        impl PerRoundContextSource for Dummy {
+            async fn render(&self) -> Option<String> {
+                None
+            }
+        }
+
+        let ctx = PerRoundContext::new(Dummy);
+        assert_eq!(format!("{ctx:?}"), "PerRoundContext(..)");
+        let _cloned = ctx.clone(); // ChatConfig 需要 Clone，来源必须可克隆
     }
 }

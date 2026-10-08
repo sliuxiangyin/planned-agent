@@ -61,6 +61,96 @@ enum PromptChoice {
     Suspend { run_id: String },
 }
 
+/// 把一段临时 system 上下文插入**本轮要发给模型**的 messages（就地修改传入的 `Vec`）。
+///
+/// 刻意不改 `history`：调用方传进来的是 `history.snapshot()` 的克隆，注入只作用于本轮请求 ——
+/// 不落库、不出现在 UI，也不会随轮次在历史里累积
+/// （见 `docs/planned-agent/flexible-coordinator-state-injection.md`）。
+///
+/// 插入位置：首条已是 system 时插在它之后（index 1），否则插到最前 —— 状态段紧邻 system，
+/// 模型对它的注意力最强，也不会挡在对话正文前面。
+fn inject_system_context(messages: &mut Vec<Message>, text: String) {
+    let at = if messages
+        .first()
+        .is_some_and(|m| matches!(m.role, MessageRole::System))
+    {
+        1
+    } else {
+        0
+    };
+    messages.insert(
+        at,
+        Message {
+            role: MessageRole::System,
+            content: Some(MessageContent::Text { text }),
+            ..Default::default()
+        },
+    );
+}
+
+#[cfg(test)]
+mod inject_system_context_tests {
+    use super::*;
+
+    fn msg(role: MessageRole, text: &str) -> Message {
+        Message {
+            role,
+            content: Some(MessageContent::Text {
+                text: text.to_string(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn text_of(m: &Message) -> String {
+        match m.content.as_ref() {
+            Some(MessageContent::Text { text }) => text.clone(),
+            other => panic!("期望文本消息，实际 {other:?}"),
+        }
+    }
+
+    /// 首条是 system（协调器的常态）→ 插在它之后，system 仍是第一条。
+    #[test]
+    fn inserts_after_leading_system() {
+        let mut messages = vec![
+            msg(MessageRole::System, "S"),
+            msg(MessageRole::User, "U"),
+        ];
+        inject_system_context(&mut messages, "CTX".to_string());
+        assert_eq!(messages.len(), 3);
+        assert_eq!(text_of(&messages[0]), "S");
+        assert_eq!(text_of(&messages[1]), "CTX");
+        assert_eq!(text_of(&messages[2]), "U");
+    }
+
+    /// 没有 system 打头时插到最前。
+    #[test]
+    fn inserts_at_front_without_system() {
+        let mut messages = vec![msg(MessageRole::User, "U")];
+        inject_system_context(&mut messages, "CTX".to_string());
+        assert_eq!(text_of(&messages[0]), "CTX");
+        assert_eq!(text_of(&messages[1]), "U");
+    }
+
+    /// 空历史也能插（不 panic）。
+    #[test]
+    fn inserts_into_empty_history() {
+        let mut messages: Vec<Message> = Vec::new();
+        inject_system_context(&mut messages, "CTX".to_string());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(text_of(&messages[0]), "CTX");
+    }
+
+    /// 注入的是普通 system 文本消息（无 tool_calls），且不携带 id —— 它不进 store。
+    #[test]
+    fn injected_message_is_plain_system() {
+        let mut messages: Vec<Message> = Vec::new();
+        inject_system_context(&mut messages, "CTX".to_string());
+        assert!(matches!(messages[0].role, MessageRole::System));
+        assert!(messages[0].tool_calls.is_none());
+    }
+}
+
 /// 构造「是否继续执行」询问卡的问题文本与问题项。
 fn continue_question(max_rounds: usize) -> (String, Vec<UIQuestion>) {
     let questions = vec![UIQuestion {
@@ -343,11 +433,29 @@ pub(super) async fn run_conversation<
 
         let tools = build_tool_definitions(state);
 
-        let (temperature, max_tokens) = {
+        let (temperature, max_tokens, ctx_source) = {
             let cfg = state.config.lock().unwrap();
-            (cfg.temperature, cfg.max_tokens)
+            (
+                cfg.temperature,
+                cfg.max_tokens,
+                // 先把来源 clone 出来：`MutexGuard` 不能跨 `await`（下面 render 要 await）。
+                cfg.per_round_context
+                    .as_ref()
+                    .map(|ctx| ctx.source().clone()),
+            )
         };
-        let messages = state.history.snapshot();
+        let mut messages = state.history.snapshot();
+
+        // ── 每轮临时状态注入 ──
+        // 把宿主提供的「当前真实状态」作为一条临时 system 消息注入**本轮请求**：不写 history
+        // —— 既不落库、不出现在 UI，也不会像 tool 结果那样在历史里陈旧化后继续误导模型
+        // （协调器曾凭历史编造档位，见 docs/planned-agent/flexible-coordinator-state-injection.md）。
+        if let Some(source) = ctx_source {
+            if let Some(text) = source.render().await {
+                inject_system_context(&mut messages, text);
+            }
+        }
+
         info!("[round] 请求历史: {} 条消息", messages.len());
         for (i, m) in messages.iter().enumerate() {
             info!(
