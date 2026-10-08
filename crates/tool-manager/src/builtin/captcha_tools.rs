@@ -3,8 +3,10 @@
 //! 设计依据：`docs/planned-agent/captcha-solver-tool.md`（已定稿）。
 //!
 //! 边界：
-//! - v1 **只做字符型**（`kind = "text"`）。拖拽 / 点选按**策略表**扩展：加一种验证码只加一条
-//!   [`CaptchaStrategy`] + 一个出参变体，主流程不动（设计稿 §4）。
+//! - `kind` 对外**只有 `"text"`**（文本型）。文本型族内部走**两阶段**：先让模型判断这张图是
+//!   字符型还是计算型（[`CLASSIFY_PROMPT`]），再按判出的题型用对应固化提示词求解
+//!   （[`CHAR_PROMPT`] / [`CALC_PROMPT`]）。两阶段对调用方都不可见（出参恒为 `kind:"text"`）。
+//! - 加一种验证码只加一条 [`CaptchaStrategy`] + 一个出参变体，主流程不动（设计稿 §4）。
 //! - **后端可插拔**（设计稿 §5）：v1 唯一实现 [`LocalVisionBackend`]（复用主 provider 的视觉
 //!   模型）；第三方 API / 本地 ddddocr 接在 [`CaptchaBackend`] 后面，工具契约不变。
 //! - 读盘**必须经 filesystem 工具族的 cap-std 沙箱句柄**（[`FilesystemService`]）：只 `resolve`
@@ -58,52 +60,142 @@ const SUPPORTED_MIME: &[&str] = &["image/png", "image/jpeg", "image/webp", "imag
 const DEFAULT_KIND: &str = "text";
 
 /// 「认不出来」的哨兵：工具要求模型用它表达，**工具内部消费**，不出现在出参里
-/// （出参用 `readable: false` + `text: null`，见 [`parse_text`]）。
+/// （出参用 `readable: false` + `text: null`，见 [`tagged_text`]）。
 const UNREADABLE_SENTINEL: &str = "UNREADABLE";
 
 // ── 策略表：加一种验证码只加这里 ─────────────────────────────────────────────
 
-/// 一种验证码的求解策略。
+/// 一种子题型的求解策略（阶段二用）。
 struct CaptchaStrategy {
-    /// **固化**提示词 —— 不给调用方覆盖，这是本工具相对通用读图的收益之一。
+    /// **固化**求解提示词 —— 不给调用方覆盖，这是本工具相对通用读图的收益之一。
     prompt: &'static str,
-    /// 该类型需要的图片张数（字符型 1 张；将来的拖拽型是 2 张）。
+    /// 该类型需要的图片张数（文本型 1 张；将来的拖拽型是 2 张）。
     expected_images: usize,
-    /// 模型原始输出 → 出参（含归一化与 `readable` 判定）。
+    /// 阶段二原始输出 → 出参（含归一化与 `readable` 判定）。
     parse: fn(&str) -> Value,
 }
 
-/// 字符型（图形验证码）的提示词。
+// ── 提示词（两阶段：先判题型，再求解）──────────────────────────────────────
+//
+// 都是纯机制描述，**不写任何站点/业务个案** —— 否则工具会过拟合到某一种验证码。
+
+/// 阶段一：判断题型。**极短**，只问「哪一类」。
 ///
-/// 纯机制描述，**不写任何站点/业务个案** —— 否则工具会过拟合到某一种验证码。
-const TEXT_PROMPT: &str = "这是一张验证码图片。请只输出图片中的验证码字符本身：\n\
+/// 独立成一次调用（而不是塞进求解提示词里）的理由：题型判定与求解是两个不同的任务，分开后
+/// 每步提示词都最小、可单独测、也可单独审计（日志 `stage = "classify"` / `"solve"`）。
+const CLASSIFY_PROMPT: &str = "这是一张验证码图片。请判断它属于下面哪一类，只输出对应的类型名，\
+不要解释：\n\
+- 如果图中是一串字符或数字（图形验证码），输出：char\n\
+- 如果图中是一个算式（例如 1+2=? 或 3×5=），输出：calc\n\
+无法判断时只输出 UNKNOWN。";
+
+/// 阶段二·字符型：答案就是图中的字符本身。
+const CHAR_PROMPT: &str = "这是一张验证码图片。请只输出图片中的验证码字符本身：\n\
 - 不要解释、不要标点、不要空格、不要引号；\n\
 - 如果图中有干扰线、噪点或背景，请忽略它们；\n\
+- 如果确实无法辨认，只输出 UNREADABLE。";
+
+/// 阶段二·计算型：答案是**算出来的结果**，不是算式原文。
+const CALC_PROMPT: &str = "这是一张算术验证码图片，图中是一个算式（例如 1+2=? 或 3×5=）。\n\
+请算出结果，只输出最终结果：\n\
+- 结果只用阿拉伯数字，不要输出算式本身、不要解释、不要其它字符；\n\
 - 如果确实无法辨认，只输出 UNREADABLE。";
 
 /// 当前支持的 `kind`（进错误信息用）。
 const SUPPORTED_KINDS: &[&str] = &["text"];
 
-/// 按 `kind` 取策略。**加类型只在这里加一行**（设计稿 §4.3 的 diff 清单）。
-fn strategy(kind: &str) -> Option<CaptchaStrategy> {
-    match kind {
-        "text" => Some(CaptchaStrategy {
-            prompt: TEXT_PROMPT,
+/// 按子题型取求解策略（阶段二）。**加一种文本型变体只在这里加一行**。
+fn strategy(variant: TextVariant) -> CaptchaStrategy {
+    match variant {
+        TextVariant::Char => CaptchaStrategy {
+            prompt: CHAR_PROMPT,
             expected_images: 1,
-            parse: parse_text,
-        }),
+            parse: parse_char,
+        },
+        TextVariant::Calc => CaptchaStrategy {
+            prompt: CALC_PROMPT,
+            expected_images: 1,
+            parse: parse_calc,
+        },
+    }
+}
+
+/// 文本型族内的**子题型** —— 由阶段一（[`CLASSIFY_PROMPT`]）判出，**不出现在出参里**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextVariant {
+    /// 字符型：答案是图里的字符本身。
+    Char,
+    /// 计算型：答案是算式算出来的数字。
+    Calc,
+}
+
+impl TextVariant {
+    /// 进审计日志用的稳定名。
+    fn as_str(&self) -> &'static str {
+        match self {
+            TextVariant::Char => "char",
+            TextVariant::Calc => "calc",
+        }
+    }
+}
+
+/// 阶段一原始输出 → 子题型。判不出返回 `None`（调用方判「没认出来」）。
+///
+/// 这一步**不能像答案那样严格**：它是模型的中间产物（模型爱写「这是一张算式，所以是 calc」），
+/// 不是给用户的结果。所以按**关键词**认，但歧义时保守拒绍：
+/// - 只命中一类 → 认它；
+/// - 两类关键词都出现（如「不是 char，是 calc」）或都没出现 → `None`。
+fn parse_variant(raw: &str) -> Option<TextVariant> {
+    let text = normalize_text(raw)?.to_ascii_lowercase();
+    // ASCII 关键词按**整词**匹配 —— 否则 `char` 会命中 `chart`、`calc` 会命中 `recalc`。
+    // 中文没有词边界，用 `contains`。
+    let words: Vec<&str> = text
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    let has_char = words
+        .iter()
+        .any(|word| matches!(*word, "char" | "chars" | "character" | "characters" | "text"))
+        || text.contains("字符");
+    let has_calc = words.iter().any(|word| {
+        matches!(
+            *word,
+            "calc" | "calculation" | "arithmetic" | "math" | "equation" | "sum"
+        )
+    }) || text.contains("算式")
+        || text.contains("计算")
+        || text.contains("算术");
+    match (has_char, has_calc) {
+        (true, false) => Some(TextVariant::Char),
+        (false, true) => Some(TextVariant::Calc),
         _ => None,
     }
 }
 
 // ── 出参：tagged union ──────────────────────────────────────────────────────
 
-/// 字符型：归一化 → 判「能不能用」→ tagged union。
-fn parse_text(raw: &str) -> Value {
-    match normalize_text(raw) {
+/// 组装文本型的出参。
+///
+/// **出参里没有题型字段**（设计稿 §12.2 的 D5）：字符型与计算型对调用方长得一样，
+/// 题型只进审计日志。
+fn tagged_text(value: Option<String>) -> Value {
+    match value {
         Some(text) => json!({ "kind": "text", "text": text, "readable": true }),
         None => json!({ "kind": "text", "text": Value::Null, "readable": false }),
     }
+}
+
+/// 阶段二·字符型：归一化 → 出参。
+fn parse_char(raw: &str) -> Value {
+    tagged_text(normalize_text(raw))
+}
+
+/// 阶段二·计算型：归一化 → **必须是规范数字** → 出参。
+///
+/// 数字校验挡住「模型没算、把算式原样抄回来」：`1+2` 不是数字 → 判「没认出来」，
+/// 而不是把表达式当答案交出去（见 [`normalize_digits`]）。
+fn parse_calc(raw: &str) -> Value {
+    tagged_text(normalize_text(raw).and_then(|text| normalize_digits(&text)))
 }
 
 /// 保守归一化。**认不出来**返回 `None`。
@@ -120,10 +212,31 @@ fn normalize_text(raw: &str) -> Option<String> {
     let text = text.trim().trim_end_matches(['.', '。']).trim();
     // 大小写不敏感：模型偶尔回 `Unreadable` / `unreadable`，漏判会把这个词当答案交出去。
     // （验证码理论上可能恰是这个词，但字符长度与组成都不符，代价远小于漏判。）
-    if text.is_empty() || text.eq_ignore_ascii_case(UNREADABLE_SENTINEL) {
+    if text.is_empty() || is_unreadable(text) {
         return None;
     }
     if text.chars().count() > MAX_TEXT_CHARS {
+        return None;
+    }
+    Some(text.to_string())
+}
+
+/// v1 哨兵判定（大小写不敏感）。
+fn is_unreadable(text: &str) -> bool {
+    text.eq_ignore_ascii_case(UNREADABLE_SENTINEL)
+}
+
+/// 计算型结果：只接受**可选负号的半角阿拉伯整数**（`-?[0-9]+`）。
+///
+/// 「是不是数字」是**确定性规则**，不是猜 —— 这是本类型唯一的校验，用来挡住「模型没算、
+/// 把算式原样抄回来」（`1+2` → 判「没认出来」，而不是把表达式当答案交出去）。
+///
+/// **不收小数**（`3.5`）：会引入 `3.0` / `3.50` 该不该归一化的歧义；验证码算术若真出现非整数
+/// 再放宽（设计稿 §12.8 P1）。
+fn normalize_digits(text: &str) -> Option<String> {
+    let text = text.trim();
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
     Some(text.to_string())
@@ -349,7 +462,7 @@ impl BuiltinToolProvider for CaptchaToolsProvider {
         vec![(
             Tool {
                 name: "builtin_solve_captcha".to_string(),
-                description: "求解一张验证码图片并返回结构化结果。类型由 `kind` 指定（当前仅字符型 \
+                description: "求解一张验证码图片并返回结构化结果。类型由 `kind` 指定（当前仅 \
                     \"text\"，可省略）。**用于验证码**；通用读图请用 builtin_recognize_image。\
                     图片必须是本机已存在的图片文件路径，通常来自上一个工具的输出。"
                     .to_string(),
@@ -362,7 +475,7 @@ impl BuiltinToolProvider for CaptchaToolsProvider {
                         },
                         "kind": {
                             "type": "string",
-                            "description": "验证码类型，缺省 \"text\"；当前仅支持 \"text\"（字符型）"
+                            "description": "验证码类型，缺省 \"text\"；当前仅支持 \"text\""
                         }
                     },
                     "required": ["path"]
@@ -433,7 +546,7 @@ async fn solve_captcha(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(DEFAULT_KIND);
-    let Some(strategy) = strategy(kind) else {
+    if !SUPPORTED_KINDS.contains(&kind) {
         // **不静默回退到 text**：否则将来「加了 slide 但调用方拼错」会变成「静默按字符型解」，错误难查。
         return failure(
             "invalid_arguments",
@@ -442,7 +555,7 @@ async fn solve_captcha(
                 SUPPORTED_KINDS.join(" / ")
             ),
         );
-    };
+    }
     let path = Path::new(path_str);
 
     // ② 路径校验（越界即拒）+ 存在性 / 类型 / 大小（读盘前判，错误码才可控）
@@ -491,60 +604,76 @@ async fn solve_captcha(
         );
     }
 
-    // ⑤ 按策略组装图集并求解
+    // ⑤ 组装图集（文本型恒为单图）
     // 先把长度存下来：`bytes` 会被 move 进图集，而审计日志要用它。
     let image_len = bytes.len();
     let images = vec![(mime.to_string(), bytes)];
-    // 开发期守卫：策略声明要几张图、图集就该有几张。**加类型时最容易漏的一处**。
-    // v1 只有单图策略故恒真；真到多类型时这里要升级成运行时校验并返回 `invalid_arguments`。
-    debug_assert_eq!(images.len(), strategy.expected_images);
-    let request = SolveRequest {
-        kind,
-        prompt: strategy.prompt,
-        images: &images,
-    };
-    // 外层时限是**兜底**：任何后端（含将来的第三方 API）都必须有时限，否则一次挂起会拖死
-    // 整个步骤 —— flexible 的 `llm_timeout` 管不到工具内部这次调用。
-    let raw = match tokio::time::timeout(
-        Duration::from_secs(SOLVE_TIMEOUT_SECS),
-        backend.solve(request),
+
+    // ⑥ 阶段一：判断题型。**独立一次调用** —— 只问「哪一类」，不求解。
+    let classify_raw = match call_backend(
+        backend,
+        SolveRequest {
+            kind,
+            prompt: CLASSIFY_PROMPT,
+            images: &images,
+        },
+        "classify",
+        path_str,
+        started,
     )
     .await
     {
-        Err(_) | Ok(Err(BackendError::Timeout)) => {
-            // 超时是最该被看见的一种失败（步骤会被它拖满整整一分钟），单独记一条
-            tracing::warn!(
-                target: "tool_audit",
-                tool = "builtin_solve_captcha",
-                backend = backend.name(),
-                path = %path_str,
-                duration_ms = started.elapsed().as_millis() as u64,
-                "验证码求解超时"
-            );
-            return failure(
-                "timeout",
-                format!("求解超时（超过 {SOLVE_TIMEOUT_SECS} 秒）"),
-            )
-        }
-        Ok(Err(BackendError::Failed(error))) => {
-            tracing::warn!(
-                target: "tool_audit",
-                tool = "builtin_solve_captcha",
-                backend = backend.name(),
-                path = %path_str,
-                error = %format!("{error:#}"),
-                "验证码求解调用后端失败"
-            );
-            return failure("backend_failed", format!("{error:#}"));
-        }
-        Ok(Ok(raw)) => raw,
+        Ok(raw) => raw,
+        Err(result) => return result,
+    };
+    let Some(variant) = parse_variant(&classify_raw) else {
+        // 判不出题型是**正常结果**（不是工具失败）：与「认不出来」同路，用 readable:false 表达。
+        let model = backend.model();
+        tracing::info!(
+            target: "tool_audit",
+            tool = "builtin_solve_captcha",
+            backend = backend.name(),
+            model = model.as_deref().unwrap_or("-"),
+            path = %path_str,
+            kind,
+            stage = "classify",
+            mime,
+            bytes = image_len,
+            raw = %truncate_for_log(classify_raw.trim()),
+            raw_chars = classify_raw.trim().chars().count(),
+            duration_ms = started.elapsed().as_millis() as u64,
+            "验证码题型无法判定"
+        );
+        return tool_result(tagged_text(None), false);
     };
 
-    // ⑥ 归一化 + tagged union 出参
+    // ⑦ 阶段二：按题型求解
+    let strategy = strategy(variant);
+    // 开发期守卫：策略声明要几张图、图集就该有几张。**加类型时最容易漏的一处**。
+    // 当前只有单图策略故恒真；真到多图类型时这里要升级成运行时校验并返回 `invalid_arguments`。
+    debug_assert_eq!(images.len(), strategy.expected_images);
+    let solve_raw = match call_backend(
+        backend,
+        SolveRequest {
+            kind,
+            prompt: strategy.prompt,
+            images: &images,
+        },
+        "solve",
+        path_str,
+        started,
+    )
+    .await
+    {
+        Ok(raw) => raw,
+        Err(result) => return result,
+    };
+
+    // ⑧ 归一化 + tagged union 出参
     //    「认不出来」是 `readable: false` 而**不是** `is_error`（设计稿 §3.2）：
     //    `is_error: true` 会让回灌链路当「工具失败」处理，模型容易就此放弃；
     //    而「这张图看不清」是正常结果，模型该据此决定重新截图还是判该步失败。
-    let outcome = (strategy.parse)(&raw);
+    let outcome = (strategy.parse)(&solve_raw);
     let readable = outcome
         .get("readable")
         .and_then(Value::as_bool)
@@ -561,16 +690,65 @@ async fn solve_captcha(
         model = model.as_deref().unwrap_or("-"),
         path = %path_str,
         kind,
+        stage = "solve",
+        variant = variant.as_str(),
         mime,
         bytes = image_len,
-        raw = %truncate_for_log(raw.trim()),
-        raw_chars = raw.trim().chars().count(),
+        raw = %truncate_for_log(solve_raw.trim()),
+        raw_chars = solve_raw.trim().chars().count(),
         readable,
         duration_ms = started.elapsed().as_millis() as u64,
         "验证码求解完毕"
     );
 
     tool_result(outcome, false)
+}
+
+/// 调一次后端：内置超时兜底 + 失败日志（按 `stage` 区分 classify / solve）。
+///
+/// 返回 `Err(ToolResult)` 表示已构造好对外结果（超时 / 后端失败），调用方直接 `return`。
+///
+/// 外层时限是**兜底**：任何后端（含将来的第三方 API）都必须有时限，否则一次挂起会拖死整个
+/// 步骤 —— flexible 的 `llm_timeout` 管不到工具内部这次调用。**每个阶段各有一份时限**。
+async fn call_backend(
+    backend: &dyn CaptchaBackend,
+    request: SolveRequest<'_>,
+    stage: &'static str,
+    path_str: &str,
+    started: Instant,
+) -> std::result::Result<String, ToolResult> {
+    match tokio::time::timeout(Duration::from_secs(SOLVE_TIMEOUT_SECS), backend.solve(request)).await
+    {
+        Err(_) | Ok(Err(BackendError::Timeout)) => {
+            // 超时是最该被看见的一种失败（步骤会被它拖满整整一分钟），单独记一条
+            tracing::warn!(
+                target: "tool_audit",
+                tool = "builtin_solve_captcha",
+                backend = backend.name(),
+                path = %path_str,
+                stage,
+                duration_ms = started.elapsed().as_millis() as u64,
+                "验证码求解超时"
+            );
+            Err(failure(
+                "timeout",
+                format!("求解超时（超过 {SOLVE_TIMEOUT_SECS} 秒）"),
+            ))
+        }
+        Ok(Err(BackendError::Failed(error))) => {
+            tracing::warn!(
+                target: "tool_audit",
+                tool = "builtin_solve_captcha",
+                backend = backend.name(),
+                path = %path_str,
+                stage,
+                error = %format!("{error:#}"),
+                "验证码求解调用后端失败"
+            );
+            Err(failure("backend_failed", format!("{error:#}")))
+        }
+        Ok(Ok(raw)) => Ok(raw),
+    }
 }
 
 /// 日志用的截断（按**字符**，UTF-8 安全）。
@@ -611,9 +789,11 @@ mod tests {
         }
     }
 
-    /// 只回固定串 / 固定错误的桩，并记录收到的请求形状 `(kind, prompt, 图片张数)`。
+    /// 按**调用次序**回固定串 / 固定错误的桩，并记录收到的请求形状 `(kind, prompt, 图片张数)`。
+    ///
+    /// 文本型是两阶段（classify → solve），所以桩按序答复：第 1 个给阶段一，第 2 个给阶段二。
     struct FakeBackend {
-        reply: FakeReply,
+        replies: Mutex<Vec<FakeReply>>,
         seen: Mutex<Vec<(String, String, usize)>>,
     }
 
@@ -630,7 +810,16 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
                 .last()
-                .expect("应当收到过一次求解请求")
+                .expect("应当收到过至少一次求解请求")
+                .clone()
+        }
+
+        fn first(&self) -> (String, String, usize) {
+            self.seen
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .first()
+                .expect("应当收到过至少一次求解请求")
                 .clone()
         }
     }
@@ -653,13 +842,24 @@ mod tests {
                     request.prompt.to_string(),
                     request.images.len(),
                 ));
-            self.reply.clone().into_result()
+            let reply = {
+                let mut replies = self
+                    .replies
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                if replies.is_empty() {
+                    FakeReply::Failed
+                } else {
+                    replies.remove(0)
+                }
+            };
+            reply.into_result()
         }
     }
 
-    fn provider_in(dir: &Path, reply: FakeReply) -> (CaptchaToolsProvider, Arc<FakeBackend>) {
+    fn provider_in(dir: &Path, replies: Vec<FakeReply>) -> (CaptchaToolsProvider, Arc<FakeBackend>) {
         let backend = Arc::new(FakeBackend {
-            reply,
+            replies: Mutex::new(replies),
             seen: Mutex::new(Vec::new()),
         });
         let as_dyn: Arc<dyn CaptchaBackend> = backend.clone();
@@ -668,8 +868,15 @@ mod tests {
         (provider, backend)
     }
 
-    fn provider_ok(dir: &Path, reply: &str) -> (CaptchaToolsProvider, Arc<FakeBackend>) {
-        provider_in(dir, FakeReply::Ok(reply.to_string()))
+    /// 按序全回 `Ok`：`["char", "4F7K"]` = 阶段一判 char、阶段二回 4F7K。
+    fn provider_ok(dir: &Path, replies: &[&str]) -> (CaptchaToolsProvider, Arc<FakeBackend>) {
+        provider_in(
+            dir,
+            replies
+                .iter()
+                .map(|reply| FakeReply::Ok(reply.to_string()))
+                .collect(),
+        )
     }
 
     async fn run(provider: &CaptchaToolsProvider, arguments: Value) -> ToolResult {
@@ -689,7 +896,7 @@ mod tests {
     #[test]
     fn exposes_builtin_solve_captcha_in_utility() {
         let dir = tempfile::tempdir().expect("临时目录");
-        let (provider, _backend) = provider_ok(dir.path(), "x");
+        let (provider, _backend) = provider_ok(dir.path(), &[]);
         let tools = provider.tools();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].0.name, "builtin_solve_captcha");
@@ -709,7 +916,7 @@ mod tests {
     #[tokio::test]
     async fn missing_path_is_invalid_arguments() {
         let dir = tempfile::tempdir().expect("临时目录");
-        let (provider, backend) = provider_ok(dir.path(), "x");
+        let (provider, backend) = provider_ok(dir.path(), &[]);
 
         let result = run(&provider, json!({})).await;
 
@@ -729,7 +936,7 @@ mod tests {
     #[tokio::test]
     async fn unsupported_kind_is_invalid_arguments() {
         let dir = tempfile::tempdir().expect("临时目录");
-        let (provider, backend) = provider_ok(dir.path(), "x");
+        let (provider, backend) = provider_ok(dir.path(), &[]);
         let target = write_png(dir.path(), "captcha.png");
 
         let result = run(&provider, json!({ "path": target, "kind": "slide" })).await;
@@ -753,7 +960,7 @@ mod tests {
     async fn path_outside_allowed_root_is_rejected() {
         let allowed = tempfile::tempdir().expect("允许目录");
         let outside = tempfile::tempdir().expect("越界目录");
-        let (provider, backend) = provider_ok(allowed.path(), "x");
+        let (provider, backend) = provider_ok(allowed.path(), &[]);
         let target = outside.path().join("captcha.png");
         std::fs::write(&target, PNG_HEADER).expect("写文件");
 
@@ -767,7 +974,7 @@ mod tests {
     #[tokio::test]
     async fn missing_file_is_file_not_found() {
         let dir = tempfile::tempdir().expect("临时目录");
-        let (provider, _backend) = provider_ok(dir.path(), "x");
+        let (provider, _backend) = provider_ok(dir.path(), &[]);
         let target = dir.path().join("nope.png");
 
         let result = run(&provider, json!({ "path": target })).await;
@@ -779,7 +986,7 @@ mod tests {
     #[tokio::test]
     async fn directory_is_rejected_as_invalid_arguments() {
         let dir = tempfile::tempdir().expect("临时目录");
-        let (provider, _backend) = provider_ok(dir.path(), "x");
+        let (provider, _backend) = provider_ok(dir.path(), &[]);
         let nested = dir.path().join("nested");
         std::fs::create_dir(&nested).expect("建目录");
 
@@ -792,7 +999,7 @@ mod tests {
     #[tokio::test]
     async fn unsupported_content_is_rejected_without_backend_call() {
         let dir = tempfile::tempdir().expect("临时目录");
-        let (provider, backend) = provider_ok(dir.path(), "x");
+        let (provider, backend) = provider_ok(dir.path(), &[]);
         let target = dir.path().join("not-an-image.png");
         std::fs::write(&target, b"definitely not an image").expect("写文件");
 
@@ -806,7 +1013,7 @@ mod tests {
     #[tokio::test]
     async fn oversized_image_is_rejected() {
         let dir = tempfile::tempdir().expect("临时目录");
-        let (provider, backend) = provider_ok(dir.path(), "x");
+        let (provider, backend) = provider_ok(dir.path(), &[]);
         let target = dir.path().join("huge.png");
         // 用稀疏文件：`set_len` 造出超限的**长度**但不真占磁盘
         let file = std::fs::File::create(&target).expect("建文件");
@@ -824,7 +1031,8 @@ mod tests {
     #[tokio::test]
     async fn success_returns_tagged_union() {
         let dir = tempfile::tempdir().expect("临时目录");
-        let (provider, backend) = provider_ok(dir.path(), "  4F7K\n");
+        // 两阶段：阶段一判 char，阶段二回答案（带空白，顺带覆盖 trim）
+        let (provider, backend) = provider_ok(dir.path(), &["char", "  4F7K\n"]);
         let target = write_png(dir.path(), "captcha.png");
 
         let result = run(&provider, json!({ "path": target })).await;
@@ -835,17 +1043,21 @@ mod tests {
             json!({ "kind": "text", "text": "4F7K", "readable": true })
         );
 
-        // 桩收到的请求形状：缺省 kind 为 text、提示词是**固化**的那一份、单张图
-        let (kind, prompt, images) = backend.last();
+        // 文本型走两阶段：阶段一用分类提示词、阶段二用该题型的固化提示词，都是单张图
+        assert_eq!(backend.calls(), 2, "文本型应当走两阶段（classify → solve）");
+        let (kind, solve_prompt, solve_images) = backend.last();
         assert_eq!(kind, "text");
-        assert_eq!(prompt, TEXT_PROMPT);
-        assert_eq!(images, 1);
+        assert_eq!(solve_prompt, CHAR_PROMPT);
+        assert_eq!(solve_images, 1);
+        let (_, classify_prompt, classify_images) = backend.first();
+        assert_eq!(classify_prompt, CLASSIFY_PROMPT);
+        assert_eq!(classify_images, 1);
     }
 
     #[tokio::test]
     async fn unreadable_sentinel_is_not_an_error() {
         let dir = tempfile::tempdir().expect("临时目录");
-        let (provider, _backend) = provider_ok(dir.path(), "UNREADABLE");
+        let (provider, _backend) = provider_ok(dir.path(), &["char", "UNREADABLE"]);
         let target = write_png(dir.path(), "blur.png");
 
         let result = run(&provider, json!({ "path": target })).await;
@@ -861,7 +1073,7 @@ mod tests {
     #[tokio::test]
     async fn empty_reply_is_readable_false() {
         let dir = tempfile::tempdir().expect("临时目录");
-        let (provider, _backend) = provider_ok(dir.path(), "   ");
+        let (provider, _backend) = provider_ok(dir.path(), &["char", "   "]);
         let target = write_png(dir.path(), "blank.png");
 
         let result = run(&provider, json!({ "path": target })).await;
@@ -873,12 +1085,190 @@ mod tests {
     #[tokio::test]
     async fn overlong_reply_is_readable_false_not_truncated() {
         let dir = tempfile::tempdir().expect("临时目录");
-        let (provider, _backend) = provider_ok(dir.path(), &"字".repeat(MAX_TEXT_CHARS + 1));
+        let long = "字".repeat(MAX_TEXT_CHARS + 1);
+        let (provider, _backend) = provider_ok(dir.path(), &["char", &long]);
         let target = write_png(dir.path(), "long.png");
 
         let result = run(&provider, json!({ "path": target })).await;
 
         // 判「没认出来」而不是截断 —— 截断会给出一个**看似合理但错误**的验证码
+        assert!(!result.is_error);
+        assert_eq!(result.content["readable"], false);
+        assert_eq!(result.content["text"], Value::Null);
+    }
+
+    // ── 阶段一：题型判定（v1.1：字符型 / 计算型）──────────────────────────────
+
+    #[test]
+    fn parse_variant_recognizes_char_and_calc() {
+        assert_eq!(parse_variant("char"), Some(TextVariant::Char));
+        assert_eq!(parse_variant("CHAR"), Some(TextVariant::Char));
+        assert_eq!(parse_variant(" calc \n"), Some(TextVariant::Calc));
+        // 分类输出是**中间产物**：模型爱带解释，故按关键词认（不像答案那样要求整串相等）
+        assert_eq!(
+            parse_variant("这是一张算式验证码，所以是 calc"),
+            Some(TextVariant::Calc)
+        );
+        assert_eq!(parse_variant("图中是一串字符"), Some(TextVariant::Char));
+        // 围栏 / 引号按整串归一化规则剥掉
+        assert_eq!(parse_variant("```\ncalc\n```"), Some(TextVariant::Calc));
+        // 判不出：哨兵、空、以及**两类都提到**（歧义 → 保守拒绍）
+        assert_eq!(parse_variant("UNKNOWN"), None);
+        assert_eq!(parse_variant("   "), None);
+        assert_eq!(parse_variant("不是 char，是 calc"), None);
+        // ASCII 关键词按**整词**匹配 —— 这些不该命中
+        assert_eq!(parse_variant("chart"), None);
+        assert_eq!(parse_variant("recalc"), None);
+        // 英文同义词也要认
+        assert_eq!(parse_variant("arithmetic captcha"), Some(TextVariant::Calc));
+        assert_eq!(parse_variant("text"), Some(TextVariant::Char));
+    }
+
+    #[test]
+    fn normalize_digits_accepts_only_integers() {
+        assert_eq!(normalize_digits("3"), Some("3".to_string()));
+        assert_eq!(normalize_digits("-2"), Some("-2".to_string()));
+        assert_eq!(normalize_digits(" 12 "), Some("12".to_string()));
+        // 模型「没算」的证据：算式原文不是数字
+        assert_eq!(normalize_digits("1+2"), None);
+        // 不收小数（待定项 P1）
+        assert_eq!(normalize_digits("3.5"), None);
+        assert_eq!(normalize_digits("abc"), None);
+        assert_eq!(normalize_digits("-"), None);
+        assert_eq!(normalize_digits(""), None);
+    }
+
+    #[tokio::test]
+    async fn solve_stage_timeout_is_reported_as_timeout() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        // 阶段一成功、阶段二超时 —— 超时分支在**阶段二**也要走通
+        let (provider, _backend) = provider_in(
+            dir.path(),
+            vec![FakeReply::Ok("char".to_string()), FakeReply::Timeout],
+        );
+        let target = write_png(dir.path(), "captcha.png");
+
+        let result = run(&provider, json!({ "path": target })).await;
+
+        assert!(result.is_error);
+        assert_eq!(result.content["error"], "timeout");
+    }
+
+    #[tokio::test]
+    async fn solve_stage_backend_failure_is_reported_as_backend_failed() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let (provider, _backend) = provider_in(
+            dir.path(),
+            vec![FakeReply::Ok("calc".to_string()), FakeReply::Failed],
+        );
+        let target = write_png(dir.path(), "captcha.png");
+
+        let result = run(&provider, json!({ "path": target })).await;
+
+        assert!(result.is_error);
+        assert_eq!(result.content["error"], "backend_failed");
+    }
+
+    #[test]
+    fn text_variant_names_are_stable() {
+        // 审计日志字段用它（改名会让既有日志的检索口径变化）
+        assert_eq!(TextVariant::Char.as_str(), "char");
+        assert_eq!(TextVariant::Calc.as_str(), "calc");
+    }
+
+    #[tokio::test]
+    async fn calc_captcha_returns_computed_digit() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let (provider, _backend) = provider_ok(dir.path(), &["calc", " 3 \n"]);
+        let target = write_png(dir.path(), "arith.png");
+
+        let result = run(&provider, json!({ "path": target })).await;
+
+        assert!(!result.is_error, "{result:?}");
+        // 出参与字符型**同形**（对外只有一个 kind），且**没有**新字段
+        assert_eq!(
+            result.content,
+            json!({ "kind": "text", "text": "3", "readable": true })
+        );
+    }
+
+    #[tokio::test]
+    async fn calc_with_expression_instead_of_result_is_readable_false() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        // 阶段二把算式原样抄回来 —— 不拦就会 readable:true 地交出一个错答案
+        let (provider, _backend) = provider_ok(dir.path(), &["calc", "1+2"]);
+        let target = write_png(dir.path(), "arith.png");
+
+        let result = run(&provider, json!({ "path": target })).await;
+
+        assert!(
+            !result.is_error,
+            "「没算」是正常结果而不是工具失败：{result:?}"
+        );
+        assert_eq!(
+            result.content,
+            json!({ "kind": "text", "text": Value::Null, "readable": false })
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_variant_is_readable_false_without_second_call() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        // 阶段一判不出题型（模型没按约定回 char / calc）
+        let (provider, backend) = provider_ok(dir.path(), &["UNKNOWN"]);
+        let target = write_png(dir.path(), "arith.png");
+
+        let result = run(&provider, json!({ "path": target })).await;
+
+        // 判不出是**正常结果**而非工具失败；且不该白跑阶段二
+        assert!(!result.is_error);
+        assert_eq!(
+            result.content,
+            json!({ "kind": "text", "text": Value::Null, "readable": false })
+        );
+        assert_eq!(backend.calls(), 1, "判不出题型就不该进阶段二");
+    }
+
+    #[tokio::test]
+    async fn solve_reply_equal_to_sentinel_is_readable_false() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        // 阶段二回的恰好是哨兵（模型说看不清）→ 判「没认出来」，不能把它当答案交出去
+        let (provider, _backend) = provider_ok(dir.path(), &["char", "UNREADABLE"]);
+        let target = write_png(dir.path(), "blur.png");
+
+        let result = run(&provider, json!({ "path": target })).await;
+
+        assert!(!result.is_error);
+        assert_eq!(result.content["readable"], false);
+        assert_eq!(result.content["text"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn solve_stage_strips_wrapped_quotes() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        // 阶段二模型给答案加了引号 —— 整串归一化要剥掉，不能把引号一起交出去（静默给错）
+        let (provider, _backend) = provider_ok(dir.path(), &["char", "\"4F7K\""]);
+        let target = write_png(dir.path(), "quoted.png");
+
+        let result = run(&provider, json!({ "path": target })).await;
+
+        assert!(!result.is_error, "{result:?}");
+        assert_eq!(
+            result.content,
+            json!({ "kind": "text", "text": "4F7K", "readable": true })
+        );
+    }
+
+    #[tokio::test]
+    async fn overlong_char_body_is_readable_false() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        // 带标记的超长内容仍走「超长 → 认不出来」这条路（不截断）
+        let long = "字".repeat(MAX_TEXT_CHARS + 1);
+        let (provider, _backend) = provider_ok(dir.path(), &["char", &long]);
+        let target = write_png(dir.path(), "long.png");
+
+        let result = run(&provider, json!({ "path": target })).await;
+
         assert!(!result.is_error);
         assert_eq!(result.content["readable"], false);
         assert_eq!(result.content["text"], Value::Null);
@@ -930,7 +1320,7 @@ mod tests {
     #[tokio::test]
     async fn backend_timeout_is_reported_as_timeout() {
         let dir = tempfile::tempdir().expect("临时目录");
-        let (provider, _backend) = provider_in(dir.path(), FakeReply::Timeout);
+        let (provider, _backend) = provider_in(dir.path(), vec![FakeReply::Timeout]);
         let target = write_png(dir.path(), "captcha.png");
 
         let result = run(&provider, json!({ "path": target })).await;
@@ -942,7 +1332,7 @@ mod tests {
     #[tokio::test]
     async fn backend_failure_is_reported_as_backend_failed() {
         let dir = tempfile::tempdir().expect("临时目录");
-        let (provider, _backend) = provider_in(dir.path(), FakeReply::Failed);
+        let (provider, _backend) = provider_in(dir.path(), vec![FakeReply::Failed]);
         let target = write_png(dir.path(), "captcha.png");
 
         let result = run(&provider, json!({ "path": target })).await;
@@ -955,7 +1345,7 @@ mod tests {
     fn request_shape_puts_prompt_first_and_image_second() {
         let images = vec![("image/png".to_string(), PNG_HEADER.to_vec())];
 
-        let request = build_request("fake-model", TEXT_PROMPT, &images);
+        let request = build_request("fake-model", CLASSIFY_PROMPT, &images);
 
         assert_eq!(request.model, "fake-model");
         assert!(request.tools.is_none(), "内部调用不得带 tools");
@@ -967,7 +1357,7 @@ mod tests {
         };
         assert_eq!(parts.len(), 2);
         match &parts[0] {
-            ContentPart::Text { text } => assert_eq!(text, TEXT_PROMPT),
+            ContentPart::Text { text } => assert_eq!(text, CLASSIFY_PROMPT),
             other => panic!("第一段应当是提示词，实际 {other:?}"),
         }
         match &parts[1] {
