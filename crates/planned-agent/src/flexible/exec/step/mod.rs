@@ -12,7 +12,7 @@ use planned_agent_core::ai::types::{
 };
 use planned_agent_core::ai::AiClient;
 use planned_agent_core::mcp::types::{parse_content_blocks, ContentBlock};
-use planned_agent_tool_manager::ToolRegistry;
+use planned_agent_tool_manager::{ToolOutcome, ToolRegistry};
 use tokio::sync::watch;
 
 use super::event::{PlanRunEvent, PlanRunSink};
@@ -174,6 +174,53 @@ async fn tool_output_for_llm(
             );
             output.to_string()
         }
+    }
+}
+
+/// 调用工具；若「补全后的参数」失败且错误像路径问题，改用模型给的**原参数**重试一次。
+///
+/// 为什么需要：`call_arguments` 无条件把裸文件名补成产出目录 —— 对**读类**参数
+/// （上传文件、加载脚本）这可能补错（文件本在用户地盘 / 工作目录），补错就报「找不到
+/// 文件」。这里兜住：**只重试一次**，且**只认路径类错误**（否则工具因别的原因失败也会白
+/// 重试）。回退也失败时返回**第一次**的结果 —— 那是「补全后」的事实，信息量更大。
+///
+/// 返回的 `bool` = 结果是否来自**补全后的参数**（回灌文案据此如实措辞）。
+async fn call_tool_with_path_fallback(
+    registry: &Arc<ToolRegistry>,
+    tool_name: &str,
+    rewritten: serde_json::Value,
+    original: serde_json::Value,
+    rewrites: &[call_arguments::PathRewrite],
+) -> (anyhow::Result<ToolOutcome>, bool) {
+    let first = registry.call_tool(tool_name, rewritten).await;
+
+    // 没有发生改写 → 结果只可能来自这一次调用。
+    if rewrites.is_empty() {
+        return (first, false);
+    }
+
+    let path_failure = match &first {
+        Ok(outcome) if !outcome.result.is_error => false,
+        Ok(outcome) => call_arguments::looks_like_path_error(&tool_content(&outcome.result.content)),
+        Err(err) => call_arguments::looks_like_path_error(&err.to_string()),
+    };
+    // 成功、或失败与路径无关 → 就是补全参数的结果。
+    if !path_failure {
+        return (first, true);
+    }
+
+    tracing::info!(
+        target: "tool_path_normalization",
+        tool = %tool_name,
+        rewrites = rewrites.len(),
+        "补全后的参数疑似不适用，改用模型给的原参数重试一次"
+    );
+
+    match registry.call_tool(tool_name, original).await {
+        // 回退成功 → 结果来自原参数。
+        Ok(outcome) if !outcome.result.is_error => (Ok(outcome), false),
+        // 回退也失败 → 保留补全那次的结果（它更接近「我们做了什么」）。
+        _ => (first, true),
     }
 }
 
@@ -372,7 +419,23 @@ async fn run_step_with_prompt(
                 args = %args_desc,
                 "工具调用入参"
             );
-            let (tool_output, is_error) = match registry.call_tool(&tool_name, arguments).await {
+            // 裸文件名 → 本次执行的产出目录（与工具输出落盘、图片落盘同一个目录）。
+            // 只动「传给工具的那一份参数」，不改模型自己的消息记录。
+            let original_arguments = arguments.clone();
+            let (arguments, path_rewrites) = call_arguments::resolve(
+                registry.get_tool(&tool_name).as_ref(),
+                arguments,
+                &cfg.cache_dir.join(input.run_dir),
+            );
+            let (call_result, used_rewritten) = call_tool_with_path_fallback(
+                registry,
+                &tool_name,
+                arguments,
+                original_arguments,
+                &path_rewrites,
+            )
+            .await;
+            let (tool_output, is_error) = match call_result {
                 Ok(outcome) => {
                     // 工具结果进 messages 的文本。**类型区分在这里**（不下放给 image 模块）：
                     // 含图片块 → 落盘，base64 就地丢弃，进上下文 / 日志的只有文本 + 绝对路径；
@@ -455,8 +518,14 @@ async fn run_step_with_prompt(
                 ok,
             });
             // 大输出落盘：**只换「进 messages 的那一份」**，日志 / 事件 / 报告仍用原文。
-            let content_for_llm =
+            let mut content_for_llm =
                 tool_output_for_llm(&tool_output, &input, cfg, rounds, nth).await;
+            // 参数被补全过 → 告诉模型实际用了哪条路径（否则改写对模型是「静默」的）。
+            // 只进 messages，不进日志 / 事件 / 报告 —— 它是宿主补充，不是工具的真实输出。
+            if !path_rewrites.is_empty() {
+                content_for_llm
+                    .push_str(&call_arguments::render_rewrites(&path_rewrites, used_rewritten));
+            }
             messages.push(tool_message(&call.id, &content_for_llm));
         }
         if error.is_some() {
@@ -508,6 +577,7 @@ async fn run_step_with_prompt(
     }
 }
 
+mod call_arguments;
 mod image;
 mod llm;
 mod render;

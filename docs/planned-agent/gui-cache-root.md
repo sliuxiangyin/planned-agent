@@ -141,7 +141,7 @@ pub fn flexible_output_dir(&self) -> PathBuf;  // **不含**会话段
 宿主（会话段）   services/run_service.rs：snapshot().with_output_dir(config.cache_dir)  // = <根>/<session_id>
 执行器（执行段） exec/executor/mod.rs：with_run_dir(env, "run-<millis>-<seq>")           // 与 spill 落点同目录
   → step_system_prompt(env, category) → prompt/environment.rs 渲染「产出目录：<path>」
-  → STEP_SYSTEM_PROMPT 的全局纪律：落盘产出 → 产出目录 + 显式命名
+  → STEP_SYSTEM_PROMPT 的全局纪律：落盘产出 → 产出目录 + **写完整路径**
 ```
 
 于是「**纪律在全局基准、路径在环境段**」：改 `cache_root` 只需改配置，不必动任何 prompt 文案。

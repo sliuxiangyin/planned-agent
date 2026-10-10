@@ -5,8 +5,11 @@
         fake_tool, text_response, tool_response, FakeAiClient, RecordingSink,
     };
     use crate::flexible::{ExecutorConfig, StepStatus};
-    use planned_agent_core::tool_registry::ToolCategory;
+    use async_trait::async_trait;
+    use planned_agent_core::mcp::types::ToolResult;
+    use planned_agent_core::tool_registry::{ToolCategory, ToolExecutor};
     use serde_json::{json, Value};
+    use std::sync::Mutex;
 
     const MAX_ROUNDS: usize = 5;
 
@@ -45,6 +48,128 @@
             tool.clone(),
         );
         (registry, tool)
+    }
+
+    /// 第一次固定报「路径类错误」、之后成功的假工具 —— 用于验证回退只发生一次。
+    struct FailOnceTool {
+        calls: Mutex<Vec<Value>>,
+    }
+
+    #[async_trait]
+    impl ToolExecutor for FailOnceTool {
+        async fn execute(&self, _tool_name: &str, arguments: Value) -> anyhow::Result<ToolResult> {
+            let mut calls = self.calls.lock().expect("calls 锁");
+            calls.push(arguments);
+            // 第一次（补全后的参数）报 ENOENT，第二次（原参数）成功。
+            let first = calls.len() == 1;
+            Ok(ToolResult {
+                call_id: String::new(),
+                content: json!(if first {
+                    "Error: ENOENT: no such file or directory"
+                } else {
+                    "ok"
+                }),
+                is_error: first,
+            })
+        }
+
+        fn name(&self) -> &str {
+            "needs_path"
+        }
+
+        fn description(&self) -> &str {
+            "测试用假工具"
+        }
+
+        fn supported_tools(&self) -> Vec<String> {
+            vec!["needs_path".to_string()]
+        }
+
+        fn supports_tool(&self, name: &str) -> bool {
+            name == "needs_path"
+        }
+    }
+
+    /// 注册 `FailOnceTool`，其 schema 里有一个路径类参数。
+    fn registry_with_fail_once() -> (Arc<ToolRegistry>, Arc<FailOnceTool>) {
+        let registry = Arc::new(ToolRegistry::new());
+        let tool = Arc::new(FailOnceTool {
+            calls: Mutex::new(Vec::new()),
+        });
+        registry.register_custom_tool(
+            planned_agent_core::mcp::types::Tool {
+                name: "needs_path".to_string(),
+                description: "测试工具".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"filename": {"type": "string"}}
+                }),
+            },
+            vec![ToolCategory::File],
+            tool.clone(),
+        );
+        (registry, tool)
+    }
+
+    fn one_rewrite() -> Vec<call_arguments::PathRewrite> {
+        vec![call_arguments::PathRewrite {
+            key: "filename".to_string(),
+            from: "a.png".to_string(),
+            to: "D:/out/a.png".to_string(),
+        }]
+    }
+
+    /// 补全后的参数报「路径找不到」→ 用模型给的原参数重试一次，并如实报告用了哪一份。
+    #[tokio::test]
+    async fn fallback_retries_once_with_original_arguments_on_path_error() {
+        let (registry, tool) = registry_with_fail_once();
+        let (result, used_rewritten) = call_tool_with_path_fallback(
+            &registry,
+            "needs_path",
+            json!({"filename": "D:/out/a.png"}),
+            json!({"filename": "a.png"}),
+            &one_rewrite(),
+        )
+        .await;
+
+        let outcome = result.expect("回退应当成功");
+        assert!(!outcome.result.is_error);
+        // 结果来自**原参数** → 回灌不能宣称「已补全」。
+        assert!(!used_rewritten);
+
+        let calls = tool.calls.lock().expect("calls 锁").clone();
+        assert_eq!(calls.len(), 2, "只应重试一次");
+        assert_eq!(calls[0], json!({"filename": "D:/out/a.png"}));
+        assert_eq!(calls[1], json!({"filename": "a.png"}));
+    }
+
+    /// 失败与路径无关 → **不**重试（重试等于把带副作用的工具白跑一次）。
+    #[tokio::test]
+    async fn no_fallback_when_error_is_unrelated_to_paths() {
+        let (registry, tool) = registry_with(
+            "noop",
+            json!("Cannot type text into input[type=number]"),
+            true,
+        );
+        let (result, used_rewritten) = call_tool_with_path_fallback(
+            &registry,
+            "noop",
+            json!({"filename": "D:/out/a.png"}),
+            json!({"filename": "a.png"}),
+            &one_rewrite(),
+        )
+        .await;
+
+        assert!(result
+            .expect("结果是 Ok，失败由 is_error 表达")
+            .result
+            .is_error);
+        assert!(used_rewritten, "结果来自补全参数");
+        assert_eq!(
+            tool.calls.lock().expect("calls 锁").len(),
+            1,
+            "与路径无关的失败不该触发重试"
+        );
     }
 
     /// 一段可断言的日志缓冲区（配合 `tracing` 的线程局部订阅者使用）。
@@ -143,6 +268,95 @@
             failed_line.contains("echo 1 >> text.txt"),
             "失败行必须带上 LLM 实际传的入参，否则无从分析：{failed_line}"
         );
+    }
+
+    /// 整步链路：模型给的**裸文件名** → 调用前补成产出目录下的完整路径 → 回灌告知模型。
+    ///
+    /// 单测只证明了 `resolve` 纯函数正确；这条证明**它真的接在调用链上**，
+    /// 而且判定过程写进了日志（否则线上「为什么没生效」无法诊断）。
+    #[tokio::test]
+    async fn bare_filename_is_rewritten_into_run_dir_across_the_step() {
+        let captured = CapturedLog::default();
+        let _guard = captured.install();
+
+        let ai = FakeAiClient::new(vec![
+            tool_response("call-1", "shot", json!({"filename": "captcha-1.png"}), 10, 5),
+            text_response("已截图", 20, 5),
+        ]);
+        // schema 里**有**路径参数，才可能被补全（对照 `registry_with`：它没有 properties）。
+        let registry = Arc::new(ToolRegistry::new());
+        let tool = fake_tool("shot", json!("saved"), false);
+        registry.register_custom_tool(
+            planned_agent_core::mcp::types::Tool {
+                name: "shot".to_string(),
+                description: "测试工具".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"filename": {"type": "string"}}
+                }),
+            },
+            vec![ToolCategory::File],
+            tool.clone(),
+        );
+        let cache_dir = std::env::temp_dir().join("pa-step-arg-rewrite");
+        let step_def = step("#E1");
+        let sink = RecordingSink::default();
+
+        let result = run_step(
+            prompt::STEP_SYSTEM_PROMPT,
+            StepInput {
+                step: &step_def,
+                intent: "截图",
+                expected_output: "存下来",
+                prior: &[],
+                tools: &[],
+                index: 1,
+                run_dir: "run-1",
+            },
+            // `clone` 而非 `ai` 本身：`as` cast 会 move，后面还要用 `ai.requests()` 断言回灌。
+            &(ai.clone() as Arc<dyn AiClient>),
+            &registry,
+            &ExecutorConfig {
+                max_rounds_per_step: MAX_ROUNDS,
+                cache_dir: cache_dir.clone(),
+                ..Default::default()
+            },
+            &sink,
+            None,
+        )
+        .await;
+
+        assert_eq!(result.record.status, StepStatus::Done);
+
+        // ① 工具**实际收到**的是产出目录下的完整路径，不是裸名。
+        let expected = cache_dir
+            .join("run-1")
+            .join("captcha-1.png")
+            .to_string_lossy()
+            .into_owned();
+        let calls = tool.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1["filename"].as_str(), Some(expected.as_str()));
+
+        // ② 回灌：模型在下一轮看得到「参数被补过」。
+        let requests = ai.requests();
+        let follow_up = format!("{:?}", requests[1].messages);
+        assert!(
+            follow_up.contains("已按本次执行的产出目录补全"),
+            "回灌文案应进 messages：{follow_up}"
+        );
+
+        // ③ 日志：判定过程可观测（带工具名与识别到的路径参数名）。
+        let log = captured.text();
+        let decision = log
+            .lines()
+            .find(|line| line.contains("工具入参的路径判定"))
+            .unwrap_or_else(|| panic!("没有记下「路径判定」日志：{log}"));
+        assert!(
+            decision.contains("filename"),
+            "日志要带识别到的路径参数名：{decision}"
+        );
+        assert!(decision.contains("shot"), "日志要带工具名：{decision}");
     }
 
     #[tokio::test]
