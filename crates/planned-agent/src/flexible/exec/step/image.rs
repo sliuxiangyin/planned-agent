@@ -150,7 +150,7 @@ async fn materialize(
         Ok(path) => {
             let absolute = std::path::absolute(&path).unwrap_or(path);
             (
-                format!("- {}（{mime}，{} 字节）", absolute.display(), bytes.len()),
+                format!("- file@{}（{mime}，{} 字节）", absolute.display(), bytes.len()),
                 bytes.len() as u64,
             )
         }
@@ -189,6 +189,7 @@ mod tests {
         let note = &notes[0];
         assert!(!note.contains(PNG_BASE64), "说明里不得出现 base64：{note}");
         assert!(note.contains("image/png"), "{note}");
+        assert!(note.starts_with("- file@"), "说明须用 file@ 前缀标出文件：{note}");
 
         let spilled = cache.path().join("run-1").join("img-s1-r2-c0-0.png");
         assert!(

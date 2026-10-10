@@ -164,7 +164,7 @@ pub(in crate::flexible::exec) fn render_spill_reference(
 
 ```
 ⚠️ {产出较大|工具输出较大}（{lines} 行 / {bytes} 字节），已存为临时文件，未全文注入。
-文件：{path}
+content@{path}
 读取方式：先用 `builtin_grep_file` 按关键词/正则定位（返回 1-based 行号；命中多时按 `match_offset` 续读），
 再用 `builtin_read_file_lines` 读那几行（`offset` = 行号 - 1；**不传 `limit` 会一次读到文件末尾**，
 大文件请显式传 `limit`（如 2000）；本文件共 {lines} 行，续读时把 `offset` 加上已读到的行数）。

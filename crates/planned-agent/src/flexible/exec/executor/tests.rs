@@ -832,6 +832,10 @@
             "整理步应收到文件说明: {resolve_req}"
         );
         assert!(
+            resolve_req.contains("content@"),
+            "整理步的文件说明须用 content@ 前缀: {resolve_req}"
+        );
+        assert!(
             resolve_req.contains("builtin_read_file_lines"),
             "文件说明应给出读取方式: {resolve_req}"
         );

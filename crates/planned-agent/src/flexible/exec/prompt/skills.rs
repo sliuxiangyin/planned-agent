@@ -5,6 +5,11 @@
 //!
 //! 内容纪律（见设计稿 `docs/planned-agent/flexible-plan-category.md` §5.2）：只写该技能的
 //! **作业纪律与最常见的坑**，**不写具体工具用法**（那属工具 `description`）、**不写个案**（防过拟合）。
+//!
+//! **已知例外（2026-10-10）**：`BROWSER_RULES` 点名 `builtin_solve_captcha`。原因是三个「能读图片」
+//! 的工具（`builtin_read_media_file` / `builtin_recognize_image` / `builtin_solve_captcha`）描述互不排他
+//! —— 第一个的 description 自称「读取图片」却**不点名**同类，只写通用判据无法消歧，实测模型会依次误选。
+//! 故此处按工具名写死（破 §5.2 第 1 条）。
 
 use super::super::super::plan::category::PlanCategory;
 
@@ -15,7 +20,8 @@ const BROWSER_RULES: &str = "\
 - 采集到的内容先落盘再分析，不要在一次回答里既抓又分析又输出。
 - 需要读入的路径（上传文件、加载脚本）照原位给，不要先搬进产出目录。
 - 涉及登录态 / 分页 / 弹窗时，先确认当前处于目标页面状态再执行下一步。
-- 需要人工介入（验证码、扫码、短信）时如实报告并停下，不伪造成功、不跳过。
+- 图像验证码用 `builtin_solve_captcha`（验证码专用，直接拿它的结果去填）；不要改用通用读图或文件读取工具去「看」它。
+- 需要人工介入（扫码、短信，或验证码求解失败）时如实报告并停下，不伪造成功、不跳过。
 ";
 
 /// 文件与数据处理。
@@ -95,6 +101,18 @@ mod tests {
         assert!(
             !section.contains("data/cache"),
             "路径不得写死在分类段里（应来自环境段）：{section}"
+        );
+    }
+
+    /// `Browser` 段**点名**验证码求解工具 —— §5.2「不写具体工具用法」的**已知例外**：
+    /// 三个读图工具描述互不排他，只写通用判据无法消歧，实测模型会依次误选。锁住，防被「去工具名」化改回。
+    #[test]
+    fn browser_rules_name_the_captcha_solver() {
+        let section = category_rule_section(PlanCategory::Browser).expect("Browser 应有规范段");
+        assert!(section.contains("builtin_solve_captcha"), "{section}");
+        assert!(
+            !section.contains("验证码、扫码"),
+            "验证码不该再列在「人工介入」清单里：{section}"
         );
     }
 }

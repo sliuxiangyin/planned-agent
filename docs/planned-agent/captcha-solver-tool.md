@@ -2,6 +2,7 @@
 
 > **状态**：✅ **v1（字符型）已实施**（2026-10-07；定稿 → 实现 → 装配 → 测试 → review 全过，见 §8 实测）。
 > **v1.1（两阶段题型判定：字符型 / 计算型）**：✅ **已实施**（2026-10-08）—— 见 §12。对外 `kind` 不变；工具内部先判断题型、再求解（两次模型调用）。
+> **v1.2（出参带 `variant`）**：✅ **已实施**（2026-10-10）—— 见 §14。出参加一个「答案来源」信号（char / calc），防主模型在求解后仍去读图复核。
 > **依赖**：图片通路（`image-recognition-tool.md` §4）**已实施** —— MCP 图片落盘 + 回灌绝对路径。本工具吃这条链产出的路径。
 > **前提决策（已拍板）**：`builtin_recognize_image` **不动**；另起**验证码专用**工具；v1 **只做字符型**；后端**以本地视觉模型为主**，先把工具形状与扩展点定下来。
 > 与其他文档冲突时以代码为准，并顺手更新本文。
@@ -14,7 +15,7 @@
 |---|---|
 | 工具名 | `builtin_solve_captcha`（待拍板，备选 `builtin_recognize_captcha`） |
 | 入参 | `path`（必填）、`kind`（可选，缺省 `"text"`） |
-| 出参 | tagged union：`{"kind":"text","text":"4F7K","readable":true}` |
+| 出参 | tagged union：`{"kind":"text","text":"4F7K","readable":true,"variant":"char"}`（`variant` 为 **v1.2 新增**，见 §14；v1 时无此字段） |
 | 支持类型 | **只有字符型**（`kind = "text"`）—— 注：v1.1 起 `"text"` 在**工具内部**再分「字符型 / 计算型」，对外仍只有一个 `kind`（§12） |
 | 后端 | **本地视觉模型**（复用主 provider 的 `Arc<dyn AiClient>`） |
 | 分类 | `Utility`（与 `builtin_recognize_image` 一致，零配置可见） |
@@ -106,6 +107,8 @@ input_schema:
 `kind` 现在**只有一个合法值**，看着像噪音 —— 保留它的理由：它是扩展点的**声明**，且 tool schema 每轮请求都完整带给模型、不落库，**变化对模型零成本**（§4.3）。
 
 ### 3.2 出参（tagged union）
+
+> ⚠️ 下面是 **v1 的形状**。**v1.2 起出参多一个 `variant` 字段**（`char` / `calc` / `null`）—— 以 **§14.3** 为准。
 
 ```jsonc
 // 成功
@@ -322,7 +325,7 @@ pub trait CaptchaBackend: Send + Sync {
 | 图片校验 | 越界 → `path_outside_allowed`；不存在 → `file_not_found`；是目录 → `invalid_arguments`；非图片内容 → `unsupported_image_type`；伪装扩展名也按**内容**判定；超大 → `image_too_large` |
 | 归一化（纯函数，重点） | trim；去成对引号；去结尾句号；**保留内部空格**；**不改大小写**；超长 → `readable: false` |
 | 提示词 | 进 user 消息**第一段**且与常量逐字一致；图片是第二段 `ImageSource::Url{data:…}`；`tools` 为空；`detail = High` |
-| 出参 | 成功 → `{"kind":"text","text":…,"readable":true}`；模型回 `UNREADABLE` → `readable: false` 且 `is_error == false`；模型回空 → `readable: false` |
+| 出参 | 成功 → `{"kind":"text","text":…,"readable":true}`（**v1.2 起含 `variant`**，见 §14）；模型回 `UNREADABLE` → `readable: false` 且 `is_error == false`；模型回空 → `readable: false` |
 | 超时 | 后端超 60s → `timeout` |
 | 注册态 | 名字 + `Utility` + `supported_tools` + schema（`required` 只含 `path`） |
 | 日志 | `tool_audit` 记 path / mime / bytes / model / 原始输出长度 / 归一化是否发生；**不记图片字节、不记 data URL** |
@@ -420,7 +423,7 @@ pub trait CaptchaBackend: Send + Sync {
 
 ### 12.0 一句话
 
-`kind` 对外**仍然只有 `"text"`**。工具内部把文本型当**一个小 agent**：先发一次调用**判断题型**（字符型 / 计算型），再按判出的题型发第二次调用**求解**。对外只暴露 `{"kind":"text","text":…,"readable":…}`。
+`kind` 对外**仍然只有 `"text"`**。工具内部把文本型当**一个小 agent**：先发一次调用**判断题型**（字符型 / 计算型），再按判出的题型发第二次调用**求解**。对外只暴露 `{"kind":"text","text":…,"readable":…}`（**该「出参形状零变化」的结论已被 §14 v1.2 修订**：出参新增 `variant`）。
 
 ### 12.1 v1 的真实失败模式（为什么必须改）
 
@@ -439,9 +442,10 @@ pub trait CaptchaBackend: Send + Sync {
 | D2 | 谁判「字符型 / 计算型」 | **模型**判（工具侧不做图像分类） |
 | D3 | 判断怎么落 | **工具内部独立一次 LLM 调用**（`CLASSIFY_PROMPT`），再按判出的题型发第二次调用求解 |
 | D4 | LLM 调用次数 | **两次**（classify → solve）—— 这是「先判断、再返回结果」的直接落实 |
-| D5 | 出参形状 | **不变**（`{"kind":"text","text":…,"readable":…}`）；题型只进 `tool_audit` 的 `variant` |
+| D5 | 出参形状 | **不变**（`{"kind":"text","text":…,"readable":…}`）；题型只进 `tool_audit` 的 `variant`。<br>⚠️ **已被 §14（v1.2）修订**：出参**新增** `variant` 字段（题型从此对调用方可见） |
 
 > D1 + D5 合起来 = **对外零变化**：`kind` 取值集合、`input_schema` 结构、出参形状、错误码全部不动 → 无下游破坏。
+> ⚠️ **已被 §14（v1.2）修订**：出参形状自 v1.2 起**多一个 `variant`**（其余仍不动）；引用「出参形状不动」之处以 §14 为准。
 > **被否决的另一条路**：让模型在*同一次*求解输出里自报题型（`char:4F7K` / `calc:3` 前缀）。它少一次调用，但把「判断」压进输出格式里 —— 判断不可单独观测、不可单独测，也不像「先判断、再返回结果」，故不采用。
 
 ### 12.3 两阶段流程
@@ -474,6 +478,8 @@ pub trait CaptchaBackend: Send + Sync {
 | `char` 题：`UNREADABLE` / 空 / 超长 | `readable:false` |
 | `calc` 题：`3` / `-2` / `12` | `{"kind":"text","text":"3","readable":true}` |
 | `calc` 题：`1+2`（**模型没算**）／ `abc` / `3.5` | `readable:false` |
+
+> 上表是 **v1.1 时的形状**；v1.2 起每条都**多一个 `variant`**（本题型为 `char` / `calc`）—— 以 §14.3 为准。
 
 「calc 内容必须是规范数字」是**确定性规则**：**可选负号的半角阿拉伯整数** `-?[0-9]+`。
 
@@ -538,7 +544,7 @@ pub trait CaptchaBackend: Send + Sync {
 1. **多一次 LLM 调用**：延迟与 token 大约翻倍（图片要传两次）。换来的是「判断」可单独观测、可单独测、三段提示词各自最小 —— 与「小型 agent」的定位一致。
 2. **判不出题型不会给出错误答案**：走 `readable:false`（与「认不出来」同路），且**不再进阶段二**。
 3. **仍有一条窄缝**：阶段一若把算式误判成 `char`，阶段二会按字符型求解（可能交出表达式）。由 `CLASSIFY_PROMPT` 的措辞尽量压住。
-4. **对外零变化**（§12.2 的 D1+D5）→ 无下游破坏。
+4. **对外零变化**（§12.2 的 D1+D5，**已被 §14 v1.2 修订**：出参新增 `variant`）→ 无下游破坏。
 5. **仍不重试**、base64 纪律照旧 —— §10 全部继续有效。
 
 ### 12.10 实测（2026-10-08）
@@ -597,4 +603,112 @@ MiniMax-M3。审计日志现在**分开记** `classify_ms` / `solve_ms`，正是
 - 或阶段一判不出 / 判错时**退回单阶段通用求解**（换一条通用提示词再试一次）；
 - 或收紧 `CLASSIFY_PROMPT`（但 5 次里 3 次「判不出」更像能力上限，提示词收益有限）。
 
-**不变量**：无论选哪条，对外的 `{"kind":"text","text":…,"readable":…}` 与错误码都不动（§12.2 的 D1+D5）。
+**不变量**：无论选哪条，对外的 `{"kind":"text","text":…,"readable":…}` 与错误码都不动（§12.2 的 D1+D5，**该不变量已被 §14 修订**）。
+
+---
+
+## 14. v1.2：出参带「答案来源」信号（`variant`）—— 防主模型复核
+
+> **状态**：✅ **已实施**（2026-10-10；单测 137 全绿，见 §14.6）。
+> **触发场景（实测）**：算术验证码 `48÷1=?`，本工具**正确**返回 `48`，但主模型仍额外调了一次 `builtin_recognize_image` 去看同一张图。
+
+### 14.1 现场（2026-10-10，浏览器登录计划）
+
+执行轨迹（GUI think box）：
+
+```
+$ builtin_solve_captcha …/run-1791638831811-0/captcha.png
+> 识别结果为 "48"，但验证码通常为4位字符。让我再仔细看一次图片，确认结果。
+$ builtin_recognize_image {"instruction":"请仔细辨认图片中所有的数字或字母字符…","path":"…/captcha.png"}
+> 这是一个算术验证码 "48÷1=?"，答案为48。…这就是验证码的答案。
+```
+
+两条已核实的排除项：
+
+1. **不是「工具选型」错**：模型**先**调了 `builtin_solve_captcha`（正确），**后**才复核；且纪律在场 —— 该计划模板 `category = "Browser"`（`agent-gui.db` 的 `flexible_state.products.category`），故 `BROWSER_RULES`（`flexible/exec/prompt/skills.rs:23`「图像验证码用 `builtin_solve_captcha`…不要改用通用读图…去『看』它」）**已注入**单步 system prompt。
+2. **不是执行器 / 回灌机制**：工具出完结果即结束；回灌文案只声明「图片已落盘成文件」（`flexible/exec/step/mod.rs:116`），没有任何「再看一眼」的指令。这一步**完全是主模型自己的决定**。
+
+### 14.2 根因：出参没有「这是完整答案」的信号
+
+模型拿到的只有一个裸字符串：
+
+```json
+{ "kind": "text", "text": "48", "readable": true }
+```
+
+- `readable: true` 只表示「读出来了」，**不表示「读全了 / 算完了」**；
+- 题型（char / calc）按 §12.2 的 **D5** 刻意不外露（只进 `tool_audit` 的 `variant`）；
+- 于是模型无法区分「算式题算出的答案 `48`」与「4 位字符验证码只读出 2 位（残缺、可疑）」；
+- 它自带先验「验证码通常是 4 位」，与 2 位结果冲突，而**工具输出里没有任何证据能消解冲突** → 它用手边另一个读图工具自证。
+
+**这是 D5「出参形状零变化」的代价第一次显形**：把题型藏进审计，省掉了下游破坏，却也让主模型失去了判断结果是否完整所必需的信息。
+
+> 纪律（`BROWSER_RULES`）压不住这次行为的原因：它是**行为规则**，而模型的驱动力是「结果看起来不对劲」。规则说「直接拿它的结果去填」，模型仍会怀疑 —— 这类冲突只能靠**让结果自带可信度**消解，加一条同口径规则无效。
+
+### 14.3 契约变更（v1.2）
+
+出参**增加** `variant` 字段（**`kind` 取值集合、`input_schema`、错误码都不动**）：
+
+```jsonc
+// 字符型：答案是图里的字符
+{ "kind": "text", "text": "4F7K", "readable": true,  "variant": "char" }
+// 计算型：答案是算式算出来的数字（完整答案，直接使用）
+{ "kind": "text", "text": "48",   "readable": true,  "variant": "calc" }
+// 题型判定成功但没解出（char 型读不出 / calc 型没算出）
+{ "kind": "text", "text": null,   "readable": false, "variant": "calc" }
+// 题型判不出（阶段一即放弃，不再进阶段二）
+{ "kind": "text", "text": null,   "readable": false, "variant": null }
+```
+
+三条定论：
+
+| # | 问题 | 结论 |
+|---|---|---|
+| P1 | 字段名与取值 | `variant`，取值即 `TextVariant::as_str()`（`"char"` / `"calc"`）—— 与审计日志同一个词、**同一处来源**，不新造词汇 |
+| P2 | 判不出题型时的形状 | **恒有字段、值 `null`**（与 `text: null` 同一风格）—— 形状恒定最好解析，不引入第三个取值 |
+| P3 | 是否顺带暴露算式原文（`expression`） | **不做**。给「标签」已足以消解「2 位不像验证码」的疑惑；给「证据」要改 `CALC_PROMPT` 让模型同时回算式 + 答案，解析与兜底复杂度都上升 |
+
+**为什么是 `variant` 而不是新字段名**：`TextVariant` 已是本工具内部的真实概念（§12.5 落点 3），`as_str()` 已是「进审计日志的稳定名」（`captcha_tools.rs:132-140`）。出参复用它 = 0 新词汇、0 新枚举。
+
+### 14.4 description 补句（定稿文案）
+
+字段没有 `input_schema` 描述位（出参不落 schema），语义只能写在 description 里。**在现有 description 末尾追加一句**：
+
+```
+出参里的 variant 标明结果来源：char 是识别出的字符，calc 是算式求解出的完整答案（直接使用，无需再读图复核）。
+```
+
+- 只陈述**出参契约**，不写实现细节、不举具体例子（守 §3.4 / §12.5-6 的措辞纪律）；
+- 与既有那句「通用读图请用 `builtin_recognize_image`」并列，是 description 的第 2 条「边界 / 契约」信息；
+- 现有测试 `captcha_tools.rs:931` 断言 description 含 `builtin_recognize_image` —— 不受影响。
+
+### 14.5 落点（diff 清单）
+
+| # | 位置 | 动作 |
+|---|---|---|
+| 1 | `tagged_text` | 签名加 `variant: Option<TextVariant>`，出参带上 `"variant"`（`as_str()` 或 `null`） |
+| 2 | `parse_char` / `parse_calc` | 各自把 `Some(TextVariant::Char)` / `Some(TextVariant::Calc)` 传进 `tagged_text` |
+| 3 | `solve_captcha` 判不出题型分支 | `tagged_text(None, None)` |
+| 4 | `description` | 追加 §14.4 那一句 |
+| 5 | 测试 | 更新**既有**全形状断言（`json!` 各补 `"variant"`，覆盖 char / calc / null 三态）+ 新增 description 含 `variant` 的断言；不新增用例 |
+| 6 | 本文档 | §0 出参行、§12.2 D5 加「已被 §14 修订」注记；本 §14 |
+
+**不动清单**：`input_schema`（字段与 `required`）、`SUPPORTED_KINDS`、`DEFAULT_KIND`、错误码与校验顺序（§3.5）、`build_request`、`CaptchaBackend` / `LocalVisionBackend`、`normalize_text` 与 `normalize_digits` 本体、`strategy()`。`TextVariant` 定义**不改**（只是多一个使用者）。
+
+### 14.6 验证计划
+
+| 项 | 命令 / 方式 | 基线 |
+|---|---|---|
+| 单测 | `cargo test -p planned-agent-tool-manager --lib` | **137 passed / 0 failed**（数字未变：改的是既有断言，未新增用例） |
+| 下游编译 | `cargo check -p planned-agent-gui` | 通过（仅既有 warning） |
+| testkit 编译 | `cargo test -p planned-agent-testkit --no-run` | 通过（更新了 `captcha_real_ai.rs` 的断言） |
+| **假设验证（关键）** | `crates/testkit` 的 `captcha_real_ai`（真实 AI、`#[ignore]`）复现**算式验证码**场景，**观察**主模型是否仍发起复核 | **只观察、不断言**（与 testkit 既有纪律一致）—— **本次未跑**（需 config.toml + 密钥） |
+
+> ⚠️ **本改动不能保证**消除复核：它把「缺失的信息」补上（消解「为什么只有 2 位」），但若模型的复核另有来源（过度谨慎的性格 / 泛化怀疑），此改动无效。**必须由 14.6 第 3 行的真实探针判定**，不能凭单测通过就宣布问题解决。
+
+### 14.7 风险与不变量
+
+1. **契约正式升级为 v1.2**：§12.2 的 D5「出参形状零变化」**作废**（改为「`kind` 取值集合与 `input_schema` 不变；出参**加** `variant`」）。所有引用 D5 的地方（§12.0 / §12.2 / §12.9-4 / §13.3 末）需同步。
+2. **下游零破坏**（已实测核对）：出参**只**由 `tagged_text` 产出；除本工具内联测试与 `crates/testkit/tests/captcha_real_ai.rs:105-106` 外，flexible 执行器与 GUI **都不解析**它 —— 加字段对它们无感，只需更新两处断言。
+3. **将来加类型时**：`variant` 只对 `kind = "text"` 族有意义；新增 `slide` / `click` 是**新 kind**，各自带自己的坐标字段，不带 `variant`。tagged union 的判别仍是 `kind`。
+4. **不改变「判不出不给错误答案」**：判不出题型照旧 `readable:false`，`variant` 为 `null`。

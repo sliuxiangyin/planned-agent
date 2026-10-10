@@ -56,8 +56,8 @@ fn runs() -> usize {
 
 /// 端到端跑若干轮 `builtin_solve_captcha`。
 ///
-/// 工具内部是**两阶段**：先判题型（字符型 / 算式型）、再按题型求解；但出参对外恒为
-/// `{kind:"text", text, readable}` —— 所以这里只断这一形状，不问它是哪一类。
+/// 工具内部是**两阶段**：先判题型（字符型 / 算式型）、再按题型求解；出参恒为
+/// `{kind:"text", text, readable, variant}` —— v1.2 起 `variant` 把题型带给调用方（§14）。
 #[tokio::test]
 #[ignore = "需要真实 AI（crates/testkit/config.toml）与真图；用 `-- --ignored` 显式跑"]
 async fn solve_captcha_with_real_ai() {
@@ -101,9 +101,14 @@ async fn solve_captcha_with_real_ai() {
             continue;
         }
 
-        // 只断不变量：形状与 kind 恒定，与模型答案无关
+        // 只断不变量：形状恒定；`variant` 只在题型判出时有值（char / calc），判不出为 null
         assert_eq!(outcome.result.content["kind"], "text");
         assert!(outcome.result.content["readable"].is_boolean());
+        let variant = &outcome.result.content["variant"];
+        assert!(
+            variant.is_null() || variant == "char" || variant == "calc",
+            "variant 只允许 char / calc / null：{variant}"
+        );
         println!(
             "第 {round}/{runs} 轮：{elapsed:?} → {}",
             outcome.result.content

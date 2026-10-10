@@ -851,6 +851,7 @@
         // ② 第二轮请求（带工具结果）里那条 tool 消息是引用，不是全文
         let content = tool_content_of_request(&ai, 1);
         assert!(content.contains("已存为临时文件"), "应是落盘引用：{content}");
+        assert!(content.contains("content@"), "落盘路径须带 content@ 前缀：{content}");
         assert!(content.contains("tool-s1-r1-0.txt"), "应带文件路径：{content}");
         assert!(
             content.chars().count() < 2_000,
@@ -907,11 +908,18 @@
         // 无说明 → 原文一字不动（纯文本路径的行为不变）
         assert_eq!(join_text_and_image_notes("done", &[]), "done");
 
-        let notes = vec!["- D:\\cache\\img-s1-r0-c0-0.png（image/png，8 字节）".to_string()];
+        let notes = vec!["- file@D:\\cache\\img-s1-r0-c0-0.png（image/png，8 字节）".to_string()];
         let rendered = join_text_and_image_notes("screenshot taken", &notes);
         assert!(rendered.starts_with("screenshot taken\n\n"), "{rendered}");
-        assert!(rendered.contains("需要查看图片内容时"), "{rendered}");
-        assert!(rendered.contains("img-s1-r0-c0-0.png"), "{rendered}");
+        // 只声明「这是已落盘的文件」，不指导用什么工具读它
+        assert!(
+            rendered.contains("- file@D:\\cache\\img-s1-r0-c0-0.png"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("用能读取本地图片的工具"),
+            "不该指导怎么读文件：{rendered}"
+        );
 
         // 文本为空时不该出现前导空行
         let only_image = join_text_and_image_notes("", &notes);
@@ -968,7 +976,9 @@
 
         let tool_text = tool_content_of_request(&ai, 1);
         assert!(tool_text.contains("screenshot taken"), "{tool_text}");
-        assert!(tool_text.contains("需要查看图片内容时"), "{tool_text}");
+        // 图片只以 file@ 路径示人（提示「这是文件，不是未全文注入的正文」）
+        assert!(tool_text.contains("file@"), "{tool_text}");
+        assert!(tool_text.contains("img-s1-r1-c0-0.png"), "{tool_text}");
         assert!(
             !tool_text.contains("builtin_recognize_image"),
             "回灌文案不点名工具（没注册 / 改名时会变幻觉源）：{tool_text}"

@@ -78,7 +78,7 @@ step N 产出 output（StepRunResult.output，当前不截断）
 ```
 ### #E1
 ⚠️ 产出较大（1234 行 / 89210 字节），已存为临时文件，未全文注入。
-文件：D:\code\planned-agent\data\cache\<session-id>\<run-id>\step-1.txt
+content@D:\code\planned-agent\data\cache\<session-id>\<run-id>\step-1.txt
 读取方式：builtin_read_file（offset 从 1 开始，limit 默认 2000；
 返回含 next_offset / has_more，可续读）。
 ———— 开头预览（前 800 字符）————
@@ -89,8 +89,8 @@ step N 产出 output（StepRunResult.output，当前不截断）
 
 `prompt::STEP_SYSTEM_PROMPT` 增一条规则，否则模型可能只看预览就下结论：
 
-> - 若「前序步骤结果」给出了文件路径，说明该产出**未全文注入**；
->   请用 `builtin_read_file` 分批读取所需部分，**不要仅凭预览臆断**。
+> - 路径前缀是「读回与否」的开关：`content@<path>` 是**未全文注入的内容**，按需用读回工具读取、**不要仅凭预览臆断**；
+>   `file@<path>` 是落盘的**文件**（产出 / 工具产物），不要当未注入的正文读回。
 
 ### 4.2 预览不是「兜底」
 

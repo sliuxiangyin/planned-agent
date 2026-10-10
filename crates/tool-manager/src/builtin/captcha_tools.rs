@@ -120,7 +120,8 @@ fn strategy(variant: TextVariant) -> CaptchaStrategy {
     }
 }
 
-/// 文本型族内的**子题型** —— 由阶段一（[`CLASSIFY_PROMPT`]）判出，**不出现在出参里**。
+/// 文本型族内的**子题型** —— 由阶段一（[`CLASSIFY_PROMPT`]）判出，**进审计日志**，
+/// 并作为出参的 `variant` 字段（v1.2 起，设计稿 §14）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TextVariant {
     /// 字符型：答案是图里的字符本身。
@@ -176,18 +177,22 @@ fn parse_variant(raw: &str) -> Option<TextVariant> {
 
 /// 组装文本型的出参。
 ///
-/// **出参里没有题型字段**（设计稿 §12.2 的 D5）：字符型与计算型对调用方长得一样，
-/// 题型只进审计日志。
-fn tagged_text(value: Option<String>) -> Value {
+/// **题型（`variant`）对调用方可见**（设计稿 §14，v1.2 起）：字符型与计算型的长相差异正是
+/// 主模型「结果看起来不对劲」的来源 —— 见 §14.2。判不出题型时 `variant` 为 `null`（形状恒定）。
+fn tagged_text(value: Option<String>, variant: Option<TextVariant>) -> Value {
+    let variant = match variant {
+        Some(variant) => Value::String(variant.as_str().to_string()),
+        None => Value::Null,
+    };
     match value {
-        Some(text) => json!({ "kind": "text", "text": text, "readable": true }),
-        None => json!({ "kind": "text", "text": Value::Null, "readable": false }),
+        Some(text) => json!({ "kind": "text", "text": text, "readable": true, "variant": variant }),
+        None => json!({ "kind": "text", "text": Value::Null, "readable": false, "variant": variant }),
     }
 }
 
 /// 阶段二·字符型：归一化 → 出参。
 fn parse_char(raw: &str) -> Value {
-    tagged_text(normalize_text(raw))
+    tagged_text(normalize_text(raw), Some(TextVariant::Char))
 }
 
 /// 阶段二·计算型：归一化 → **必须是规范数字** → 出参。
@@ -195,7 +200,10 @@ fn parse_char(raw: &str) -> Value {
 /// 数字校验挡住「模型没算、把算式原样抄回来」：`1+2` 不是数字 → 判「没认出来」，
 /// 而不是把表达式当答案交出去（见 [`normalize_digits`]）。
 fn parse_calc(raw: &str) -> Value {
-    tagged_text(normalize_text(raw).and_then(|text| normalize_digits(&text)))
+    tagged_text(
+        normalize_text(raw).and_then(|text| normalize_digits(&text)),
+        Some(TextVariant::Calc),
+    )
 }
 
 /// 保守归一化。**认不出来**返回 `None`。
@@ -464,7 +472,9 @@ impl BuiltinToolProvider for CaptchaToolsProvider {
                 name: "builtin_solve_captcha".to_string(),
                 description: "求解一张验证码图片并返回结构化结果。类型由 `kind` 指定（当前仅 \
                     \"text\"，可省略）。**用于验证码**；通用读图请用 builtin_recognize_image。\
-                    图片必须是本机已存在的图片文件路径，通常来自上一个工具的输出。"
+                    图片必须是本机已存在的图片文件路径，通常来自上一个工具的输出。\
+                    出参里的 variant 标明结果来源：char 是识别出的字符，calc 是算式求解出的完整答案\
+                    （直接使用，无需再读图复核）。"
                     .to_string(),
                 input_schema: json!({
                     "type": "object",
@@ -645,7 +655,7 @@ async fn solve_captcha(
             duration_ms = started.elapsed().as_millis() as u64,
             "验证码题型无法判定"
         );
-        return tool_result(tagged_text(None), false);
+        return tool_result(tagged_text(None, None), false);
     };
 
     // ⑦ 阶段二：按题型求解
@@ -919,6 +929,9 @@ mod tests {
         assert_eq!(tools[0].0.input_schema["required"], json!(["path"]));
         // 边界要写进 description（否则模型会在两个读图工具间选错）
         assert!(tools[0].0.description.contains("builtin_recognize_image"));
+        // 出参 `variant` 的语义也写进 description（v1.2，设计稿 §14.4）——
+        // 这是「防主模型求解后仍去读图复核」唯一的信息来源，被删掉就退回原状。
+        assert!(tools[0].0.description.contains("variant"));
     }
 
     // ── 参数校验 ────────────────────────────────────────────────────────────
@@ -1050,7 +1063,7 @@ mod tests {
         assert!(!result.is_error, "求解成功不应是 is_error：{result:?}");
         assert_eq!(
             result.content,
-            json!({ "kind": "text", "text": "4F7K", "readable": true })
+            json!({ "kind": "text", "text": "4F7K", "readable": true, "variant": "char" })
         );
 
         // 文本型走两阶段：阶段一用分类提示词、阶段二用该题型的固化提示词，都是单张图
@@ -1074,9 +1087,10 @@ mod tests {
 
         // 「看不清」是**正常结果**而不是工具失败 —— 用 readable 表达，别用 is_error
         assert!(!result.is_error, "{result:?}");
+        // 题型已判出（char），只是没读出 —— `variant` 照给（只有判不出题型时才是 null，§14.3）
         assert_eq!(
             result.content,
-            json!({ "kind": "text", "text": Value::Null, "readable": false })
+            json!({ "kind": "text", "text": Value::Null, "readable": false, "variant": "char" })
         );
     }
 
@@ -1195,10 +1209,10 @@ mod tests {
         let result = run(&provider, json!({ "path": target })).await;
 
         assert!(!result.is_error, "{result:?}");
-        // 出参与字符型**同形**（对外只有一个 kind），且**没有**新字段
+        // 出参与字符型**同形**（对外只有一个 kind），差别只在 `variant`（v1.2，§14）
         assert_eq!(
             result.content,
-            json!({ "kind": "text", "text": "3", "readable": true })
+            json!({ "kind": "text", "text": "3", "readable": true, "variant": "calc" })
         );
     }
 
@@ -1217,7 +1231,7 @@ mod tests {
         );
         assert_eq!(
             result.content,
-            json!({ "kind": "text", "text": Value::Null, "readable": false })
+            json!({ "kind": "text", "text": Value::Null, "readable": false, "variant": "calc" })
         );
     }
 
@@ -1232,9 +1246,10 @@ mod tests {
 
         // 判不出是**正常结果**而非工具失败；且不该白跑阶段二
         assert!(!result.is_error);
+        // 判不出题型 → `variant` 为 null（形状恒定的第三态，§14.3 的 P2）
         assert_eq!(
             result.content,
-            json!({ "kind": "text", "text": Value::Null, "readable": false })
+            json!({ "kind": "text", "text": Value::Null, "readable": false, "variant": Value::Null })
         );
         assert_eq!(backend.calls(), 1, "判不出题型就不该进阶段二");
     }
@@ -1265,7 +1280,7 @@ mod tests {
         assert!(!result.is_error, "{result:?}");
         assert_eq!(
             result.content,
-            json!({ "kind": "text", "text": "4F7K", "readable": true })
+            json!({ "kind": "text", "text": "4F7K", "readable": true, "variant": "char" })
         );
     }
 

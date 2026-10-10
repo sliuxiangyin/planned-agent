@@ -149,7 +149,7 @@ pub(in crate::flexible::exec) fn render_spill_reference(
     let preview: String = content.chars().take(preview_chars).collect();
     format!(
         "⚠️ {what}（{} 行 / {} 字节），已存为临时文件，未全文注入。\n\
-         文件：{}\n\
+         content@{}\n\
          读取方式：按需要选择其中一个即可（两者不是必须配合的两步）——\n\
          已知要读哪一段、或想直接看全文：`builtin_read_file_lines`（`offset` 从 0 开始；\
          **不传 `limit` 会一次读到文件末尾**，大文件请显式传 `limit`（如 2000）；本文件共 {} 行，\

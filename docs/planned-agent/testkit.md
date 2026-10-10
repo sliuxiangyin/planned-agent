@@ -118,6 +118,7 @@ crates/testkit/
 └── tests/
     ├── fixtures/README.md  # 素材说明（`captcha.png`，**一张即可**）
     ├── harness_smoke.rs    # 3 例：不触网，默认测试路径全绿
+    ├── path_prefix_real_ai.rs  # content@/file@ 前缀：指纹 + 工具侧拒读（不触网）+ 2 个真实 AI 观察探针
     └── captcha_real_ai.rs  # 1 例：真实 AI，`#[ignore]`
 ```
 
@@ -175,7 +176,7 @@ testkit 复刻了 GUI 的「内置 provider 清单」（`context/tools/mod.rs:92
 | # | 验收项 | 实测（2026-10-08） |
 |---|---|---|
 | 1 | 编译通过 | ✅ `cargo test -p planned-agent-testkit` 编译成功 |
-| 2 | 默认（无密钥）全绿且不触网 | ✅ `harness_smoke` **3 passed / 0 failed**；`captcha_real_ai` **2 ignored** |
+| 2 | 默认（无密钥）全绿且不触网 | ✅ `harness_smoke` **3 passed**；`path_prefix_real_ai` **2 passed**（指纹 + `text_readers_reject_binary_file`）；真实探针 `captcha_real_ai` **1** + `path_prefix_real_ai` **2** = **3 ignored** |
 | 3 | 真实 AI 能跑通 `builtin_solve_captcha` | ✅ **已实测**（MiniMax-M3 + `tests/fixtures/captcha.png`）：`{"kind":"text","readable":true,"text":"59"}`；`tool_audit` 记 `variant="calc"`、`duration_ms=3512` |
 | 4 | 产品 crate 不反向依赖 | ✅ `crates/testkit` 不出现在任何产品 crate 的 `[dependencies]` |
 

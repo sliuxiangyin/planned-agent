@@ -21,15 +21,18 @@ pub(crate) const STEP_SYSTEM_PROMPT: &str = "\
 - 工具参数必须来自「本次子目标」「期望产出」或「前序步骤结果」，禁止臆造路径、URL、关键词。
 - **落盘产出**（截图 / 导出 / 保存文件）**必须写完整路径** = 「运行环境」段给出的**产出目录** + 文件名；
   只写文件名会被当作相对**工具自己的目录**，产出落到别处，后续步骤与下游工具都读不到。
-- 给你的内容不是正文、而是**文件路径**时（会注明「未全文注入」——「前序步骤结果」段与工具返回都可能是这样），
-  按你的需要**选用其中一个**读回工具即可，**两者不是必须配合的两步**：
-  - 已经知道要读哪一段、或想直接看全文（包括「还没想好要找什么」）→ 用 `builtin_read_file_lines`
-    （`offset` 从 0 开始，**显式传 `limit`**（如 2000）——不传 `limit` 会一次读到文件末尾，大文件可能撑爆上下文；
-    续读时把 `offset` 加上上一次读到的行数）；
-  - 只知道要找什么、不知道在第几行 → 用 `builtin_grep_file`（给出 1-based 行号与上下文；命中多时按输出末尾的
-    `match_offset` 续读）；**若还想读它给的那几行**再多看上下文，才接着用 `builtin_read_file_lines`
-    （`offset` = 行号 - 1）。
-  **不要仅凭预览臆断**。
+- 给你的内容不是正文、而是**文件路径**时，看前缀区分：
+  - `content@<path>` 是**未全文注入的内容**（「前序步骤结果」段与工具返回都可能是这样）——
+    **只有带 `content@` 前缀的路径才是这种内容**。按你的需要**选用其中一个**读回工具即可，**两者不是必须配合的两步**：
+    - 已经知道要读哪一段、或想直接看全文（包括「还没想好要找什么」）→ 用 `builtin_read_file_lines`
+      （`offset` 从 0 开始，**显式传 `limit`**（如 2000）——不传 `limit` 会一次读到文件末尾，大文件可能撑爆上下文；
+      续读时把 `offset` 加上上一次读到的行数）；
+    - 只知道要找什么、不知道在第几行 → 用 `builtin_grep_file`（给出 1-based 行号与上下文；命中多时按输出末尾的
+      `match_offset` 续读）；**若还想读它给的那几行**再多看上下文，才接着用 `builtin_read_file_lines`
+      （`offset` = 行号 - 1）。
+    **不要仅凭预览臆断**。
+  - `file@<path>`：这是一个**文件**（落盘产出 / 工具产物），**不要**把它当成「未全文注入的正文」去读回；
+    需要它的内容时，用与该文件**类型相配**的工具（图片 → 读图工具），而不是文本读回工具。
 - 若已有信息足够，直接给出本次产出的结论作回答，不要再调用工具。
 - 回答不要包 JSON 外壳，直接写产出内容本身。
 ";
@@ -89,6 +92,25 @@ pub(crate) const OUTPUT_RESOLVE_SYSTEM_PROMPT: &str = "\
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 路径前缀是「读回与否」的开关：`content@` 可读回、`file@` 是文件。
+    #[test]
+    fn step_prompt_marks_path_prefixes() {
+        assert!(
+            STEP_SYSTEM_PROMPT.contains("content@<path>"),
+            "{STEP_SYSTEM_PROMPT}"
+        );
+        assert!(
+            STEP_SYSTEM_PROMPT.contains("file@<path>"),
+            "{STEP_SYSTEM_PROMPT}"
+        );
+        // file@ 还要点出「按类型选相配工具」—— 实测：只说「别当正文读回」时，
+        // 真实模型会用文本读回工具去读 png（见 crates/testkit/tests/path_prefix_real_ai.rs）。
+        assert!(
+            STEP_SYSTEM_PROMPT.contains("用与该文件"),
+            "{STEP_SYSTEM_PROMPT}"
+        );
+    }
 
     #[test]
     fn step_prompt_without_env_borrows_verbatim() {
