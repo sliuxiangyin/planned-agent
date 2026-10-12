@@ -187,6 +187,8 @@ mod tests {
             output: None,
             output_file: None,
             output_truncated: false,
+            verify_attempts: 0,
+            verified: None,
             error: None,
         }
     }

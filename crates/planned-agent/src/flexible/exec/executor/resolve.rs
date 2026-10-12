@@ -45,6 +45,8 @@ pub(super) fn resolve_failed_record(index: usize, error: String) -> StepRunRecor
         output: None,
         output_truncated: false,
         output_file: None,
+        verify_attempts: 0,
+        verified: None,
         error: Some(error),
     }
 }

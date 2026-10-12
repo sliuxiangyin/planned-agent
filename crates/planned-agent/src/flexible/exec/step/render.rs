@@ -103,6 +103,78 @@ pub(crate) fn describe_tool_args(arguments: &Value) -> String {
     format!("{head}…")
 }
 
+/// 「收敛核对」轮里模型必须给出的**结论标记**（提示词与解析器共用的契约）。
+///
+/// 两个标记都不会互为子串（`核对未通过` 中间夹着「未」），但仍**先判未通过**再看通过：
+/// 宁可把「未通过」认出来，也不要把否决误当成放行。
+pub(crate) const VERIFY_PASS_MARKER: &str = "核对通过";
+pub(crate) const VERIFY_FAIL_MARKER: &str = "核对未通过";
+
+/// 读核对结论时最多扫描的前导非空行数。
+///
+/// 只认首行最可预测，但模型常会先写一句开场白（「好的，我来逐条对照」）再给标记；
+/// 放宽到前几行是**可用性**与**可预测性**之间的折中。扫描范围刻意很小：正文（重述的产出）
+/// 里的词不该被当成结论。
+const VERIFY_SCAN_LINES: usize = 5;
+
+/// 一行是不是「结论行」，是则给出结论。
+///
+/// 判据是**行首**（允许前导空白）而不是「行内含标记」：若本步产出正文本身会写到这些词
+/// （例如产出就是一份描述本机制的文档），内含匹配会把正文误判成结论、或把正文那行删掉。
+/// 代价是模型写成「好的，核对通过」这类带前缀的行会被当成**没守格式** —— 这走保守路径
+///（产出退回候选产出），不会误杀。
+fn verdict_of_line(line: &str) -> Option<bool> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with(VERIFY_FAIL_MARKER) {
+        return Some(false);
+    }
+    if trimmed.starts_with(VERIFY_PASS_MARKER) {
+        return Some(true);
+    }
+    None
+}
+
+/// 从核对轮的正文里读结论。
+///
+/// - `Some(false)`：自称未通过（模型应同时继续调工具去修）；
+/// - `Some(true)`：自称通过；
+/// - `None`：**没守格式** —— 调用方按「通过」处理（产出本来已经拿到，不因格式失误整步判死），
+///   但**产出退回被核对的那份候选产出**（核对轮的评论正文不是产出），并留一条 warn 使这类
+///   情形可观测。
+pub(crate) fn verify_verdict(answer: &str) -> Option<bool> {
+    let head: Vec<Option<bool>> = answer
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(VERIFY_SCAN_LINES)
+        .map(verdict_of_line)
+        .collect();
+    // 前几行里先找「未通过」：否决优先，避免把否决误当放行。
+    if head.contains(&Some(false)) {
+        return Some(false);
+    }
+    if head.contains(&Some(true)) {
+        return Some(true);
+    }
+    None
+}
+
+/// 去掉作为结论的那一行，返回核对轮的**正文**（即模型「原样重述」的产出）。
+///
+/// 只丢**第一处**行首命中：结论标记按提示词的契约只有一行。找不到标记则原样返回 ——
+/// 调用方会据「是否为空」与结论有无决定回退到被核对的那一份产出。
+pub(crate) fn strip_verify_marker(answer: &str) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    let mut dropped = false;
+    for line in answer.lines() {
+        if !dropped && verdict_of_line(line).is_some() {
+            dropped = true;
+            continue;
+        }
+        kept.push(line);
+    }
+    kept.join("\n").trim().to_string()
+}
+
 /// 工具输出转文本：字符串取原文，其余取 JSON 字面量。
 pub(crate) fn tool_content(content: &Value) -> String {
     match content {

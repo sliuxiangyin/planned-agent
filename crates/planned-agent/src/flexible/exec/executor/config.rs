@@ -22,6 +22,12 @@ pub const DEFAULT_LLM_TIMEOUT_SECS: u64 = 180;
 pub const DEFAULT_LLM_TIMEOUT_RETRIES: usize = 1;
 /// 「空回答」的默认**重发**次数（每轮各自计算，见 `ExecutorConfig::llm_empty_retries`）。
 pub const DEFAULT_LLM_EMPTY_RETRIES: usize = 1;
+/// 「收敛核对」的默认次数上限（见 `ExecutorConfig::verify_attempts`）。
+///
+/// 给 `2` 而不是 `1`：模型可能在**单独一轮**只回「核对未通过」（不带工具调用），
+/// 下一次核对才是它动手修完后的复述。上限为 1 时这种分两步的做法没有修复机会，
+/// 「不满足就继续修」的意图会落空。
+pub const DEFAULT_VERIFY_ATTEMPTS: usize = 2;
 
 /// 执行器配置。
 #[derive(Debug, Clone)]
@@ -69,6 +75,23 @@ pub struct ExecutorConfig {
     /// **不占** `max_rounds_per_step` 的轮数：另记 `StepRunRecord::llm_retries`
     /// （`call_usages.len() == rounds + llm_retries`）。
     pub llm_empty_retries: usize,
+    /// 每步「**收敛核对**」的次数上限（`0` = 关闭）。
+    ///
+    /// 模型自称完成（该轮**无工具调用**）时不再立即收工，而是往**同一条对话**追加一条
+    /// user 消息，要求它对照「期望产出」逐条自检：不满足就继续调用工具去修，满足才收工。
+    ///
+    /// 与 `llm_empty_retries` 的区别：那条是「**重发同一条请求**」（messages 一字不动、
+    /// 不占 `rounds`）；这条是「**追加新消息**」—— 模型因此可以接着调工具修，所以它
+    /// **占** `rounds`，`call_usages.len() == rounds + llm_retries` 的不变式仍然成立。
+    ///
+    /// 用尽仍自称不满足 ⇒ 该步 `Failed`（`output` 保持 `None`），后续步骤按现有语义
+    /// `Skipped`。**不新增 `StepStatus` 取值**，故对外的 `StepPhase` / 报告 / UI 全不受影响。
+    pub verify_attempts: usize,
+    /// 只对「**调用过至少一次工具**」的步骤做收敛核对（默认 `true`）。
+    ///
+    /// 纯文本产出的步骤没有外部副作用、误收敛概率低，而核对固定要多花一次**全上下文**
+    /// 请求；默认跳过这一档，把预算留给真正动过文件 / 命令 / 网络的步骤。
+    pub verify_only_after_tools: bool,
 }
 
 impl Default for ExecutorConfig {
@@ -84,6 +107,8 @@ impl Default for ExecutorConfig {
             llm_timeout: Some(Duration::from_secs(DEFAULT_LLM_TIMEOUT_SECS)),
             llm_timeout_retries: DEFAULT_LLM_TIMEOUT_RETRIES,
             llm_empty_retries: DEFAULT_LLM_EMPTY_RETRIES,
+            verify_attempts: DEFAULT_VERIFY_ATTEMPTS,
+            verify_only_after_tools: true,
         }
     }
 }

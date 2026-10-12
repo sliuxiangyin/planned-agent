@@ -73,14 +73,14 @@
 | `exec/executor/prior.rs` | 前序产出注入 + 依赖校验 | `collect_dependency_issues`(:19)、`collect_prior`(:43)、`placeholder_record`(:66) |
 | `exec/executor/tools.rs` | 工具定义表组装 | `tool_definitions_for_names`(:8)、`to_tool_definition`(:18) |
 | `exec/executor/logging.rs` | 日志渲染（压单行 + 封顶） | `log_output`(:10)、`summarize_tools`(:34) |
-| `exec/step/mod.rs` | **单步执行**：一次「LLM ⇄ 工具」循环 | `OUTPUT_MAX_CHARS = 8_000`(:31)、`StepInput`(:34)、`StepRunResult`(:53)、`run_step`(:64)、`run_output_resolve`(:81) |
+| `exec/step/mod.rs` | **单步执行**：一次「LLM ⇄ 工具」循环（含**收敛核对**，见 §7-16） | `OUTPUT_MAX_CHARS = 8_000`(:31)、`StepInput`(:34)、`StepRunResult`(:53)、`run_step`(:64)、`run_output_resolve`(:81) |
 | `exec/step/llm.rs` | 单次 LLM 调用：超时 / 重试 / 取消 | `is_cancelled`(:12)、`wait_cancel`(:20)、`with_timeout`(:39)、`request_llm`(:58) |
-| `exec/step/render.rs` | 消息与入参的渲染 / 摘要 | `tool_message`(:23)、`describe_arguments`(:57，全量 800)、`describe_tool_args`(:73，`$` 行 120)、`truncate_chars`(:116)、`summarize`(:123) |
+| `exec/step/render.rs` | 消息与入参的渲染 / 摘要；**收敛核对的结论解析** | `tool_message`(:23)、`describe_arguments`(:57，全量 800)、`describe_tool_args`(:73，`$` 行 120)、`verify_verdict`(:144)、`strip_verify_marker`(:165)、`truncate_chars`(:188)、`summarize`(:195) |
 | `exec/prompt/mod.rs` | 提示词子模块的统一出口（**私有模块**，`exec/mod.rs:11`） | `pub(crate) use` 转出下列项；调用方仍写 `exec::prompt::X` |
 | `exec/prompt/system.rs` | 两个 system prompt 基准 + 单步 system prompt 组装 | `STEP_SYSTEM_PROMPT`、`step_system_prompt`（尾部依次拼「运行环境段 + 技能规范段」）、`OUTPUT_RESOLVE_SYSTEM_PROMPT` |
 | `exec/prompt/environment.rs` | 「运行环境」段渲染（宿主事实 + 编码风险） | `render_environment_into`、`render_available`、`encoding_hint` |
 | `exec/prompt/skills.rs` | **各技能（`PlanCategory`）的作业规范段** —— 加技能只动这里 | `category_rule_section`、`BROWSER_RULES` / `FILE_RULES` / `RESEARCH_RULES` / `DEV_RULES` / `DEVICE_RULES` |
-| `exec/prompt/task.rs` | 单步 user 文本 + 输出契约文本 | `build_step_task`、`build_output_contract_text`、`kind_label` |
+| `exec/prompt/task.rs` | 单步 user 文本 + 输出契约文本 + **收敛核对的 user 文本** | `build_step_task`、`build_verify_prompt`、`build_output_contract_text`、`kind_label` |
 | `exec/event.rs` | 进度事件（唯一对外进度通道） | `PlanRunEvent`(:12)、`PlanRunSink`(:55)、`ChannelSink`(:63)、`NullSink`(:83) |
 | `exec/report.rs` | 执行报告 | `StepStatus`(:11)、`CallUsage`(:24)、`ToolCallRecord`(:40)、`StepRunRecord`(:51)、`PlanRunReport`(:108) |
 
@@ -133,6 +133,8 @@ PlanRunReport ─► PlanRunEvent::RunFinished ─► apply_event 归并进 RunS
 - **`success` 不含整理步**：整理步失败只影响「有没有最终结果」（`executor/mod.rs:260-266`）。
 - **记录存模板原文，prompt 用展开值**：`StepInput.step` vs `StepInput.expected_output`（`exec/step/mod.rs:34-50`）。
 - **空产出（正文与思考都空）判 `Failed`**，避免空串进结果表传给下游（`exec/step/mod.rs`）。
+- **收敛核对**：模型自称完成（该轮无工具调用）时，默认再追加一轮「对照期望产出」的自检；
+  自检不通过就继续循环、可接着调工具修；用尽仍不通过 ⇒ 该步 `Failed`（`exec/step/mod.rs`，详见 §7-16）。
 
 ## 4. 硬约定
 
@@ -171,7 +173,8 @@ UI 边填边预览用 `render_lenient`（保留占位符 + 回报 missing，纯�
 
 **⑨ 默认值常量**（`exec/executor/config.rs`）：`max_rounds_per_step = 50`、`DEFAULT_CACHE_DIR = "./data/cache"`、
 `DEFAULT_SPILL_THRESHOLD_CHARS = 8_000`（与 `OUTPUT_MAX_CHARS` 对齐）、`DEFAULT_SPILL_PREVIEW_CHARS = 800`、
-`LOG_OUTPUT_MAX_CHARS = 2_000`、`DEFAULT_LLM_TIMEOUT_SECS = 180`、`DEFAULT_LLM_TIMEOUT_RETRIES = 1`。
+`LOG_OUTPUT_MAX_CHARS = 2_000`、`DEFAULT_LLM_TIMEOUT_SECS = 180`、`DEFAULT_LLM_TIMEOUT_RETRIES = 1`、
+`DEFAULT_LLM_EMPTY_RETRIES = 1`（见 §7-11）、`DEFAULT_VERIFY_ATTEMPTS = 2`（见 §7-16）。
 
 ## 5. 新的东西放哪
 
@@ -196,7 +199,7 @@ cargo test -p planned-agent --test lib_api        # 只验 pub use 对外路径�
 cargo test -p planned-agent-gui --bins            # 宿主侧（消费方）
 ```
 
-用例分布：实测 **133**（`cargo test -p planned-agent --lib flexible::`；数字随开发漂移，**以命令输出为准**）。
+用例分布：实测 **164**（`cargo test -p planned-agent --lib flexible::`；数字随开发漂移，**以命令输出为准**）。
 
 ⚠️ **既有 baseline 失败，不是本目录的锅**：`cargo test -p planned-agent`（不带过滤）有
 **3 个 `planner::coarse::llm_planner` 用例**失败，原因是运行时找不到 prompt `planning/coarse_plan`
@@ -235,7 +238,7 @@ cargo test -p planned-agent-gui --bins            # 宿主侧（消费方）
     （provider 空响应 / 推理预算耗尽；空回答是 HTTP 200，内层重试覆盖不到）。重发的是**同一条请求**
     （messages 未变 ⇒ 不重复执行工具，对比「整步重跑」会），**不占** `rounds`，故
     `call_usages.len() == rounds + llm_retries`；用尽后该步 `Failed`，理由带「已重发 N 次」
-    （hardening 稿 A6，`exec/step/mod.rs`）。诊断：空回答的 WARN 带 `finish_reason`，用于区分
+    （hardening 稿 A6，`exec/step/mod.rs`；**「收敛核对」是另一条线，见本条后面的第 16 条**）。诊断：空回答的 WARN 带 `finish_reason`，用于区分
     「provider 空响应」与「被 `max_tokens` 截断」。
 12. **GUI 有 `placeholder` 的镜像实现**：`crates/agent-gui/src/pages/plan/flexible/placeholder.rs`。
     两份 `validate` **签名不同**（本目录版 `(steps, inputs)` 只校验 `steps`；GUI 版
@@ -248,6 +251,25 @@ cargo test -p planned-agent-gui --bins            # 宿主侧（消费方）
 15. **环境段 / 分类段的位置是刻意的**：`step_system_prompt(env, category)` 只在**尾部**依次追加
     「运行环境段 + 技能规范段」（为了命中 provider 前缀缓存），两者都 `None` 时逐字返回基准串
     （`exec/prompt/system.rs`）；整次执行只算一次、每步复用。
+16. **「收敛核对」是第三条独立的线**（`ExecutorConfig::verify_attempts`，默认 2；
+    `verify_only_after_tools`，默认 `true`）—— 管「**模型自称完成**」（那一轮**无工具调用**），
+    与第 11 条的空回答重发（管「有响应但没内容」）**不是一回事**，与「整步重跑」更不是；
+    **无单独设计稿，本条即权威说明**（细节以代码为准），分支在 `exec/step/mod.rs`：
+    - **触发点**：`'step: loop` 里模型这一轮没要工具时才发核对；有工具调用时不干预、不计数。
+      核对要求追加在**同一条对话**上（`exec/prompt/task.rs::build_verify_prompt`），
+      所以模型能接着调工具去修，且**工具不会重复执行**（对比「整步重跑」会重复执行副作用）。
+      `verify_only_after_tools = true` 时，没调过工具的纯文本步骤直接跳过核对，省一次全上下文请求。
+    - **占 `rounds`**（核对轮是一条真实的新消息）⇒ `call_usages.len() == rounds + llm_retries` 仍成立；
+      空回答重发**不占** `rounds`。两条线互不干扰。
+    - **结论按行首判定**（`exec/step/render.rs::verify_verdict`，标记 `核对通过` / `核对未通过`）：
+      标记缺失**不误杀**（仍 `Done`），但产出退回被核对的那份候选产出 —— **除非核对之后又动过工具**
+      （`tools_at_verify` 判据），那时本轮正文算修复后的新产出。**别把它退回成已被否决的旧产出。**
+    - 用尽仍自称不通过 ⇒ 该步 `Failed`，且**刻意不设 `output`**（设了就会算成 `Done`，
+      下游便拿着未达标的数据继续跑 —— 那正是引入核对要拦的情况）。
+    - **没有新增 `StepStatus` 取值**，所以 `StepPhase` / 快照 / GUI 全没动；记录侧只多了
+      `verify_attempts` / `verified`（都带 `#[serde(default)]`）。
+    - 测试基线：既有用例一律显式 `verify_attempts: 0`（`exec/step/tests.rs` 的 `cfg` / `cfg_with_cache`、
+      `exec/executor/tests.rs` 的 `base_cfg`）—— 否则按轮次写死的脚本会因多一次请求而「用尽」。
 
 ## 8. 设计稿在哪（`docs/planned-agent/`）
 

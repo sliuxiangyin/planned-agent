@@ -252,6 +252,25 @@ async fn run_step_with_prompt(
     let mut output: Option<String> = None;
     let mut error: Option<String> = None;
 
+    // ── 收敛核对（见 `ExecutorConfig::verify_attempts`）──
+    // 模型自称完成（该轮无工具调用）时先不收工，而是往**同一条对话**追加一条 user
+    // 要求它对照「期望产出」自检。判据文本只构一次（只依赖 `expected_output`）。
+    let verify_prompt = prompt::build_verify_prompt(input.expected_output);
+    // 已发出的核对指令条数（进记录），上限 = `cfg.verify_attempts`。
+    let mut verify_sent = 0usize;
+    // 待核对的候选产出（核对通过时作为兜底产出）。
+    let mut pending_output: Option<String> = None;
+    // 是否正处在「已发核对指令、等模型给结论」的状态。
+    let mut awaiting_verify = false;
+    // 最近一次**发出核对指令**时的 `tool_call_count`。
+    //
+    // 用来区分「核对轮的正文是修复后的新产出」还是「只是评论」：若自上次发指令以来
+    // 又执行过工具，说明模型刚动手修过，它这一轮（哪怕没写标记）更像是在提交新产出 ——
+    // 不能退回被否决的旧产出。
+    let mut tools_at_verify = 0usize;
+    // 核对结论（`None` = 本步未核对）。
+    let mut verified: Option<bool> = None;
+
     'step: loop {
         if is_cancelled(cancel) {
             tracing::info!(step = input.index, round = rounds, "收到取消信号，中止该步");
@@ -274,7 +293,7 @@ async fn run_step_with_prompt(
         // 同一条 `request`：`messages` 一字未动，工具已经执行、结果已回灌 ——
         // 所以重发**不会重复执行工具**，只是让模型把这一轮的话重新说出来。
         let mut retries_this_round = 0usize;
-        let (message, tool_calls) = loop {
+        let (message, tool_calls, converged_answer) = loop {
             // 超时、超时重试、取消即时 都在 `request_llm` 里（见其文档）。
             let response = match request_llm(ai, &request, cfg, cancel, input.index, rounds).await {
                 Ok(response) => response,
@@ -366,19 +385,118 @@ async fn run_step_with_prompt(
                     });
                     break 'step;
                 }
-                tracing::info!(
-                    step = input.index,
-                    rounds,
-                    output_chars = answer.chars().count(),
-                    "步骤产出完成（无工具调用）"
-                );
-                output = Some(answer);
-                break 'step;
+                // 收敛：正文就是候选产出。**不在这里收工** —— 交给外层裁决：
+                // 可能要先做一轮「收敛核对」（见下方），也可能直接收（未开启核对时与
+                // 改造前逐字一致）。
+                break (message, Vec::new(), Some(answer));
             }
 
             // 本轮拿到了工具调用 → 结束重发内层，交给外层执行工具
-            break (message, tool_calls);
+            break (message, tool_calls, None);
         };
+
+        // ── 收敛核对 ──
+        // `converged_answer = Some(_)` 意味着模型这一轮**没要工具** = 它自称完成。
+        //   (a) 这一轮的正文就是核对结论 → 通过则收工；未通过则继续循环（可接着调工具修）；
+        //   (b) 首次收敛 → 发出核对指令，本轮不收工；
+        //   (c) 未开启核对 / 已达轮数上限 → 与改造前行为一致。
+        if let Some(answer) = converged_answer {
+            let want_verify = cfg.verify_attempts > 0
+                && (!cfg.verify_only_after_tools || tool_call_count > 0);
+
+            if awaiting_verify {
+                // (a) 这一轮的正文是核对结论。结论标记缺失（`None`）也**不误杀** ——
+                // 产出本来已经拿到，不能因为模型没写标记就把整步判死（见 `verify_verdict`）。
+                let verdict = verify_verdict(&answer);
+                if verdict != Some(false) {
+                    let rest = strip_verify_marker(&answer);
+                    let tools_since_verify = tool_call_count > tools_at_verify;
+                    // 「这一轮的正文算不算新的产出」：
+                    // - 明确通过（`Some(true)`）→ 算。提示词要求它「原样重述最终产出」，
+                    //   模型可能在这一轮做了修正。
+                    // - 没守格式（`None`）但**核对之后又动过工具** → 算。模型刚修完，
+                    //   这一轮（不带标记）就是修复后的产出，不能退回被否决的旧产出。
+                    // - 没守格式且没有新动作（只冒了一句评论，如「我又看了一遍，没问题」）
+                    //   → 不算，退回被核对的那份候选产出。
+                    let use_rest = match verdict {
+                        Some(true) => !rest.trim().is_empty(),
+                        _ => tools_since_verify && !rest.trim().is_empty(),
+                    };
+                    if use_rest {
+                        pending_output = Some(rest);
+                    } else {
+                        tracing::warn!(
+                            step = input.index,
+                            rounds,
+                            "核对轮未给出可解析的结论标记，产出退回被核对的那一份"
+                        );
+                    }
+                    output = pending_output.take();
+                    // 结论如实入记录：`Some(true)` = 明确通过；`None` = 没守格式
+                    //（「没结论」与「没核对」都记 `None`，配合 `verify_attempts` 可区分）。
+                    verified = verdict;
+                    tracing::info!(
+                        step = input.index,
+                        rounds,
+                        verify_attempts = verify_sent,
+                        output_chars = output.as_deref().map(|text| text.chars().count()).unwrap_or(0),
+                        "核对通过，步骤产出完成"
+                    );
+                    break;
+                }
+                // 自称未通过：它只说了还缺什么却没动手，或确实没修好。
+                if verify_sent >= cfg.verify_attempts || rounds >= cfg.max_rounds_per_step {
+                    verified = Some(false);
+                    // ⚠️ 刻意**不设** `output`：`status` 的判据是「error 为空且有产出」
+                    //（见下方），留下产出会把这步算成 Done，后续步骤就会拿着未达标的
+                    // 数据继续跑 —— 这正是引入核对要拦的情况。
+                    error = Some(format!(
+                        "产出未达成「期望产出」（已核对 {verify_sent} 次）"
+                    ));
+                    tracing::warn!(
+                        step = input.index,
+                        rounds,
+                        verify_attempts = verify_sent,
+                        "核对已用尽仍未达成期望产出，该步失败"
+                    );
+                    break;
+                }
+                // 还有配额：保留它的说明，把核对要求再摆一次到眼前。
+                messages.push(message);
+                messages.push(text_message(MessageRole::User, &verify_prompt));
+                verify_sent += 1;
+                tools_at_verify = tool_call_count;
+                continue;
+            }
+
+            if want_verify && rounds < cfg.max_rounds_per_step {
+                // (b) 首次收敛：把候选产出那条 assistant 消息也 push 进去
+                //（原路径直接 break，从没 push 过它），再追加核对要求。
+                verify_sent += 1;
+                pending_output = Some(answer);
+                messages.push(message);
+                messages.push(text_message(MessageRole::User, &verify_prompt));
+                awaiting_verify = true;
+                tools_at_verify = tool_call_count;
+                tracing::info!(
+                    step = input.index,
+                    rounds,
+                    verify_attempts = verify_sent,
+                    "模型自称完成 → 追加收敛核对"
+                );
+                continue;
+            }
+
+            // (c) 未开启核对（或已达轮数上限）→ 原行为。
+            tracing::info!(
+                step = input.index,
+                rounds,
+                output_chars = answer.chars().count(),
+                "步骤产出完成（无工具调用）"
+            );
+            output = Some(answer);
+            break;
+        }
 
         // 已达轮数上限：不再执行工具，直接判失败（避免无界循环）
         if rounds >= cfg.max_rounds_per_step {
@@ -569,6 +687,8 @@ async fn run_step_with_prompt(
             output_summary,
             output: record_output,
             output_truncated,
+            verify_attempts: verify_sent,
+            verified,
             // 落盘由执行器在拿到产出后决定（它才知道 cache_dir 与阈值）
             output_file: None,
             error,
@@ -586,8 +706,8 @@ mod render;
 // `use super::*` 也靠它拿到（私有 `use` 传不到子模块）。
 pub(crate) use llm::{is_cancelled, request_llm};
 pub(crate) use render::{
-    content_text, describe_arguments, describe_tool_args, parse_arguments, summarize, text_message,
-    tool_content, tool_message, truncate_chars,
+    content_text, describe_arguments, describe_tool_args, parse_arguments, strip_verify_marker,
+    summarize, text_message, tool_content, tool_message, truncate_chars, verify_verdict,
 };
 
 #[cfg(test)]

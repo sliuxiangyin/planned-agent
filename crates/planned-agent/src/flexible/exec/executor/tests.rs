@@ -605,7 +605,7 @@
         let cfg = ExecutorConfig {
             llm_timeout: Some(Duration::from_millis(30)),
             llm_timeout_retries: 1,
-            ..ExecutorConfig::default()
+            ..base_cfg()
         };
 
         let report = executor_any(ai.clone(), cfg)
@@ -626,7 +626,7 @@
         let cfg = ExecutorConfig {
             llm_timeout: Some(Duration::from_millis(20)),
             llm_timeout_retries: 1,
-            ..ExecutorConfig::default()
+            ..base_cfg()
         };
 
         let report = tokio::time::timeout(
@@ -641,6 +641,17 @@
         let error = report.steps[0].error.as_deref().unwrap_or_default();
         assert!(error.contains("超时"), "错误应说明超时: {error}");
         assert!(error.contains("已尝试 2 次"), "错误应体现重试次数: {error}");
+    }
+
+    /// 执行器层测试基线：**关闭收敛核对**。
+    ///
+    /// 本文件的用例关心的是落盘 / 超时 / 整理步，核对只会多出一次全上下文请求；
+    /// 核对路径由 `exec/step/tests.rs` 的 `verify_*` 系列用例专门验证。
+    fn base_cfg() -> ExecutorConfig {
+        ExecutorConfig {
+            verify_attempts: 0,
+            ..ExecutorConfig::default()
+        }
     }
 
     /// 每个用例一个独立临时目录（并行用例互不干扰）。
@@ -670,7 +681,7 @@
             ai.clone(),
             ExecutorConfig {
                 cache_dir: cache_dir.clone(),
-                ..ExecutorConfig::default()
+                ..base_cfg()
             },
         )
         .run(&template, &params, None, &sink, None)
@@ -729,7 +740,7 @@
             ai.clone(),
             ExecutorConfig {
                 cache_dir: blocker.clone(),
-                ..ExecutorConfig::default()
+                ..base_cfg()
             },
         )
         .run(&template, &params, None, &sink, None)
@@ -760,7 +771,7 @@
         let cfg = ExecutorConfig {
             cache_dir: cache_dir.clone(),
             spill_threshold_chars: 100,
-            ..ExecutorConfig::default()
+            ..base_cfg()
         };
         let template = two_step_template();
         let params = PlanRunParams::from_template(&template);
@@ -817,7 +828,7 @@
             ai.clone(),
             ExecutorConfig {
                 cache_dir: cache_dir.clone(),
-                ..ExecutorConfig::default()
+                ..base_cfg()
             },
         )
         .run(&template, &params, None, &sink, None)

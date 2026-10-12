@@ -13,9 +13,12 @@
 
     const MAX_ROUNDS: usize = 5;
 
+    /// 测试基线：**关闭收敛核对** —— 既有用例的脚本按「轮次」写死，开启核对会多出
+    /// 一次请求；核对路径本身由 `verify_*` 系列用例显式开启后验证。
     fn cfg(max_rounds_per_step: usize) -> ExecutorConfig {
         ExecutorConfig {
             max_rounds_per_step,
+            verify_attempts: 0,
             ..Default::default()
         }
     }
@@ -319,7 +322,7 @@
             &ExecutorConfig {
                 max_rounds_per_step: MAX_ROUNDS,
                 cache_dir: cache_dir.clone(),
-                ..Default::default()
+                ..cfg(MAX_ROUNDS)
             },
             &sink,
             None,
@@ -791,7 +794,7 @@
         ExecutorConfig {
             max_rounds_per_step,
             cache_dir,
-            ..Default::default()
+            ..cfg(max_rounds_per_step)
         }
     }
 
@@ -1127,4 +1130,251 @@
         );
 
         let _ = std::fs::remove_dir_all(&cache_dir);
+    }
+
+    // ──────── 收敛核对（`ExecutorConfig::verify_attempts`）────────
+    //
+    // 关口的位置：`run_step_with_prompt` 里「模型这一轮没要工具」= 它自称完成。
+    // 默认不立即收工，而是往**同一条对话**追加一条 user 要求它对照「期望产出」自检；
+    // 自检不通过就继续循环（模型可接着调工具去修），核对次数用尽仍不通过则该步失败。
+
+    /// 开启核对的配置：`verify_only_after_tools = false`，让**没有工具调用**的步骤也能被核对
+    /// （生产默认是 `true` —— 那条路径由 `verify_skipped_for_step_without_tool_calls_by_default` 覆盖）。
+    fn cfg_verify(attempts: usize) -> ExecutorConfig {
+        ExecutorConfig {
+            verify_attempts: attempts,
+            verify_only_after_tools: false,
+            ..cfg(MAX_ROUNDS)
+        }
+    }
+
+    /// 核对用例的公共样板：单步、无依赖、无工具表。
+    async fn run_plain(
+        ai: &Arc<FakeAiClient>,
+        registry: &Arc<ToolRegistry>,
+        config: &ExecutorConfig,
+        sink: &RecordingSink,
+    ) -> StepRunResult {
+        let step_def = step("#E1");
+        run_step(
+            prompt::STEP_SYSTEM_PROMPT,
+            StepInput {
+                step: &step_def,
+                intent: "做事",
+                expected_output: "做完",
+                prior: &[],
+                tools: &[],
+                index: 1,
+                run_dir: "",
+            },
+            &(ai.clone() as Arc<dyn AiClient>),
+            registry,
+            config,
+            sink,
+            None,
+        )
+        .await
+    }
+
+    /// 核对通过：产出取核对轮「原样重述」的那一份，结论标记必须被剥离（不得污染下游）。
+    #[tokio::test]
+    async fn verify_pass_strips_marker_and_keeps_output() {
+        let ai = FakeAiClient::new(vec![
+            text_response("产出 A", 10, 5),
+            text_response("核对通过\n产出 A", 20, 5),
+        ]);
+        let (registry, _tool) = registry_with("noop", json!("x"), false);
+        let sink = RecordingSink::default();
+
+        let result = run_plain(&ai, &registry, &cfg_verify(1), &sink).await;
+
+        assert_eq!(result.record.status, StepStatus::Done);
+        assert_eq!(
+            result.output.as_deref(),
+            Some("产出 A"),
+            "结论标记不得留在产出里"
+        );
+        assert_eq!(result.record.verify_attempts, 1);
+        assert_eq!(result.record.verified, Some(true));
+        assert_eq!(result.record.rounds, 2, "核对轮占 rounds");
+        assert_eq!(
+            result.record.call_usages.len(),
+            result.record.rounds + result.record.llm_retries
+        );
+
+        // 第二条请求是在**同一条对话**上追加的：候选产出仍在，末尾多了核对要求。
+        let requests = ai.requests();
+        assert_eq!(requests.len(), 2);
+        let second = serde_json::to_string(&requests[1].messages).unwrap();
+        assert!(second.contains("产出 A"), "候选产出要留在上下文里：{second}");
+        assert!(second.contains("收敛核对"), "要追加核对要求：{second}");
+    }
+
+    /// 核对未通过 → 不收敛，继续循环（模型接着调工具修）→ 再次核对通过才收工。
+    #[tokio::test]
+    async fn verify_fail_then_fix_converges() {
+        let ai = FakeAiClient::new(vec![
+            text_response("半成品", 10, 5),
+            text_response("核对未通过：还缺 X", 20, 5),
+            tool_response("call-1", "read", json!({"path": "a.txt"}), 30, 5),
+            text_response("核对通过\n补完了", 40, 5),
+        ]);
+        let (registry, tool) = registry_with("read", json!("file body"), false);
+        let sink = RecordingSink::default();
+
+        let result = run_plain(&ai, &registry, &cfg_verify(2), &sink).await;
+
+        assert_eq!(result.record.status, StepStatus::Done);
+        assert_eq!(result.output.as_deref(), Some("补完了"));
+        assert_eq!(result.record.verify_attempts, 2, "未通过会再发一次核对");
+        assert_eq!(result.record.verified, Some(true));
+        assert_eq!(result.record.tool_calls, 1, "模型确实动手修了");
+        assert_eq!(result.record.rounds, 4);
+        assert_eq!(tool.calls.lock().unwrap().len(), 1, "工具不该被重复执行");
+    }
+
+    /// 核对用尽仍未达成 → 该步 `Failed`，且**不留产出**（否则下游会拿着未达标的数据继续跑，
+    /// 这正是引入核对要拦的情况）。
+    #[tokio::test]
+    async fn verify_exhausted_marks_step_failed() {
+        let ai = FakeAiClient::new(vec![
+            text_response("产出 A", 10, 5),
+            text_response("核对未通过：缺 X", 20, 5),
+        ]);
+        let (registry, _tool) = registry_with("noop", json!("x"), false);
+        let sink = RecordingSink::default();
+
+        let result = run_plain(&ai, &registry, &cfg_verify(1), &sink).await;
+
+        assert_eq!(result.record.status, StepStatus::Failed);
+        assert!(result.output.is_none(), "未达成的产出不得进 store");
+        assert_eq!(result.record.verified, Some(false));
+        assert_eq!(result.record.verify_attempts, 1);
+        let error = result.record.error.as_deref().unwrap_or_default();
+        assert!(error.contains("期望产出"), "错误应说明哪条判据没过：{error}");
+        assert!(error.contains("已核对 1 次"), "错误应体现核对次数：{error}");
+    }
+
+    /// 关闭核对（`verify_attempts = 0`）时与改造前逐字等价：一次请求就收工。
+    #[tokio::test]
+    async fn verify_disabled_matches_legacy_behavior() {
+        let ai = FakeAiClient::new(vec![text_response("完成", 10, 5)]);
+        let (registry, _tool) = registry_with("noop", json!("x"), false);
+        let sink = RecordingSink::default();
+
+        let result = run_plain(&ai, &registry, &cfg(MAX_ROUNDS), &sink).await;
+
+        assert_eq!(result.record.status, StepStatus::Done);
+        assert_eq!(result.output.as_deref(), Some("完成"));
+        assert_eq!(result.record.verify_attempts, 0);
+        assert_eq!(result.record.verified, None);
+        assert_eq!(ai.requests().len(), 1);
+    }
+
+    /// 生产默认（`verify_only_after_tools = true`）：**没调过工具**的纯文本步骤不核对 ——
+    /// 这类步骤没有外部副作用、误收敛概率低，省掉一次全上下文请求。
+    #[tokio::test]
+    async fn verify_skipped_for_step_without_tool_calls_by_default() {
+        let ai = FakeAiClient::new(vec![text_response("完成", 10, 5)]);
+        let (registry, _tool) = registry_with("noop", json!("x"), false);
+        let sink = RecordingSink::default();
+        let config = ExecutorConfig {
+            verify_attempts: 1,
+            verify_only_after_tools: true,
+            ..cfg(MAX_ROUNDS)
+        };
+
+        let result = run_plain(&ai, &registry, &config, &sink).await;
+
+        assert_eq!(result.record.status, StepStatus::Done);
+        assert_eq!(result.record.verify_attempts, 0, "没动过工具就不核对");
+        assert_eq!(ai.requests().len(), 1, "不该多发请求");
+    }
+
+    /// 模型没守标记格式（只回了一句评论）→ 不误杀（仍 `Done`），但**产出退回被核对的那份**
+    /// 候选产出 —— 核对轮的评论（「我又看了一遍，没问题」这类话）不该成为下游产出。
+    #[tokio::test]
+    async fn verify_missing_marker_falls_back_to_candidate_output() {
+        let ai = FakeAiClient::new(vec![
+            text_response("产出 A", 10, 5),
+            text_response("我又看了一遍，没问题。", 20, 5),
+        ]);
+        let (registry, _tool) = registry_with("noop", json!("x"), false);
+        let sink = RecordingSink::default();
+
+        let result = run_plain(&ai, &registry, &cfg_verify(1), &sink).await;
+
+        assert_eq!(result.record.status, StepStatus::Done, "没守格式不该判死");
+        assert_eq!(
+            result.output.as_deref(),
+            Some("产出 A"),
+            "评论不是产出，应退回候选产出"
+        );
+        assert_eq!(result.record.verified, None, "没结论就不谎报「通过」");
+        assert_eq!(result.record.verify_attempts, 1);
+    }
+
+    /// 核对未通过 → 模型动手修 → **直接提交修复后的产出（不带标记）**：必须交付**新**产出，
+    /// 不能退回已被否决的旧产出（否则下游拿到的正是它自己刚判定没达标的数据）。
+    #[tokio::test]
+    async fn verify_fixed_output_without_marker_is_delivered() {
+        let ai = FakeAiClient::new(vec![
+            text_response("半成品 v1", 10, 5),
+            text_response("核对未通过：还缺 X", 20, 5),
+            tool_response("call-1", "read", json!({"path": "a.txt"}), 30, 5),
+            text_response("补完的 v2", 40, 5),
+        ]);
+        let (registry, _tool) = registry_with("read", json!("body"), false);
+        let sink = RecordingSink::default();
+
+        let result = run_plain(&ai, &registry, &cfg_verify(2), &sink).await;
+
+        assert_eq!(result.record.status, StepStatus::Done);
+        assert_eq!(
+            result.output.as_deref(),
+            Some("补完的 v2"),
+            "必须交付修复后的产出，而不是被否决的 v1"
+        );
+        assert_eq!(result.record.verified, None, "没标记就不谎报「通过」");
+        assert_eq!(result.record.tool_calls, 1);
+    }
+
+    /// 结论标记的判据是**行首**：产出正文里出现这些词不该被当成结论（也不会被删掉）。
+    #[test]
+    fn verify_marker_requires_line_start() {
+        assert_eq!(super::verify_verdict("结论：核对通过即成功。"), None);
+        assert_eq!(super::verify_verdict(" 核对通过\n正文"), Some(true));
+        assert_eq!(
+            super::verify_verdict("好的，核对通过\n正文"),
+            None,
+            "带前缀的行按「没守格式」保守处理"
+        );
+        assert_eq!(
+            super::strip_verify_marker("核对通过\n正文里提到核对通过这个词"),
+            "正文里提到核对通过这个词"
+        );
+    }
+
+    /// 核对轮撞上 provider 空响应 → 走既有的「同轮重发」线：复用同一条请求，
+    /// **不重复执行工具、不占轮数**（两条线各自独立，互不干扰）。
+    #[tokio::test]
+    async fn verify_round_empty_answer_is_retried_in_place() {
+        let ai = FakeAiClient::new(vec![
+            text_response("产出 A", 10, 5),
+            text_response("", 20, 5),
+            text_response("核对通过\n产出 A", 30, 5),
+        ]);
+        let (registry, _tool) = registry_with("noop", json!("x"), false);
+        let sink = RecordingSink::default();
+
+        let result = run_plain(&ai, &registry, &cfg_verify(1), &sink).await;
+
+        assert_eq!(result.record.status, StepStatus::Done);
+        assert_eq!(result.output.as_deref(), Some("产出 A"));
+        assert_eq!(result.record.llm_retries, 1, "空回答重发不占轮数");
+        assert_eq!(result.record.rounds, 2);
+        assert_eq!(
+            result.record.call_usages.len(),
+            result.record.rounds + result.record.llm_retries
+        );
     }

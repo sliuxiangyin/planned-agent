@@ -108,6 +108,19 @@ pub struct StepRunRecord {
     /// `builtin_read_file_lines` 分批读取。见 `docs/planned-agent/flexible-step-output-spill.md`。
     #[serde(default)]
     pub output_file: Option<String>,
+    /// 该步发生过的「**收敛核对**」次数（`0` = 从未核对）。
+    ///
+    /// 核对轮本身是一条真实的新消息、**占** `rounds`；这里单独记一份次数，是为了在报告里
+    /// 一眼看出「这步核对了几轮」。上限由 `ExecutorConfig::verify_attempts` 控制。
+    #[serde(default)]
+    pub verify_attempts: usize,
+    /// 收敛核对的结论：
+    /// - `None` = 拿不到可解析的结论 —— 未开启核对 / 本步未触发，**或**核对轮没给标记
+    ///   （后者产出会退回被核对的那份候选产出；配合 `verify_attempts > 0` 可与「未核对」区分）；
+    /// - `Some(true)` = 明确通过；
+    /// - `Some(false)` = 用尽仍未达成（该步同时为 `Failed`）。
+    #[serde(default)]
+    pub verified: Option<bool>,
     /// 失败原因。
     pub error: Option<String>,
 }
@@ -183,6 +196,8 @@ mod tests {
             output: None,
             output_file: None,
             output_truncated: false,
+            verify_attempts: 0,
+            verified: None,
             error: None,
         }
     }

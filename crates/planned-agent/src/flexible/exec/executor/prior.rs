@@ -87,6 +87,8 @@ pub(super) fn placeholder_record(
         output: None,
         output_truncated: false,
         output_file: None,
+        verify_attempts: 0,
+        verified: None,
         error: error.map(str::to_string),
     }
 }

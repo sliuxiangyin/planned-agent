@@ -18,4 +18,4 @@ mod task;
 
 pub(crate) use skills::category_rule_section;
 pub(crate) use system::{step_system_prompt, OUTPUT_RESOLVE_SYSTEM_PROMPT, STEP_SYSTEM_PROMPT};
-pub(crate) use task::{build_output_contract_text, build_step_task};
+pub(crate) use task::{build_output_contract_text, build_step_task, build_verify_prompt};

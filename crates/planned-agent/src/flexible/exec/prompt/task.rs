@@ -29,6 +29,33 @@ pub(crate) fn build_step_task(
     text
 }
 
+/// 组装「**收敛核对**」轮追加的 user 文本。
+///
+/// 模型上一条回答已经进入对话（它就是候选产出），这里只做一件事：**先别收工**，
+/// 对照「期望产出」逐条自检。两条措辞纪律（与仓库其它提示词一致）：
+///
+/// - **只写通用机制与通用判据**：不预设任何具体业务形态 / 字段名 / 文件格式，避免过拟合
+///   到某次会话的个案；
+/// - **给可解析的结论标记**（`核对通过` / `核对未通过` 必须落在第一行）：执行器按首行
+///   判定（`verify_verdict`），所以标记是契约的一部分，不是修辞。
+///
+/// 期望产出在这里**重复一次**：它原本只在首条 user（`build_step_task`）里出现过，
+/// 多轮工具之后可能已被淹没；核对的判据必须就在眼前，重复的代价可以忽略。
+pub(crate) fn build_verify_prompt(expected_output: &str) -> String {
+    let mut text = String::new();
+    text.push_str("## 收敛核对（先不要收工）\n");
+    text.push_str("你上面的回答已被当作本次产出的候选。请对照「期望产出」逐条自检。\n");
+    text.push_str("\n### 期望产出\n");
+    text.push_str(expected_output);
+    text.push_str("\n\n### 自检要求\n");
+    text.push_str("- 逐条列出期望产出里的每一项，并指出**产出中的哪一段原文**满足了它；");
+    text.push_str("不要只写「已满足」。\n");
+    text.push_str("- 有任何一项未满足、或你给不出原文依据 → 第一行写 `核对未通过`，说明还缺什么，");
+    text.push_str("然后**继续调用工具**把它做完。\n");
+    text.push_str("- 全部满足 → 第一行写 `核对通过`，然后**原样重述**最终产出（下游只认这一段）。\n");
+    text
+}
+
 /// 把输出契约写成给 LLM 的说明文本（`${name}` 原样保留，由调用方渲染成实际值）。
 pub(crate) fn build_output_contract_text(schema: &OutputSchema) -> String {
     let mut text = String::new();
@@ -106,6 +133,30 @@ mod tests {
         assert!(task.contains("## 前序步骤结果"));
         assert!(task.contains("### #E1\n索引=7"));
         assert!(task.contains("### #E2\n已写入"));
+    }
+
+    #[test]
+    fn verify_prompt_carries_marker_contract_and_expected_output() {
+        let text = build_verify_prompt("文件末尾新增一行即视为成功");
+        // 判据必须在眼前（重复一次期望产出）
+        assert!(text.contains("### 期望产出\n文件末尾新增一行即视为成功"));
+        // 两个可解析标记是契约的一部分
+        assert!(text.contains("核对通过"), "{text}");
+        assert!(text.contains("核对未通过"), "{text}");
+        // 未通过时必须真的动手，而不是只报告
+        assert!(text.contains("继续调用工具"), "{text}");
+    }
+
+    #[test]
+    fn verify_prompt_has_no_case_specific_wording() {
+        let text = build_verify_prompt("任意判据");
+        // 只写通用机制：不出现任何具体业务个案（文件名 / 字段名 / 格式名）
+        for banned in ["csv", "json", ".txt", "excel", "标题", "表头"] {
+            assert!(
+                !text.to_lowercase().contains(banned),
+                "核对提示词不应预设具体形态：{banned} in {text}"
+            );
+        }
     }
 
     #[test]
