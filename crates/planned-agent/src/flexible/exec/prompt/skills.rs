@@ -6,10 +6,10 @@
 //! 内容纪律（见设计稿 `docs/planned-agent/flexible-plan-category.md` §5.2）：只写该技能的
 //! **作业纪律与最常见的坑**，**不写具体工具用法**（那属工具 `description`）、**不写个案**（防过拟合）。
 //!
-//! **已知例外（2026-10-10）**：`BROWSER_RULES` 点名 `builtin_solve_captcha`。原因是三个「能读图片」
-//! 的工具（`builtin_read_media_file` / `builtin_recognize_image` / `builtin_solve_captcha`）描述互不排他
-//! —— 第一个的 description 自称「读取图片」却**不点名**同类，只写通用判据无法消歧，实测模型会依次误选。
-//! 故此处按工具名写死（破 §5.2 第 1 条）。
+//! **已知例外（2026-10-10，2026-10-12 扩展）**：`BROWSER_RULES` 点名 `builtin_solve_captcha` —— 三个「能读图片」
+//! 的工具（`builtin_read_media_file` / `builtin_recognize_image` / `builtin_solve_captcha`）描述互不排他，
+//! 只写通用判据压不住模型的怀疑：实测它拿到结果后仍改用通用读图复核、采信后者（`logs/gui.log.2026-10-12`）。
+//! 故按工具名写死（破 §5.2 第 1 条），并把「结果怎么用」「别刷新图片」一并写进这条。
 
 use super::super::super::plan::category::PlanCategory;
 
@@ -20,7 +20,7 @@ const BROWSER_RULES: &str = "\
 - 采集到的内容先落盘再分析，不要在一次回答里既抓又分析又输出。
 - 需要读入的路径（上传文件、加载脚本）照原位给，不要先搬进产出目录。
 - 涉及登录态 / 分页 / 弹窗时，先确认当前处于目标页面状态再执行下一步。
-- 图像验证码用 `builtin_solve_captcha`（验证码专用，直接拿它的结果去填）；不要改用通用读图或文件读取工具去「看」它。
+- 验证码用 `builtin_solve_captcha`：它的结论就是最终答案，照填；**不要再用其它读图工具复核或旁证**。调用失败 / 读不出（`readable: false`）时才停下报告。识别到填入之间**不要刷新图片**（刷新即作废）。
 - 需要人工介入（扫码、短信，或验证码求解失败）时如实报告并停下，不伪造成功、不跳过。
 ";
 

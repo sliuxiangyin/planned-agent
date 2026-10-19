@@ -175,18 +175,41 @@ fn parse_variant(raw: &str) -> Option<TextVariant> {
 
 // ── 出参：tagged union ──────────────────────────────────────────────────────
 
+/// 出参里那句「结论即终局」的提醒。
+///
+/// v1.2 只把这句话写进 **description**，实测仍被主模型忽略：它看到 `calc` 型答案与自己读图
+/// 不一致时，会改用通用读图工具复核、并采信后者（公式题的正确答案反而被自己的错读覆盖）。
+/// 提醒只有出现在**决策那一刻**（工具返回值本身）才会被重新读到，所以放进出参。
+const NOTE_READABLE: &str = "这是本工具的最终答案，直接使用；不要再用其它读图工具复核";
+const NOTE_UNREADABLE: &str = "本次没读出可用的答案（正常结果）；不要改用其它读图工具去「看」它，如实报告并停下";
+
 /// 组装文本型的出参。
 ///
 /// **题型（`variant`）对调用方可见**（设计稿 §14，v1.2 起）：字符型与计算型的长相差异正是
 /// 主模型「结果看起来不对劲」的来源 —— 见 §14.2。判不出题型时 `variant` 为 `null`（形状恒定）。
+///
+/// `note`（v1.3 起）同样**始终存在**（形状恒定），只是取值随 `readable` 而变 —— 与 `variant` 
+/// 同一套做法：用固定形状携带随结果变化的信息，让模型在拿到结果时就看到该怎么处置它。
 fn tagged_text(value: Option<String>, variant: Option<TextVariant>) -> Value {
     let variant = match variant {
         Some(variant) => Value::String(variant.as_str().to_string()),
         None => Value::Null,
     };
     match value {
-        Some(text) => json!({ "kind": "text", "text": text, "readable": true, "variant": variant }),
-        None => json!({ "kind": "text", "text": Value::Null, "readable": false, "variant": variant }),
+        Some(text) => json!({
+            "kind": "text",
+            "text": text,
+            "readable": true,
+            "variant": variant,
+            "note": NOTE_READABLE,
+        }),
+        None => json!({
+            "kind": "text",
+            "text": Value::Null,
+            "readable": false,
+            "variant": variant,
+            "note": NOTE_UNREADABLE,
+        }),
     }
 }
 
@@ -473,8 +496,9 @@ impl BuiltinToolProvider for CaptchaToolsProvider {
                 description: "求解一张验证码图片并返回结构化结果。类型由 `kind` 指定（当前仅 \
                     \"text\"，可省略）。**用于验证码**；通用读图请用 builtin_recognize_image。\
                     图片必须是本机已存在的图片文件路径，通常来自上一个工具的输出。\
-                    出参里的 variant 标明结果来源：char 是识别出的字符，calc 是算式求解出的完整答案\
-                    （直接使用，无需再读图复核）。"
+                    **出参即最终答案**：`readable: true` 时 `text` 就是要填入的值，直接使用，\
+                    不要再用别的读图工具复核；`readable: false` 时是没读出来（正常结果），\
+                    如实报告并停下。`variant` 标明来源：char 是识别出的字符，calc 是算式求出的完整答案。"
                     .to_string(),
                 input_schema: json!({
                     "type": "object",
@@ -1063,7 +1087,7 @@ mod tests {
         assert!(!result.is_error, "求解成功不应是 is_error：{result:?}");
         assert_eq!(
             result.content,
-            json!({ "kind": "text", "text": "4F7K", "readable": true, "variant": "char" })
+            json!({ "kind": "text", "text": "4F7K", "readable": true, "variant": "char", "note": NOTE_READABLE })
         );
 
         // 文本型走两阶段：阶段一用分类提示词、阶段二用该题型的固化提示词，都是单张图
@@ -1090,8 +1114,29 @@ mod tests {
         // 题型已判出（char），只是没读出 —— `variant` 照给（只有判不出题型时才是 null，§14.3）
         assert_eq!(
             result.content,
-            json!({ "kind": "text", "text": Value::Null, "readable": false, "variant": "char" })
+            json!({ "kind": "text", "text": Value::Null, "readable": false, "variant": "char", "note": NOTE_UNREADABLE })
         );
+    }
+
+    /// `note` 是「拿到结果时该怎么处置」的提醒，两种结论必须给不同的话（v1.3）。
+    ///
+    /// 锁住它：v1.2 把同样意思的话只写在 description 里，实测被主模型忽略 —— 提醒必须在**返回值**里。
+    #[tokio::test]
+    async fn note_differs_by_readability() {
+        let dir = tempfile::tempdir().expect("临时目录");
+
+        let (ok_provider, _) = provider_ok(dir.path(), &["char", "4F7K"]);
+        let ok = run(&ok_provider, json!({ "path": write_png(dir.path(), "ok.png") })).await;
+        assert_eq!(ok.content["note"], NOTE_READABLE);
+        assert!(
+            NOTE_READABLE.contains("不要再用其它读图工具复核"),
+            "可读时要点名「别复核」：{NOTE_READABLE}"
+        );
+
+        let (bad_provider, _) = provider_ok(dir.path(), &["char", "UNREADABLE"]);
+        let bad = run(&bad_provider, json!({ "path": write_png(dir.path(), "bad.png") })).await;
+        assert_eq!(bad.content["note"], NOTE_UNREADABLE);
+        assert_ne!(NOTE_READABLE, NOTE_UNREADABLE, "两种结论不能同一句话");
     }
 
     #[tokio::test]
@@ -1212,7 +1257,7 @@ mod tests {
         // 出参与字符型**同形**（对外只有一个 kind），差别只在 `variant`（v1.2，§14）
         assert_eq!(
             result.content,
-            json!({ "kind": "text", "text": "3", "readable": true, "variant": "calc" })
+            json!({ "kind": "text", "text": "3", "readable": true, "variant": "calc", "note": NOTE_READABLE })
         );
     }
 
@@ -1231,7 +1276,7 @@ mod tests {
         );
         assert_eq!(
             result.content,
-            json!({ "kind": "text", "text": Value::Null, "readable": false, "variant": "calc" })
+            json!({ "kind": "text", "text": Value::Null, "readable": false, "variant": "calc", "note": NOTE_UNREADABLE })
         );
     }
 
@@ -1249,7 +1294,7 @@ mod tests {
         // 判不出题型 → `variant` 为 null（形状恒定的第三态，§14.3 的 P2）
         assert_eq!(
             result.content,
-            json!({ "kind": "text", "text": Value::Null, "readable": false, "variant": Value::Null })
+            json!({ "kind": "text", "text": Value::Null, "readable": false, "variant": Value::Null, "note": NOTE_UNREADABLE })
         );
         assert_eq!(backend.calls(), 1, "判不出题型就不该进阶段二");
     }
@@ -1280,7 +1325,7 @@ mod tests {
         assert!(!result.is_error, "{result:?}");
         assert_eq!(
             result.content,
-            json!({ "kind": "text", "text": "4F7K", "readable": true, "variant": "char" })
+            json!({ "kind": "text", "text": "4F7K", "readable": true, "variant": "char", "note": NOTE_READABLE })
         );
     }
 
